@@ -2,7 +2,7 @@
 #
 # Copy to ax25ircd.toml and edit. Check it with:  ax25ircd --check -c ax25ircd.toml
 #
-# READ docs/REGULATORY.md BEFORE ENABLING THE RADIO SECTION. Running this
+# READ docs/regulatory.md BEFORE ENABLING THE RADIO SECTION. Running this
 # server with radio.enabled = true makes your station transmit automatically,
 # under your licence, carrying other people's traffic.
 

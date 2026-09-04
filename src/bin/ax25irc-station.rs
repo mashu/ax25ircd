@@ -1,7 +1,7 @@
 //! `ax25irc-station` - the client side of the gateway, for an operator with a
 //! radio and a TNC.
 //!
-//! It speaks AIRC/1 (see `docs/PROTOCOL.md`) over KISS and presents a plain
+//! It speaks AIRC/1 (see `docs/protocol.md`) over KISS and presents a plain
 //! line-oriented interface, so it works over ssh, on a Pi with no screen, or
 //! piped into anything else.
 //!

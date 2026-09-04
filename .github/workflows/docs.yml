@@ -1,0 +1,62 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-docs.txt
+      - name: Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Fetch previous versions
+        run: git fetch origin gh-pages --depth=1 || true
+      - name: Publish version
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            mike deploy --push --update-aliases --alias-type copy "${GITHUB_REF_NAME}" stable
+            mike set-default --push stable
+          else
+            mike deploy --push --update-aliases --alias-type copy dev
+            if ! mike list | grep -q stable; then
+              mike set-default --push dev
+            fi
+          fi
+      - name: Snapshot gh-pages
+        run: |
+          git fetch origin gh-pages:refs/remotes/origin/gh-pages
+          mkdir public
+          git archive origin/gh-pages | tar -x -C public
+          test -f public/versions.json
+          test -f public/.nojekyll
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - id: deployment
+        uses: actions/deploy-pages@v4

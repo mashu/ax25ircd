@@ -4,7 +4,7 @@
 //!
 //! 1. **It must be legal.** Nothing here obscures meaning: the payload is
 //!    UTF-8 text with a small, fully documented binary header. No compression,
-//!    no ciphers. See `docs/REGULATORY.md`.
+//!    no ciphers. See `docs/regulatory.md`.
 //! 2. **It must be small.** At 1200 baud, every byte costs ~8.3 ms of shared
 //!    channel time. IRC's wire format ("PRIVMSG #channel :text\r\n" plus a
 //!    `nick!user@host` prefix) wastes 40-60 bytes per message; AIRC spends 8.

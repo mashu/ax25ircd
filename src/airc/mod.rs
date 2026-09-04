@@ -1,5 +1,5 @@
 //! AIRC/1: the compact, plain-text application protocol spoken over the air.
-//! See `docs/PROTOCOL.md` for the normative description.
+//! See `docs/protocol.md` for the normative description.
 
 pub mod frame;
 pub mod session;

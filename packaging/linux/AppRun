@@ -1,0 +1,62 @@
+#!/bin/sh
+# AppImage entry: default is the gateway. Subcommands select the other binaries.
+#   ./ax25ircd-x86_64.AppImage -c ~/.config/ax25ircd/ax25ircd.toml
+#   ./ax25ircd-x86_64.AppImage station --call SM0ABC-7 --gateway SK0MT-1
+#   ./ax25ircd-x86_64.AppImage kisshub --bind 127.0.0.1:8001
+#
+# If you symlink the AppImage to ax25irc-station or ax25irc-kisshub, argv0
+# selects that binary instead.
+
+set -eu
+
+HERE=$(dirname "$(readlink -f "$0")")
+BIN="$HERE/usr/bin"
+
+wrapper_help() {
+    cat <<'EOF'
+ax25ircd AppImage — IRC server with an AX.25 packet-radio gateway
+
+  ./ax25ircd-*.AppImage [ax25ircd options]
+  ./ax25ircd-*.AppImage station  --call CALL --gateway CALL [options]
+  ./ax25ircd-*.AppImage kisshub  [--bind 127.0.0.1:8001] [--quiet]
+  ./ax25ircd-*.AppImage gateway  [ax25ircd options]
+
+QMX on Debian: https://mashu.github.io/ax25ircd/
+EOF
+}
+
+name=$(basename "${ARGV0:-$0}" .AppImage)
+name=${name%.appimage}
+
+case "$name" in
+    ax25irc-station*) exec "$BIN/ax25irc-station" "$@" ;;
+    ax25irc-kisshub*) exec "$BIN/ax25irc-kisshub" "$@" ;;
+esac
+
+if [ "${1:-}" = "--appimage-help" ] || [ "${1:-}" = "--wrapper-help" ]; then
+    wrapper_help
+    exit 0
+fi
+
+case "${1:-}" in
+    station|ax25irc-station)
+        shift
+        exec "$BIN/ax25irc-station" "$@"
+        ;;
+    kisshub|ax25irc-kisshub)
+        shift
+        exec "$BIN/ax25irc-kisshub" "$@"
+        ;;
+    gateway|ax25ircd)
+        shift
+        exec "$BIN/ax25ircd" "$@"
+        ;;
+    -h|--help)
+        wrapper_help
+        echo
+        exec "$BIN/ax25ircd" --help
+        ;;
+    *)
+        exec "$BIN/ax25ircd" "$@"
+        ;;
+esac

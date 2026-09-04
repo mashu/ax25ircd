@@ -7,6 +7,12 @@
 /ax25ircd.log
 /audit.log
 
+/dist/
+/site
+packaging/linux/.cache/
+lcov.info
+*.profraw
+
 # Editor / OS noise
 .idea/
 .vscode/

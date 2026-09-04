@@ -56,7 +56,7 @@ Consequences that appear throughout the code:
 ### 2.2 Law
 
 Amateur licences almost everywhere impose three rules that a gateway must
-respect. See `docs/REGULATORY.md` for the detail; the design consequences are:
+respect. See [regulatory.md](regulatory.md) for the detail; the design consequences are:
 
 * **No obscured meaning.** No encryption, no compression that is not publicly
   documented, no private codes. This kills the obvious "just run IRC over
@@ -223,7 +223,7 @@ can be smuggled onto the air by waiting.
 ## 8. Operating it
 
 Typical deployment with Direwolf (step-by-step, including QMX:
-`docs/QUICKSTART.md`):
+[quickstart.md](quickstart.md), [qmx.md](qmx.md)):
 
 ```
 [direwolf]  ADEVICE plughw:1,0 / MODEM 1200 / KISSPORT 8001
@@ -261,7 +261,7 @@ ax25irc-station --call SM0ABC-7 --gateway SK0MT-1 --channel '#rf'
 ```
 
 The hub prints every frame in `axlisten` monitor format, which is how the
-sequence-space bug described in `docs/PROTOCOL.md` §3.1 was found: the gateway
+sequence-space bug described in [protocol.md](protocol.md) §3.1 was found: the gateway
 had separate counters for unicast and broadcast, so a station discarded its
 first broadcast as a duplicate of the welcome it had already received.
 

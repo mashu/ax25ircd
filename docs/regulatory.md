@@ -19,7 +19,7 @@ other administrations have an equivalent, and the ITU Radio Regulations
 What the software does:
 
 * AIRC/1 is plain UTF-8 behind a documented 8-octet header. The specification
-  is published in `docs/PROTOCOL.md` precisely so that anyone monitoring the
+  is published in [protocol.md](protocol.md) precisely so that anyone monitoring the
   frequency can decode it.
 * No compression, no encryption, no dictionary coding — even though all three
   would save meaningful airtime.

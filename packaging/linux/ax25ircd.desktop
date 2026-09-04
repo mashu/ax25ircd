@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ax25ircd
+Comment=IRC server with an AX.25 packet-radio gateway
+Exec=ax25ircd
+Icon=ax25ircd
+Terminal=true
+Categories=Network;HamRadio;
+Keywords=irc;ax25;packet;amateur;radio;

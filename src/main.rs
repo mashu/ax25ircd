@@ -29,6 +29,24 @@ async fn main() -> anyhow::Result<()> {
                 println!("ax25ircd {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
+            "--help" | "-h" => {
+                print!(
+                    "\
+ax25ircd {} — IRC server with an AX.25 packet-radio gateway
+
+Usage: ax25ircd [--config path] [--check]
+
+  -c, --config <path>   configuration file (default: ax25ircd.toml)
+      --check           validate the configuration and exit
+  -V, --version         print version
+  -h, --help            this help
+
+QMX on Debian: https://mashu.github.io/ax25ircd/
+",
+                    env!("CARGO_PKG_VERSION")
+                );
+                return Ok(());
+            }
             other => {
                 eprintln!("unknown argument: {other}");
                 std::process::exit(2);

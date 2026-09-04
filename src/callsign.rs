@@ -3,7 +3,7 @@
 //! On the air, identity is not a secret: an AX.25 frame carries the source
 //! callsign in clear text and anyone can transmit anything. We therefore treat
 //! a callsign as a *claim*, not as an authenticated identity. See
-//! `docs/DESIGN.md`, "Trust model".
+//! `docs/design.md`, "Trust model".
 
 use std::fmt;
 use std::str::FromStr;

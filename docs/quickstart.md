@@ -2,7 +2,9 @@
 
 Three ways to run this, in order of how much RF you are willing to emit.
 
-Read `docs/REGULATORY.md` before any path that enables `radio.enabled`.
+Read [regulatory.md](regulatory.md) before any path that enables `radio.enabled`.
+
+Prebuilt binaries: [Install](install.md). QMX on Debian GNU/Linux: [qmx.md](qmx.md).
 
 ## 0. Build
 
@@ -95,83 +97,8 @@ Serial hardware TNCs: `cargo build --release --features serial` and
 
 ## 4. QRP Labs QMX (or QMX+)
 
-The QMX is the radio, not a TNC. One USB-C cable gives a sound card and a CAT
-serial port. Direwolf sits in the middle, same as section 3.
-
-**Do not use Digi mode.** Digi is single-tone FSK (FT8-style). AIRC needs
-AFSK from Direwolf, so the QMX must transmit that as ordinary SSB audio.
-
-### On the QMX
-
-1. USB-C to the gateway machine.
-2. Mode: **SSB**, upper sideband.
-3. IQ mode **off** (Direwolf needs demodulated audio, not I/Q).
-4. SSB TX source = USB from the PC (CAT `SS0;`).
-
-### Devices
-
-```sh
-arecord -l
-ls -l /dev/serial/by-id/
-```
-
-You want the ALSA card named QMX (e.g. `plughw:1,0`) and a serial path like
-`/dev/serial/by-id/usb-QRP_Labs_QMX_Transceiver-if00`.
-
-### Direwolf for HF packet (300 baud)
-
-HF packet is 300 baud, not 1200. `direwolf.conf`:
-
-```
-ADEVICE  plughw:1,0
-ARATE    48000
-MYCALL   SK0MT-1
-CHANNEL  0
-MODEM    300
-PTT      RIG 2057 /dev/serial/by-id/usb-QRP_Labs_QMX_Transceiver-if00
-KISSPORT 8001
-TXDELAY  40
-TXTAIL   30
-```
-
-Hamlib model **2057** is QMX. Older hamlib: Kenwood TS-480, model **2028**,
-same serial device.
-
-```sh
-direwolf -c direwolf.conf
-```
-
-### ax25ircd.toml
-
-```toml
-[radio]
-enabled = true
-callsign = "SK0MT-1"     # your callsign
-paclen = 128
-notice_air_relay = true
-
-[radio.tnc]
-kind = "tcp"
-host = "127.0.0.1"
-port = 8001
-tx_pacing_ms = 2500
-```
-
-Start Direwolf, then ax25ircd. In IRC, `/quote RADIO` should show transmitter
-ON. After a voiced message that actually went out you get
-`Relayed to RF (SK0MT-1)...`.
-
-### QMX as the operator radio (not the gateway)
-
-Same Direwolf config on that machine, then:
-
-```sh
-./target/release/ax25irc-station --call YOURCALL-7 --gateway SK0MT-1 \
-    --channel '#rf' --tnc tcp://127.0.0.1:8001
-```
-
-Pick a frequency that is used for HF packet where you are. Automatic control
-and third-party traffic rules still apply — see `docs/REGULATORY.md`.
+Debian packages, groups, hamlib, 300 baud Direwolf, and first QSO:
+**[QMX on Debian](qmx.md)**. Do not use Digi mode.
 
 ## IRC client cheat sheet
 

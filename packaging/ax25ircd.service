@@ -10,7 +10,7 @@
 
 [Unit]
 Description=AX25IRC gateway (IRC server with AX.25 packet radio bridge)
-Documentation=file:/usr/share/doc/ax25ircd/DESIGN.md
+Documentation=file:/usr/share/doc/ax25ircd/design.md
 After=network-online.target direwolf.service
 Wants=network-online.target
 

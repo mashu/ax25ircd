@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: x86_64
+            appimage: "yes"
+          - target: aarch64-unknown-linux-musl
+            arch: aarch64
+            appimage: "no"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - name: Build (static musl)
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+      - name: Dist
+        run: |
+          chmod +x packaging/linux/build-dist.sh packaging/linux/install.sh packaging/linux/AppRun
+          extra=
+          if [ "${{ matrix.appimage }}" != "yes" ]; then
+            extra=--skip-appimage
+          fi
+          ./packaging/linux/build-dist.sh \
+            --bin-dir "target/${{ matrix.target }}/release" \
+            --arch "${{ matrix.arch }}" \
+            $extra
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum ax25ircd-* > SHA256SUMS-${{ matrix.arch }}.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+
+  publish:
+    needs: linux
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Combine checksums
+        run: |
+          cd dist
+          cat SHA256SUMS-*.txt | sort > SHA256SUMS.txt
+          rm -f SHA256SUMS-*.txt
+          ls -lh
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*
+          body: |
+            Prebuilt GNU/Linux binaries (statically linked musl).
+
+            | File | What |
+            |---|---|
+            | `ax25ircd-x86_64.AppImage` | all three tools in one file; `chmod +x` and run |
+            | `ax25ircd-x86_64.run` | self-extracting installer (`~/.local` or `sudo … --system`) |
+            | `ax25ircd-x86_64-linux.tar.gz` | binaries + `install.sh` |
+            | `ax25ircd-aarch64-linux.tar.gz` / `.run` | 64-bit ARM (Pi, etc.) |
+
+            QMX on Debian: https://mashu.github.io/ax25ircd/stable/qmx/
