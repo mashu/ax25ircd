@@ -13,19 +13,3 @@ An IRC server that is also an AX.25 packet-radio gateway.
    WeeChat ─────┼──►  ax25ircd  ──KISS──►│
     HexChat ─────┘                        └── SM0XYZ-9
 ```
-
-## Install
-
-```sh
-curl -fsSL -o ax25ircd.run \
-  https://github.com/mashu/ax25ircd/releases/latest/download/ax25ircd-x86_64.run
-chmod +x ax25ircd.run && ./ax25ircd.run
-```
-
-**Docs:** [stable](https://mashu.github.io/ax25ircd/stable/) ·
-[dev](https://mashu.github.io/ax25ircd/dev/)
-— [quick start](https://mashu.github.io/ax25ircd/dev/quickstart/) ·
-[QMX on Debian](https://mashu.github.io/ax25ircd/dev/qmx/)
-
-A `v*` tag builds the binaries and freezes that tree as **stable**.
-`main` is **dev**.

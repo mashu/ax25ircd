@@ -22,13 +22,19 @@ jobs:
             arch: aarch64
             appimage: "no"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.13.0
+      - name: Install Zig
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          ZIG_VERSION=0.13.0
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" -o zig.tar.xz
+          tar -xJf zig.tar.xz
+          echo "${{ runner.temp }}/zig-linux-x86_64-${ZIG_VERSION}" >> "$GITHUB_PATH"
+      - run: zig version
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild
@@ -49,7 +55,7 @@ jobs:
         run: |
           cd dist
           sha256sum ax25ircd-* > SHA256SUMS-${{ matrix.arch }}.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
           path: dist/*
@@ -59,8 +65,8 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -70,7 +76,7 @@ jobs:
           cat SHA256SUMS-*.txt | sort > SHA256SUMS.txt
           rm -f SHA256SUMS-*.txt
           ls -lh
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           files: dist/*

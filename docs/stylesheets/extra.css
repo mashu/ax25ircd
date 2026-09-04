@@ -4,9 +4,8 @@
   --md-primary-fg-color: #1a2418;
   --md-primary-fg-color--light: #2e4630;
   --md-primary-fg-color--dark: #0c140e;
-  --md-accent-fg-color: #c4a35a;
-  --md-accent-fg-color--transparent: color-mix(in srgb, #c4a35a 14%, transparent);
-  --md-typeset-a-color: #c4a35a;
+  --md-accent-fg-color: #e8c36a;
+  --md-accent-fg-color--transparent: color-mix(in srgb, #e8c36a 14%, transparent);
 }
 
 [data-md-color-scheme="slate"] {
@@ -17,6 +16,8 @@
   --md-code-bg-color: #0c140e;
   --md-code-fg-color: #8dff70;
   --md-footer-bg-color: #0c140e;
+  /* Material derives link colour from primary (near-black). Override it. */
+  --md-typeset-a-color: #e8c36a;
 }
 
 .md-typeset {
@@ -32,7 +33,7 @@
 
 .md-header {
   background: #1a2418;
-  border-bottom: 1px solid color-mix(in srgb, #c4a35a 40%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, #e8c36a 40%, transparent);
   font-family: "IBM Plex Mono", ui-monospace, "Liberation Mono", monospace;
 }
 
@@ -55,4 +56,68 @@
 .md-version__current {
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   letter-spacing: 0.04em;
+}
+
+/* Body, nav, TOC, footer, header: links must stay readable on forest. */
+.md-typeset a:not(.md-button),
+.md-nav__link,
+.md-footer a,
+.md-footer-meta a,
+.md-tabs__link,
+.md-source,
+.md-header__button:not(.md-logo),
+.md-search-result__link,
+.md-typeset .headerlink,
+.md-typeset .admonition a,
+.md-typeset details a {
+  color: #e8c36a;
+}
+
+.md-typeset a:not(.md-button):hover,
+.md-typeset a:not(.md-button):focus,
+.md-nav__link:hover,
+.md-nav__link:focus,
+.md-footer a:hover,
+.md-tabs__link:hover,
+.md-source:hover,
+.md-typeset .headerlink:hover,
+.md-typeset .admonition a:hover {
+  color: #8dff70;
+}
+
+.md-nav__link--active,
+.md-nav__item .md-nav__link--active,
+.md-tabs__link--active {
+  color: #8dff70;
+}
+
+.md-typeset a:not(.md-button):focus-visible,
+.md-nav__link:focus-visible {
+  outline: 2px solid #8dff70;
+  outline-offset: 2px;
+}
+
+.md-typeset .md-button {
+  color: #efe4c6;
+  background: transparent;
+  border: 1px solid #e8c36a;
+}
+
+.md-typeset .md-button:hover,
+.md-typeset .md-button:focus {
+  color: #132016;
+  background: #e8c36a;
+}
+
+.md-typeset .md-button--primary {
+  color: #132016;
+  background: #e8c36a;
+  border-color: #e8c36a;
+}
+
+.md-typeset .md-button--primary:hover,
+.md-typeset .md-button--primary:focus {
+  color: #132016;
+  background: #8dff70;
+  border-color: #8dff70;
 }

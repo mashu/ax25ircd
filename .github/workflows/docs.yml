@@ -10,22 +10,18 @@ permissions:
   contents: write
   pages: write
   id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: false
+  actions: write
 
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  # Writes versioned docs to the gh-pages branch. No Pages environment:
+  # GitHub rejects tag deployments to github-pages by default.
+  publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: pip install -r requirements-docs.txt
@@ -47,6 +43,27 @@ jobs:
               mike set-default --push dev
             fi
           fi
+      - name: Refresh Pages from main
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run docs.yml --ref main
+
+  # Only main (and manual runs) may deploy to the github-pages environment.
+  deploy:
+    needs: publish
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: Snapshot gh-pages
         run: |
           git fetch origin gh-pages:refs/remotes/origin/gh-pages
@@ -54,9 +71,9 @@ jobs:
           git archive origin/gh-pages | tar -x -C public
           test -f public/versions.json
           test -f public/.nojekyll
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: public
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
