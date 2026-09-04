@@ -1,0 +1,45 @@
+# systemd unit for ax25ircd.
+#
+#   install -m0755 target/release/ax25ircd /usr/local/bin/
+#   install -m0640 -o ax25ircd ax25ircd.toml /etc/ax25ircd.toml
+#   useradd --system --no-create-home --shell /usr/sbin/nologin ax25ircd
+#   systemctl enable --now ax25ircd
+#
+# If the TNC is a serial port, add the service user to the dialout group and
+# drop the DevicePolicy line below.
+
+[Unit]
+Description=AX25IRC gateway (IRC server with AX.25 packet radio bridge)
+Documentation=file:/usr/share/doc/ax25ircd/DESIGN.md
+After=network-online.target direwolf.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ax25ircd
+Group=ax25ircd
+ExecStart=/usr/local/bin/ax25ircd --config /etc/ax25ircd.toml
+ExecStartPre=/usr/local/bin/ax25ircd --check --config /etc/ax25ircd.toml
+Environment=RUST_LOG=ax25ircd=info
+Restart=on-failure
+RestartSec=5s
+
+# The station stops transmitting when the service stops. SIGINT gives it the
+# chance to send a closing identification first, which is why the stop signal
+# is not the default SIGTERM.
+KillSignal=SIGINT
+TimeoutStopSec=15s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

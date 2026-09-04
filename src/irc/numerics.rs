@@ -1,0 +1,53 @@
+//! The subset of RFC 1459/2812 numerics this server emits.
+
+pub const RPL_WELCOME: &str = "001";
+pub const RPL_YOURHOST: &str = "002";
+pub const RPL_CREATED: &str = "003";
+pub const RPL_MYINFO: &str = "004";
+pub const RPL_ISUPPORT: &str = "005";
+
+pub const RPL_UMODEIS: &str = "221";
+pub const RPL_LUSERCLIENT: &str = "251";
+pub const RPL_LUSERME: &str = "255";
+pub const RPL_AWAY: &str = "301";
+pub const RPL_WHOISUSER: &str = "311";
+pub const RPL_WHOISSERVER: &str = "312";
+pub const RPL_WHOISOPERATOR: &str = "313";
+pub const RPL_ENDOFWHO: &str = "315";
+pub const RPL_WHOISIDLE: &str = "317";
+pub const RPL_ENDOFWHOIS: &str = "318";
+pub const RPL_WHOISCHANNELS: &str = "319";
+pub const RPL_LISTSTART: &str = "321";
+pub const RPL_LIST: &str = "322";
+pub const RPL_LISTEND: &str = "323";
+pub const RPL_CHANNELMODEIS: &str = "324";
+pub const RPL_NOTOPIC: &str = "331";
+pub const RPL_TOPIC: &str = "332";
+pub const RPL_TOPICWHOTIME: &str = "333";
+pub const RPL_WHOREPLY: &str = "352";
+pub const RPL_NAMREPLY: &str = "353";
+pub const RPL_ENDOFNAMES: &str = "366";
+pub const RPL_MOTD: &str = "372";
+pub const RPL_MOTDSTART: &str = "375";
+pub const RPL_ENDOFMOTD: &str = "376";
+pub const RPL_YOUREOPER: &str = "381";
+
+pub const ERR_NOSUCHNICK: &str = "401";
+pub const ERR_NOSUCHCHANNEL: &str = "403";
+pub const ERR_CANNOTSENDTOCHAN: &str = "404";
+pub const ERR_TOOMANYCHANNELS: &str = "405";
+pub const ERR_NOTEXTTOSEND: &str = "412";
+pub const ERR_UNKNOWNCOMMAND: &str = "421";
+pub const ERR_NOMOTD: &str = "422";
+pub const ERR_NONICKNAMEGIVEN: &str = "431";
+pub const ERR_ERRONEUSNICKNAME: &str = "432";
+pub const ERR_NICKNAMEINUSE: &str = "433";
+pub const ERR_NOTONCHANNEL: &str = "442";
+pub const ERR_NOTREGISTERED: &str = "451";
+pub const ERR_NEEDMOREPARAMS: &str = "461";
+pub const ERR_ALREADYREGISTERED: &str = "462";
+pub const ERR_PASSWDMISMATCH: &str = "464";
+pub const ERR_CHANNELISFULL: &str = "471";
+pub const ERR_BADCHANNELKEY: &str = "475";
+pub const ERR_NOPRIVILEGES: &str = "481";
+pub const ERR_CHANOPRIVSNEEDED: &str = "482";

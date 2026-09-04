@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+
+# Operator copy of the example config; never commit a live one.
+/ax25ircd.toml
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store

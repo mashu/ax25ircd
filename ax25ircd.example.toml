@@ -1,0 +1,111 @@
+# ax25ircd example configuration.
+#
+# Copy to ax25ircd.toml and edit. Check it with:  ax25ircd --check -c ax25ircd.toml
+#
+# READ docs/REGULATORY.md BEFORE ENABLING THE RADIO SECTION. Running this
+# server with radio.enabled = true makes your station transmit automatically,
+# under your licence, carrying other people's traffic.
+
+[server]
+name = "ax25irc.sk0mt.example"
+network = "AX25IRC"
+motd = [
+  "SK0MT packet gateway, 144.800 MHz, 1200 baud AFSK",
+  "Channels marked +r are transmitted on the air in the clear.",
+  "Identify with: /quote CALLSIGN SM0ABC",
+]
+max_nick_len = 30
+max_channels_per_user = 20
+# password = "optional connection password"
+
+[listen]
+# Bind to localhost and put a TLS terminator (or an SSH tunnel) in front of it
+# if you expose this to the Internet. TLS protects the IP hop only: everything
+# that reaches the air is, and must be, in the clear.
+bind = ["127.0.0.1:6667"]
+ping_interval_secs = 120
+registration_timeout_secs = 60
+
+[radio]
+enabled = false
+
+# The station that transmits. This callsign is what appears in every AX.25
+# source address and in the periodic identification.
+callsign = "SK0MT-1"
+
+# AX.25 destination address used for broadcast (channel) traffic. Acts as a
+# protocol marker so others on frequency can filter AIRC out.
+destination = "AIRC"
+
+# Digipeater path. Empty is best. Two hops is the maximum this server allows.
+path = []
+
+# Identification interval in seconds. Must be <= 600.
+id_interval_secs = 540
+id_text = "AX25IRC gateway - IRC over packet"
+
+# AX.25 information field limit. 128 gets through a noisy channel far more
+# often than the 256 byte default.
+paclen = 128
+
+ack_timeout_secs = 12
+max_retries = 3
+peer_idle_timeout_secs = 1800
+
+# Send join/part notices over the air. Off by default: on a busy channel this
+# is most of your airtime for very little information.
+presence_notices = false
+
+# Hold private messages for stations that are out of range and deliver them
+# when the station is next heard. Bounded and expiring by design.
+mailbox_enabled = true
+mailbox_per_station = 10
+mailbox_total = 200
+mailbox_ttl_secs = 86400
+
+# Repeat RF-originated messages back onto RF for stations that are hidden from
+# each other. Doubles the airtime cost of every message.
+repeat_rf_traffic = false
+
+[radio.tnc]
+# "tcp" (Direwolf, ax25-tools KISS-over-TCP), "serial" (needs --features
+# serial), or "loopback" for a dry run that transmits nothing.
+kind = "tcp"
+host = "127.0.0.1"
+port = 8001
+# device = "/dev/ttyUSB0"
+# baud = 9600
+kiss_port = 0
+
+# Minimum gap between transmissions. At 1200 baud a 128 byte frame is about
+# one second of airtime, so leave room for everyone else.
+tx_pacing_ms = 1500
+
+# Optional KISS parameters pushed to the TNC at connect.
+# txdelay = 30
+# persistence = 63
+# slottime = 10
+
+[policy]
+max_rf_text_len = 160
+rf_msgs_per_min = 6
+rf_burst = 4
+ip_to_rf_msgs_per_min = 10
+block_apparent_ciphertext = true
+require_callsign_for_rf = true
+deny_callsigns = []
+allow_callsigns = []   # empty means "anyone"
+
+[[channels]]
+name = "#rf"
+topic = "Bridged to 144.800 MHz - everything here is transmitted"
+rf = true
+
+[[channels]]
+name = "#local"
+topic = "Internet only, nothing here goes on the air"
+rf = false
+
+[[opers]]
+name = "sm0abc"
+password = "change-me"

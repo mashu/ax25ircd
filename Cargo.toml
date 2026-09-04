@@ -1,0 +1,40 @@
+[package]
+name = "ax25ircd"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "IRC server with an AX.25 packet-radio gateway for amateur radio operators"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+default-run = "ax25ircd"
+keywords = ["irc", "ax25", "ham-radio", "packet-radio", "amateur-radio"]
+categories = ["network-programming", "command-line-utilities"]
+
+# Three binaries, one library:
+#   ax25ircd           — IRC server + RF gateway  (src/main.rs)
+#   ax25irc-station    — radio-side client        (src/bin/)
+#   ax25irc-kisshub    — virtual channel for tests (src/bin/)
+# Cargo discovers those paths by convention.
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "io-std"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1"
+anyhow = "1"
+
+# Serial KISS TNC support is optional so the core builds with no C deps.
+tokio-serial = { version = "5", optional = true }
+
+[features]
+default = []
+serial = ["dep:tokio-serial"]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
+panic = "abort"
