@@ -9,32 +9,6 @@ use serde::Deserialize;
 
 use crate::callsign::Callsign;
 
-/// Who among IP clients may have their messages put on the air.
-///
-/// IRC clients always hear RF traffic in a `+r` channel and may talk to each
-/// other there. Radiation is a separate privilege: the gateway's licence is
-/// on the line, so the default is operator-granted rather than "anyone who
-/// typed CALLSIGN".
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum IpRfTxMode {
-    /// Never. The IRC side is a listen/chat overlay; only RF stations speak
-    /// on the air.
-    Off,
-    /// Only a control operator (`OPER`).
-    Oper,
-    /// `RFKEY <password>` matching `rf_tx_password`. OPER always can.
-    Key,
-    /// IDENTIFY to a nick listed in `rf_tx_nicks`, or an account with `rf_tx`.
-    /// OPER always can. This is the default: regular IRC clients work, the
-    /// air stays closed until the licensee grants someone.
-    #[default]
-    Account,
-    /// Legacy: a `CALLSIGN` claim is enough (still subject to
-    /// `require_callsign_for_rf` and the allow/deny lists).
-    Callsign,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -226,11 +200,6 @@ pub struct PolicyConfig {
     /// rules in most countries forbid obscuring the meaning of a message.
     #[serde(default = "default_true")]
     pub block_apparent_ciphertext: bool,
-    /// Only IP users who have identified with a callsign may have their
-    /// traffic relayed to RF. Leave true unless you have thought hard about
-    /// third-party traffic rules.
-    #[serde(default = "default_true")]
-    pub require_callsign_for_rf: bool,
     /// Callsigns that may not use the gateway at all.
     #[serde(default)]
     pub deny_callsigns: Vec<String>,
@@ -247,17 +216,7 @@ pub struct PolicyConfig {
     pub ip_cmds_per_min: u32,
     #[serde(default = "default_ip_cmd_burst")]
     pub ip_cmd_burst: u32,
-    /// Who among IP clients may radiate. See [`IpRfTxMode`].
-    #[serde(default)]
-    pub ip_rf_tx: IpRfTxMode,
-    /// Shared key for `RFKEY`. Empty/absent disables the command unless
-    /// `ip_rf_tx = "key"`, which then fails validation.
-    #[serde(default)]
-    pub rf_tx_password: Option<String>,
-    /// Nicks that receive RF-TX after IDENTIFY (`ip_rf_tx = "account"`).
-    #[serde(default)]
-    pub rf_tx_nicks: Vec<String>,
-    /// IDENTIFY / REGISTER / RFKEY / OPER guesses per minute per host.
+    /// IDENTIFY / REGISTER / OPER guesses per minute per host.
     #[serde(default = "default_identify_per_min")]
     pub identify_per_min: u32,
     #[serde(default = "default_identify_burst")]
@@ -272,16 +231,12 @@ impl Default for PolicyConfig {
             rf_burst: default_rf_burst(),
             ip_to_rf_msgs_per_min: default_ip_msgs_per_min(),
             block_apparent_ciphertext: true,
-            require_callsign_for_rf: true,
             deny_callsigns: Vec::new(),
             allow_callsigns: Vec::new(),
             rf_channel_msgs_per_min: default_rf_channel_msgs(),
             rf_channel_burst: default_rf_channel_burst(),
             ip_cmds_per_min: default_ip_cmds_per_min(),
             ip_cmd_burst: default_ip_cmd_burst(),
-            ip_rf_tx: IpRfTxMode::default(),
-            rf_tx_password: None,
-            rf_tx_nicks: Vec::new(),
             identify_per_min: default_identify_per_min(),
             identify_burst: default_identify_burst(),
         }
@@ -368,16 +323,6 @@ impl Config {
         }
         if self.listen.registration_timeout_secs == 0 {
             anyhow::bail!("listen.registration_timeout_secs must be at least 1");
-        }
-        if self.policy.ip_rf_tx == IpRfTxMode::Key
-            && self
-                .policy
-                .rf_tx_password
-                .as_ref()
-                .map(|s| s.is_empty())
-                .unwrap_or(true)
-        {
-            anyhow::bail!("policy.ip_rf_tx = \"key\" requires policy.rf_tx_password");
         }
         for ch in &self.channels {
             if !crate::irc::message::is_channel_name(&ch.name) {

@@ -4,11 +4,10 @@
 //! make sense in a linked network (SERVER, SQUIT, services, bans-by-mask).
 //! Local extensions:
 //!
-//! * `CALLSIGN <call>` - an IP user identifies with an amateur callsign (+v
-//!   on `+r` channels). This is a claim, not authentication, and does not
-//!   by itself put traffic on the air.
-//! * `RFKEY <password>` - present the shared RF-TX key.
-//! * `RADIO <subcommand>` - the control operator's console.
+//! * `CALLSIGN <call>` - claim an amateur callsign (+v on `+r` channels).
+//!   Required before an IP user's traffic can be radiated; not authentication.
+//! * `RADIO <subcommand>` - transmitter status for everyone; GRANT/REVOKE and
+//!   the kill switch for control operators.
 
 use std::time::{Duration, Instant};
 
@@ -110,7 +109,6 @@ impl Server {
             }
             "OPER" => self.cmd_oper(&uid, &msg),
             "CALLSIGN" => self.cmd_callsign(&uid, &msg),
-            "RFKEY" => self.cmd_rfkey(&uid, &msg),
             "RADIO" => self.cmd_radio(&uid, &msg),
             "KICK" => self.cmd_kick(&uid, &msg),
             "KILL" => self.cmd_kill(&uid, &msg),
@@ -292,9 +290,9 @@ impl Server {
         self.notice_user(uid, &status);
         self.notice_user(
             uid,
-            "On +r channels only a valid CALLSIGN gets +v (permission to speak). \
-             REGISTER <password> to keep a nick. IDENTIFY <password> to claim it. \
-             RADIO shows whether this station is transmitting.",
+            "On +r channels CALLSIGN grants +v (speak on IRC). A control operator \
+             must RADIO GRANT a registered nick before that nick's messages are \
+             radiated. REGISTER/IDENTIFY keep the nick and the grant across restarts.",
         );
         if self.accounts.is_registered(&user.nick) {
             self.notice_user(
@@ -1009,13 +1007,13 @@ impl Server {
             self.notice_user(
                 uid,
                 "Not relayed to RF: you do not have RF-TX privilege. \
-                 Ordinary IRC clients chat here on the internet only. \
-                 A control operator grants RF-TX via IDENTIFY to a listed nick, RFKEY, or OPER.",
+                 Register this nick, then ask a control operator to RADIO GRANT it. \
+                 CALLSIGN is also required. Until then your messages stay on IRC.",
             );
             return None;
         }
         let identified = self.state.user(uid).and_then(|u| u.callsign.clone());
-        if self.policy.config.require_callsign_for_rf && identified.is_none() {
+        if identified.is_none() {
             self.notice_user(
                 uid,
                 "Not relayed to RF: identify with CALLSIGN <yourcall> first. \
@@ -1081,6 +1079,11 @@ impl Server {
         if let Some(u) = self.state.user_mut(uid) {
             u.callsign = Some(call.clone());
         }
+        if self.state.user(uid).map(|u| u.nick_identified).unwrap_or(false) {
+            if let Some(nick) = self.state.user(uid).map(|u| u.nick.clone()) {
+                let _ = self.accounts.set_callsign(&nick, &call.to_string());
+            }
+        }
         info!(?uid, %call, "IP user claimed a callsign");
         if let Some(u) = self.state.user(uid) {
             self.audit.event(
@@ -1096,37 +1099,6 @@ impl Server {
             ),
         );
         self.refresh_privileges(uid);
-    }
-
-    fn cmd_rfkey(&mut self, uid: &UserId, msg: &Message) {
-        if !self.auth_rate_ok(uid) {
-            return;
-        }
-        let Some(given) = msg.param(0) else {
-            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["RFKEY", "Not enough parameters"]);
-            return;
-        };
-        let Some(expected) = self.config.policy.rf_tx_password.as_ref() else {
-            self.notice_user(uid, "RFKEY is not configured on this server.");
-            return;
-        };
-        if expected.is_empty() || given != expected {
-            self.notice_user(uid, "RF-TX key rejected.");
-            if let Some(u) = self.state.user(uid) {
-                self.audit.event("rfkey_fail", &[("nick", &u.nick), ("host", &u.host)]);
-            }
-            return;
-        }
-        if let Some(u) = self.state.user_mut(uid) {
-            u.rf_tx = true;
-        }
-        self.notice_user(
-            uid,
-            "RF-TX granted for this session. Your messages in +r channels may be radiated.",
-        );
-        if let Some(u) = self.state.user(uid) {
-            self.audit.event("rfkey", &[("nick", &u.nick), ("host", &u.host)]);
-        }
     }
 
     fn cmd_radio(&mut self, uid: &UserId, msg: &Message) {
@@ -1505,6 +1477,9 @@ impl Server {
                     u.nick_identified = true;
                     u.identify_by = None;
                 }
+                if let Some(c) = user.callsign.as_ref() {
+                    let _ = self.accounts.set_callsign(&user.nick, &c.to_string());
+                }
                 self.notice_user(
                     &uid,
                     "Nick registered. The password is stored as an Argon2id hash, not recoverable. IDENTIFY on next connect.",
@@ -1530,24 +1505,33 @@ impl Server {
     }
 
     fn grant_rf_tx(&mut self, oper: &UserId, nick: &str, grant: bool) {
+        if !self.accounts.is_registered(nick) {
+            self.notice_user(
+                oper,
+                &format!("{nick} is not registered. They must REGISTER first; the grant is stored in the nick file and restored on IDENTIFY."),
+            );
+            return;
+        }
+        if let Err(e) = self.accounts.set_rf_tx(nick, grant) {
+            self.notice_account_error(oper, e);
+            return;
+        }
         if let Some(target) = self.find_target(nick) {
-            if let Some(u) = self.state.user_mut(&target) {
-                u.rf_tx = grant || u.oper;
-            }
+            self.refresh_privileges(&target);
             self.notice_user(
                 &target,
                 if grant {
-                    "A control operator granted you RF-TX. Your messages in +r channels may be radiated."
+                    "A control operator granted you RF-TX. After CALLSIGN, your messages in +r channels may be radiated."
                 } else {
                     "RF-TX revoked. Your messages stay on IRC."
                 },
             );
         }
-        if self.accounts.is_registered(nick) {
-            let _ = self.accounts.set_rf_tx(nick, grant);
-        }
         let verb = if grant { "granted" } else { "revoked" };
-        self.notice_user(oper, &format!("RF-TX {verb} for {nick}."));
+        self.notice_user(
+            oper,
+            &format!("RF-TX {verb} for {nick} and stored in the nick file."),
+        );
         self.audit.event(
             if grant { "rf_tx_grant" } else { "rf_tx_revoke" },
             &[("nick", nick)],

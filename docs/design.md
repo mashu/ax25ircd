@@ -68,9 +68,10 @@ respect. See [regulatory.md](regulatory.md) for the detail; the design consequen
   transmitted since the last one — and again at shutdown.
 * **Control operator responsibility.** Everything the station radiates is the
   licensee's responsibility, including traffic that originated with an
-  anonymous stranger on the Internet. Hence `require_callsign_for_rf`, the
-  ciphertext screen, the deny/allow lists, the `RADIO OFF` kill switch, and
-  the monitor log that records every frame in the same format as `axlisten`.
+  anonymous stranger on the Internet. Hence RF-TX grants, the CALLSIGN
+  requirement, the ciphertext screen, the deny/allow lists, the `RADIO OFF`
+  kill switch, and the monitor log that records every frame in the same
+  format as `axlisten`.
 
 ## 3. Architecture
 
@@ -141,33 +142,30 @@ party line.
 
 The IP side is where real authentication belongs, and it is also where the
 licensee's risk is: an IRC `PRIVMSG` that the gateway radiates is third-party
-traffic under the gateway callsign. The design splits "may talk on IRC" from
-"may be put on the air":
+traffic under the gateway callsign. Speaking on IRC and radiating are
+separate:
 
 * **Listen and local chat are open.** Anyone who can connect may join a `+r`
-  channel, hear RF traffic, and talk to other IRC users. Their messages stay
-  on the internet.
-* **RF-TX is an explicit privilege.** Nothing an IP client types is radiated
-  unless `policy.ip_rf_tx` says so. The default is `account`: IDENTIFY to a
-  nick the operator listed in `rf_tx_nicks` (or `RADIO GRANT`), or `OPER`.
-  `key` uses a shared `RFKEY`. `callsign` is the old "typed CALLSIGN" behaviour
-  and is the wrong default for a server reachable from the internet. `off`
-  makes IRC a listen-only overlay.
-* `CALLSIGN` remains a logged, unverified claim. `require_callsign_for_rf`
-  (on by default) still requires it as the legal third-party identification,
-  *in addition* to RF-TX privilege.
-* `+v` on a `+r` channel still means "may speak here" (the channel is `+m`).
-  It does not mean "this goes on the air".
+  channel, hear RF traffic, and talk to other IRC users. `CALLSIGN` grants
+  `+v` (permission to speak on the moderated channel). Those messages stay
+  on the internet until the next point.
+* **RF-TX is a persisted grant on a registered nick.** The user `REGISTER`s,
+  a control operator `RADIO GRANT`s that nick (stored in `nicks.json`), and
+  the user `IDENTIFY`s on later connects. `CALLSIGN` is still required, and
+  is restored from the nick file after IDENTIFY. `OPER` has RF-TX for that
+  session without a grant.
+* RF stations are not IRC accounts. Their identity is the AX.25 source
+  address; `allow_callsigns` / `deny_callsigns` are the gate.
+
+Commands, flags, and what survives a restart: [usage.md](usage.md).
 
 A typical club setup: internet users join `#rf` to follow the QSO; only the
-control operator and a short list of identified club nicks can key the
-transmitter. Regular IRC clients need no extra software. The station binary
-(`ax25irc-station`) is not an IRC client — it speaks AIRC over KISS, and its
-identity is the AX.25 source callsign plus the allow list.
+control operator and nicks they have granted can key the transmitter.
+`ax25irc-station` is not an IRC client — it speaks AIRC over KISS.
 
-If you need TLS or SASL, put them in front of the IP listener. They protect
-the hop to the gateway and stop there. Everything that reaches the antenna is
-in the clear, by law and by design.
+If you need TLS, put it in front of the IP listener. It protects the hop to
+the gateway and stops there. Everything that reaches the antenna is in the
+clear, by law and by design.
 
 ## 5. Channel model
 
@@ -178,8 +176,8 @@ Channels carry one extra mode: `+r`, "bridged to RF".
 * Channels created on the fly by `JOIN` are never `+r`.
 * An RF station that joins a non-`+r` channel is told `404`.
 * A message to a `+r` channel is radiated only if at least one RF station is
-  in it **and** the sender holds RF-TX privilege. Nobody listening, or an
-  ordinary IRC client without RF-TX, means the text stays on IRC.
+  in it, the sender holds RF-TX, and they have a CALLSIGN. Nobody listening,
+  or an ordinary IRC client without RF-TX, means the text stays on IRC.
 
 Everything else (`+m`, `+t`, `+k`, `+l`, `+o`, `+v`) behaves as usual and
 applies to both populations.
@@ -266,7 +264,10 @@ RADIO STATUS            transmitter state, frames, bytes, stations heard
 RADIO OFF | ON          kill switch
 RADIO ID                identify now
 RADIO HEARD             stations, last heard, queue depth, drops
+RADIO MAIL              held private messages
 RADIO KICK <callsign>   remove a station's presence
+RADIO GRANT <nick>      persist RF-TX on a registered nick
+RADIO REVOKE <nick>     take it away
 ```
 
 ## 8.1 Development without a radio

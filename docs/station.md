@@ -31,7 +31,9 @@ ax25irc-station --call SM0ABC-7 --gateway SK0MT-1 --channel '#rf'
 ```
 
 Then connect an IRC client to `127.0.0.1:6667`, `/quote CALLSIGN SM0XYZ`, join
-`#rf`:
+`#rf`. That lets you speak on IRC. To key the virtual transmitter from IRC,
+register the nick and have a control operator `RADIO GRANT` it — see
+[usage.md](usage.md).
 
 ```
 #rf <alice> hello over the air

@@ -31,14 +31,15 @@ Leave `radio.enabled = false`. Start the server and connect any IRC client to
 
 `#rf` exists but nothing is radiated.
 
-On `#rf`, only a valid `CALLSIGN` gets `+v` (permission to speak). Everyone
-else may listen.
+On `#rf`, `CALLSIGN` grants `+v` (permission to speak on IRC). Radiating
+requires a registered nick that a control operator has `RADIO GRANT`ed, or
+`OPER`. See [usage.md](usage.md).
 
 ```
 /quote CALLSIGN SM0XYZ
 /join #rf
 /quote RADIO                 # transmitter status (no OPER needed)
-/quote REGISTER secret12     # optional: bind this nick to a hashed password
+/quote REGISTER secret12     # bind this nick; then ask an oper to GRANT it
 ```
 
 ## 2. Whole stack without a licence (virtual channel)
@@ -65,8 +66,9 @@ port = 8001
 ```
 
 Connect an IRC client to `127.0.0.1:6667`, `/quote CALLSIGN SM0XYZ`, join
-`#rf`. The station nick appears as `SM0ABC|7`. The hub prints frames in
-`axlisten` format.
+`#rf`. The station nick appears as `SM0ABC|7`. Your IRC chat stays on the
+internet until a control operator `RADIO GRANT`s your registered nick (or
+you `OPER`). The hub prints frames in `axlisten` format.
 
 ## 3. Real RF via Direwolf
 
@@ -106,7 +108,8 @@ Debian packages, groups, hamlib, 300 baud Direwolf, and first QSO:
 |---|---|
 | Host | `127.0.0.1` |
 | Port | `6667` |
-| Speak on `#rf` | `/quote CALLSIGN YOURCALL` first |
+| Speak on `#rf` (IRC) | `/quote CALLSIGN YOURCALL` first |
+| Radiate from IRC | registered nick + `RADIO GRANT` (or `OPER`) + CALLSIGN |
 | On-air status | `/quote RADIO` |
 | Keep a nick | `/quote REGISTER <password>` then `/quote IDENTIFY <password>` |
-| Control operator | `/oper sm0abc change-me` then `RADIO OFF` / `RADIO HEARD` |
+| Control operator | `/oper sm0abc change-me` then `RADIO GRANT` / `RADIO OFF` |

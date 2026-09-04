@@ -13,8 +13,8 @@ motd = [
   "SK0MT packet gateway, 144.800 MHz, 1200 baud AFSK",
   "Channels marked +r are transmitted on the air in the clear.",
   "Identify with: /quote CALLSIGN SM0ABC",
-  "Keep a nick with: /quote REGISTER <password>   then  /quote IDENTIFY <password>",
-  "Messages go on the air only with RF-TX (IDENTIFY to a granted nick, RFKEY, or OPER).",
+  "Keep a nick: /quote REGISTER <password>  then  IDENTIFY <password>",
+  "Air: a control operator must RADIO GRANT your registered nick. CALLSIGN is also required.",
 ]
 max_nick_len = 30
 max_channels_per_user = 20
@@ -114,20 +114,15 @@ rf_channel_burst = 4
 ip_cmds_per_min = 90
 ip_cmd_burst = 30
 block_apparent_ciphertext = true
-require_callsign_for_rf = true
-# Who among IRC clients may have messages put on the air.
-#   "off"      — never; IRC is a listen/chat overlay
-#   "oper"     — only OPER
-#   "key"      — RFKEY <password> matching rf_tx_password (OPER always can)
-#   "account"  — IDENTIFY to a nick in rf_tx_nicks, or RADIO GRANT (default)
-#   "callsign" — legacy: a CALLSIGN claim is enough
-ip_rf_tx = "account"
-# rf_tx_password = "change-me"
-rf_tx_nicks = ["sm0abc"]
 identify_per_min = 6
 identify_burst = 3
+# An IP user's messages are radiated only after:
+#   1. REGISTER + IDENTIFY (the nick is stored in accounts.file)
+#   2. RADIO GRANT <nick> by a control operator (persisted on that account)
+#   3. CALLSIGN <call> (legal third-party identification; restored on IDENTIFY)
+# OPER always has RF-TX. RF stations on the air are not IRC accounts.
 deny_callsigns = []
-allow_callsigns = []   # empty means "anyone" on the RF side
+allow_callsigns = []   # empty means any amateur callsign may use the RF side
 
 [[channels]]
 name = "#rf"

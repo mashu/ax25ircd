@@ -34,8 +34,6 @@ paclen = 128
 kind = "loopback"
 
 [policy]
-require_callsign_for_rf = true
-ip_rf_tx = "callsign"
 
 [accounts]
 file = "target/test-nicks.json"
@@ -48,6 +46,10 @@ rf = true
 
 [[channels]]
 name = "#local"
+
+[[opers]]
+name = "root"
+password = "operpass1"
 "##;
 
 struct Harness {
@@ -115,6 +117,11 @@ impl Harness {
             line: format!("USER {nick} 0 * :{nick}"),
         });
         rx
+    }
+
+    fn oper_and_callsign(&mut self) {
+        self.send("OPER root operpass1");
+        self.send("CALLSIGN SM0XYZ");
     }
 
     fn drain_client(&mut self) -> Vec<String> {
@@ -272,13 +279,24 @@ async fn irc_message_needs_a_callsign_before_it_is_transmitted() {
     h.send("CALLSIGN SM0XYZ");
     h.drain_client();
     h.send("PRIVMSG #rf :hello radio");
+    let lines = h.drain_client();
+    assert!(
+        lines.iter().any(|l| l.contains("RF-TX") || l.contains("not have RF-TX")),
+        "CALLSIGN alone must not radiate: {lines:?}"
+    );
+    let tx = h.transmitted().await;
+    assert!(tx.iter().all(|(_, a)| a.kind != Kind::Msg));
+
+    h.send("OPER root operpass1");
+    h.drain_client();
+    h.send("PRIVMSG #rf :hello radio");
     h.drain_client();
 
     let tx = h.transmitted().await;
     let (ax, airc) = tx
         .iter()
         .find(|(_, a)| a.kind == Kind::Msg)
-        .expect("the message should now be on the air");
+        .expect("OPER + CALLSIGN should put the message on the air");
     assert_eq!(ax.destination.call.to_string(), "AIRC");
     assert_eq!(airc.fields(), vec!["#rf", "alice", "hello radio"]);
 }
@@ -286,7 +304,7 @@ async fn irc_message_needs_a_callsign_before_it_is_transmitted() {
 #[tokio::test]
 async fn ciphertext_is_not_transmitted() {
     let mut h = Harness::new().await;
-    h.send("CALLSIGN SM0XYZ");
+    h.oper_and_callsign();
     h.send("JOIN #rf");
     h.station_transmits(
         "SM0ABC-7",
@@ -331,7 +349,7 @@ fn drain_rx(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<String> {
 #[tokio::test]
 async fn private_message_to_a_station_is_acknowledged_and_retried() {
     let mut h = Harness::new().await;
-    h.send("CALLSIGN SM0XYZ");
+    h.oper_and_callsign();
     h.station_transmits("SM0ABC-7", AircFrame::new(Kind::Hello, 1, encode_fields(&[""])))
         .await;
     // The welcome is sent reliably, so the station must acknowledge it before
@@ -386,7 +404,7 @@ async fn station_frames_from_implausible_callsigns_are_ignored() {
 #[tokio::test]
 async fn messages_are_held_for_a_station_that_is_out_of_range() {
     let mut h = Harness::new().await;
-    h.send("CALLSIGN SM0XYZ");
+    h.oper_and_callsign();
     h.drain_client();
 
     // Nobody by that name is on frequency, but it is a plausible callsign.
@@ -482,29 +500,8 @@ async fn rf_quit_reason_cannot_inject_irc_lines() {
 }
 
 #[tokio::test]
-async fn default_account_mode_keeps_irc_chat_off_the_air() {
-    let toml = r##"
-[server]
-name = "test.gateway"
-[listen]
-bind = []
-[radio]
-enabled = true
-callsign = "SK0MT-1"
-destination = "AIRC"
-id_interval_secs = 60
-[radio.tnc]
-kind = "loopback"
-[policy]
-require_callsign_for_rf = true
-ip_rf_tx = "account"
-[accounts]
-file = "target/test-nicks-account.json"
-[[channels]]
-name = "#rf"
-rf = true
-"##;
-    let mut h = Harness::from_toml(toml).await;
+async fn callsign_alone_does_not_radiate() {
+    let mut h = Harness::new().await;
     h.send("CALLSIGN SM0XYZ");
     h.send("JOIN #rf");
     h.station_transmits(
@@ -519,7 +516,7 @@ rf = true
     let lines = h.drain_client();
     assert!(
         lines.iter().any(|l| l.contains("RF-TX") || l.contains("not have RF-TX")),
-        "CALLSIGN alone must not radiate in account mode: {lines:?}"
+        "CALLSIGN alone must not radiate: {lines:?}"
     );
     let tx = h.transmitted().await;
     assert!(
@@ -529,7 +526,8 @@ rf = true
 }
 
 #[tokio::test]
-async fn rfkey_grants_air_access() {
+async fn grant_requires_a_registered_nick_then_survives_identify() {
+    let _ = std::fs::remove_file("target/test-nicks-grant.json");
     let toml = r##"
 [server]
 name = "test.gateway"
@@ -542,18 +540,16 @@ destination = "AIRC"
 id_interval_secs = 60
 [radio.tnc]
 kind = "loopback"
-[policy]
-require_callsign_for_rf = true
-ip_rf_tx = "key"
-rf_tx_password = "club-key"
 [accounts]
-file = "target/test-nicks-key.json"
+file = "target/test-nicks-grant.json"
 [[channels]]
 name = "#rf"
 rf = true
+[[opers]]
+name = "root"
+password = "operpass1"
 "##;
     let mut h = Harness::from_toml(toml).await;
-    h.send("CALLSIGN SM0XYZ");
     h.send("JOIN #rf");
     h.station_transmits(
         "SM0ABC-7",
@@ -563,18 +559,43 @@ rf = true
     h.transmitted().await;
     h.drain_client();
 
-    h.send("PRIVMSG #rf :before key");
-    h.drain_client();
-    assert!(h.transmitted().await.iter().all(|(_, a)| a.kind != Kind::Msg));
+    let mut oper_rx = h.connect_extra(9, "rootop");
+    h.server.handle(Event::Line {
+        id: 9,
+        line: "OPER root operpass1".into(),
+    });
+    let _ = drain_rx(&mut oper_rx);
+    h.server.handle(Event::Line {
+        id: 9,
+        line: "RADIO GRANT alice".into(),
+    });
+    let grant_fail = drain_rx(&mut oper_rx);
+    assert!(
+        grant_fail.iter().any(|l| l.contains("not registered")),
+        "{grant_fail:?}"
+    );
 
-    h.send("RFKEY club-key");
+    h.send("REGISTER secret12");
     h.drain_client();
-    h.send("PRIVMSG #rf :after key");
+    h.server.handle(Event::Line {
+        id: 9,
+        line: "RADIO GRANT alice".into(),
+    });
+    let grant_ok = drain_rx(&mut oper_rx);
+    assert!(
+        grant_ok.iter().any(|l| l.contains("stored in the nick file")),
+        "{grant_ok:?}"
+    );
+
+    h.send("CALLSIGN SM0XYZ");
+    h.drain_client();
+    h.send("PRIVMSG #rf :after grant");
     h.drain_client();
     let tx = h.transmitted().await;
     assert!(
-        tx.iter().any(|(_, a)| a.kind == Kind::Msg && a.fields().last() == Some(&"after key".to_string())),
+        tx.iter().any(|(_, a)| a.kind == Kind::Msg && a.fields().last() == Some(&"after grant".to_string())),
         "{tx:?}"
     );
 }
+
 

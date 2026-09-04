@@ -64,7 +64,7 @@ nav:
       - Install: install.md
       - QMX on Debian: qmx.md
   - Using:
-      - IRC: usage.md
+      - IRC and privileges: usage.md
       - Station and kisshub: station.md
   - Reference:
       - Design: design.md

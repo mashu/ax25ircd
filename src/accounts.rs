@@ -26,6 +26,10 @@ pub struct NickAccount {
     /// Operator-granted right to have this nick's messages put on the air.
     #[serde(default)]
     pub rf_tx: bool,
+    /// Last CALLSIGN this nick claimed. Restored on IDENTIFY; it is still a
+    /// claim, not proof of licence.
+    #[serde(default)]
+    pub callsign: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -101,6 +105,7 @@ impl Accounts {
                 password_hash: hash,
                 created_unix,
                 rf_tx: false,
+                callsign: None,
             },
         );
         self.save()
@@ -146,6 +151,7 @@ impl Accounts {
                 password_hash,
                 created_unix,
                 rf_tx: false,
+                callsign: None,
             },
         );
         self.save()
@@ -171,6 +177,14 @@ impl Accounts {
             return Err(AccountError::NotRegistered);
         };
         acc.rf_tx = rf_tx;
+        self.save()
+    }
+
+    pub fn set_callsign(&mut self, nick: &str, callsign: &str) -> Result<(), AccountError> {
+        let Some(acc) = self.store.nicks.get_mut(&lower(nick)) else {
+            return Err(AccountError::NotRegistered);
+        };
+        acc.callsign = Some(callsign.to_string());
         self.save()
     }
 
@@ -246,8 +260,12 @@ mod tests {
         let path = tmp();
         let mut a = Accounts::empty(&path);
         a.register("bob", "hunter2x", 8).unwrap();
+        a.set_rf_tx("bob", true).unwrap();
+        a.set_callsign("bob", "SM0XYZ").unwrap();
         let b = Accounts::load(&path).unwrap();
         assert_eq!(b.verify("bob", "hunter2x"), Ok(()));
+        assert!(b.grants_rf_tx("bob"));
+        assert_eq!(b.get("bob").and_then(|a| a.callsign.as_deref()), Some("SM0XYZ"));
         let _ = std::fs::remove_file(path);
     }
 

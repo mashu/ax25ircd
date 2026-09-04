@@ -6,6 +6,12 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# One writer at a time. Pushing a tag at the same moment as main used to
+# make two mike --push races; the loser is "gh-pages (fetch first)".
+concurrency:
+  group: docs
+  cancel-in-progress: false
+
 permissions:
   contents: write
   pages: write
@@ -30,7 +36,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
       - name: Fetch previous versions
-        run: git fetch origin gh-pages --depth=1 || true
+        run: |
+          git fetch origin gh-pages
+          git update-ref refs/heads/gh-pages refs/remotes/origin/gh-pages
       - name: Publish version
         run: |
           set -euo pipefail

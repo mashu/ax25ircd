@@ -130,20 +130,23 @@ irssi
 ```
 
 `RADIO` should show the transmitter **ON**. `#rf` is `+rm`: without a callsign
-you can listen, you cannot speak. Change the example OPER password before you
-bind to a public address.
+you can listen, you cannot speak. Without RF-TX your speech stays on IRC.
+Change the example OPER password before you bind to a public address.
 
 ## 8. First message that actually keys the radio
 
-Send a short line in `#rf`. If `notice_air_relay` is on, the server notices
+`CALLSIGN` lets you speak on IRC. Radiation needs RF-TX: `OPER`, or a
+registered nick that a control operator has `RADIO GRANT`ed. Then send a short
+line in `#rf`. If `notice_air_relay` is on, the server notices
 `Relayed to RF (YOURCALL-1)…`. Watch Direwolf for PTT and a 300-baud frame.
 
 | Goal | Command |
 |---|---|
-| Speak on `#rf` | `/quote CALLSIGN YOURCALL` then `/join #rf` |
+| Speak on `#rf` (IRC) | `/quote CALLSIGN YOURCALL` then `/join #rf` |
+| Radiate from IRC | registered nick + `RADIO GRANT` (or `OPER`) — [usage.md](usage.md) |
 | Transmitter status | `/quote RADIO` |
 | Keep a nick | `/quote REGISTER <password>` then `IDENTIFY` |
-| Control operator | `/oper …` then `RADIO OFF` / `RADIO HEARD` |
+| Control operator | `/oper …` then `RADIO OFF` / `RADIO GRANT` / `RADIO HEARD` |
 
 ## 9. Optional: a second QMX as the operator radio
 
@@ -165,6 +168,7 @@ callsign with `-` turned into `|` (`YOURCALL|7`).
 - QMX still in Digi or IQ — audio looks like noise to Direwolf.
 - Hamlib 2057 unknown — switch PTT to `RIG 2028`.
 - No `+v` on `#rf` — you skipped `CALLSIGN`.
+- Spoke on `#rf` but nothing on the air — no RF-TX grant; `OPER` or `RADIO GRANT`.
 - Practice with no RF: `ax25irc-kisshub --bind 127.0.0.1:8001` and the same
   toml, indoors. Still do not enable radio toward a real antenna until you
   mean it.

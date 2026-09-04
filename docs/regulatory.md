@@ -67,13 +67,10 @@ not at all. An IRC gateway is a third-party traffic machine by construction.
 
 What the software does:
 
-* `policy.require_callsign_for_rf` (on by default) means an IP user's messages
-  are not transmitted until they have identified with `CALLSIGN <call>`. Users
+* An IP user's messages are not transmitted until they have `CALLSIGN` *and*
+  RF-TX (a persisted `RADIO GRANT` on a registered nick, or `OPER`). Users
   who have not are told why, and their message still reaches the IRC side of
-  the channel.
-* `policy.ip_rf_tx` (default `account`) is the second gate: even with a
-  callsign, an IP client does not key the transmitter unless the operator
-  granted RF-TX. Ordinary IRC users can follow the QSO without ever radiating.
+  the channel. See [usage.md](usage.md).
 * `policy.allow_callsigns` turns the gateway into a closed system: only listed
   stations may use it at all.
 * `policy.deny_callsigns` bans specific stations; a listed callsign with SSID 0
@@ -135,7 +132,7 @@ Practical consequences:
       station.
 - [ ] The frequency permits automatic control for your licence class, and local
       users know you are there.
-- [ ] `require_callsign_for_rf = true` unless you have a specific reason.
+- [ ] Internet users who may radiate have registered nicks and a `RADIO GRANT`.
 - [ ] `allow_callsigns` populated if your rules require a closed system.
 - [ ] You can reach `RADIO OFF` within a minute, from wherever you are.
 - [ ] Logs are being kept somewhere you can read them later.

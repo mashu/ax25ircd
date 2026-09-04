@@ -16,7 +16,7 @@ use crate::airc::{encode_fields, AircFrame, Kind, SessionConfig, Sessions};
 use crate::audit::Audit;
 use crate::ax25::{Ax25Frame, TncHandle};
 use crate::callsign::Callsign;
-use crate::config::{Config, IpRfTxMode};
+use crate::config::Config;
 use crate::irc::message::{lower, Message};
 use crate::policy::Policy;
 
@@ -754,48 +754,33 @@ impl Server {
     }
 
     /// May this IP user have a message radiated? RF stations always may:
-    /// they are already on the air. See `policy.ip_rf_tx`.
+    /// they are already on the air. An IP user needs RF-TX (OPER, or IDENTIFY
+    /// to a nick the operator granted with `RADIO GRANT`).
     pub fn user_may_tx_rf(&self, uid: &UserId) -> bool {
         let Some(user) = self.state.user(uid) else {
             return false;
         };
-        if user.is_rf() {
-            return true;
-        }
-        if user.oper {
-            return true;
-        }
-        match self.config.policy.ip_rf_tx {
-            IpRfTxMode::Off => false,
-            IpRfTxMode::Oper => false,
-            IpRfTxMode::Key | IpRfTxMode::Account => user.rf_tx,
-            IpRfTxMode::Callsign => user.callsign.is_some(),
-        }
+        user.is_rf() || user.oper || user.rf_tx
     }
 
     pub fn refresh_rf_tx(&mut self, uid: &UserId) {
-        let Some(user) = self.state.user(uid) else {
+        let Some(user) = self.state.user(uid).cloned() else {
             return;
         };
         if user.is_rf() {
             return;
         }
-        let nick = user.nick.clone();
-        let identified = user.nick_identified;
-        let listed = self
-            .config
-            .policy
-            .rf_tx_nicks
-            .iter()
-            .any(|n| lower(n) == lower(&nick));
-        let account = identified && (listed || self.accounts.grants_rf_tx(&nick));
+        let granted = user.nick_identified && self.accounts.grants_rf_tx(&user.nick);
+        let stored_call = user
+            .nick_identified
+            .then(|| self.accounts.get(&user.nick).and_then(|a| a.callsign.clone()))
+            .flatten();
         if let Some(u) = self.state.user_mut(uid) {
-            if account {
-                u.rf_tx = true;
-            }
-            // OPER and RFKEY set rf_tx directly; do not clear them here.
-            if u.oper {
-                u.rf_tx = true;
+            u.rf_tx = u.oper || granted;
+            if u.callsign.is_none() {
+                if let Some(c) = stored_call.as_deref().and_then(|s| s.parse().ok()) {
+                    u.callsign = Some(c);
+                }
             }
         }
     }
@@ -921,9 +906,10 @@ impl Server {
         self.notice_user(
             uid,
             &format!(
-                "{channel} is +rm: bridged to amateur radio. Identify with CALLSIGN for +v \
-                 (permission to speak here). Messages go on the air only with RF-TX privilege \
-                 (IDENTIFY to a granted nick, RFKEY, or OPER) — everyone else is heard on IRC only."
+                "{channel} is +rm: bridged to amateur radio. CALLSIGN grants +v \
+                 (speak on IRC). Messages go on the air only after a control \
+                 operator grants RF-TX to a registered nick (RADIO GRANT) — \
+                 everyone else is heard on IRC only."
             ),
         );
         let status = self.radio_status_line();
