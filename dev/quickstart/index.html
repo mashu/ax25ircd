@@ -590,7 +590,7 @@
   <span class="md-ellipsis">
     
   
-    IRC
+    IRC and privileges
   
 
     
@@ -977,12 +977,13 @@ callsign). Check the file:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>./target/release/ax25ircd<span class="w"> </span>-c<span class="w"> </span>ax25ircd.toml
 </code></pre></div>
 <p><code>#rf</code> exists but nothing is radiated.</p>
-<p>On <code>#rf</code>, only a valid <code>CALLSIGN</code> gets <code>+v</code> (permission to speak). Everyone
-else may listen.</p>
+<p>On <code>#rf</code>, <code>CALLSIGN</code> grants <code>+v</code> (permission to speak on IRC). Radiating
+requires a registered nick that a control operator has <code>RADIO GRANT</code>ed, or
+<code>OPER</code>. See <a href="../usage/">usage.md</a>.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>/quote CALLSIGN SM0XYZ
 <a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>/join #rf
 <a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>/quote RADIO                 # transmitter status (no OPER needed)
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>/quote REGISTER secret12     # optional: bind this nick to a hashed password
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>/quote REGISTER secret12     # bind this nick; then ask an oper to GRANT it
 </code></pre></div>
 <h2 id="2-whole-stack-without-a-licence-virtual-channel">2. Whole stack without a licence (virtual channel)<a class="headerlink" href="#2-whole-stack-without-a-licence-virtual-channel" title="Permanent link">&para;</a></h2>
 <p><code>ax25irc-kisshub</code> is a fake shared frequency. Point the gateway TNC at it.</p>
@@ -1001,8 +1002,9 @@ else may listen.</p>
 <a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>./target/release/ax25irc-station<span class="w"> </span>--call<span class="w"> </span>SM0ABC-7<span class="w"> </span>--gateway<span class="w"> </span>SK0MT-1<span class="w"> </span>--channel<span class="w"> </span><span class="s1">'#rf'</span>
 </code></pre></div>
 <p>Connect an IRC client to <code>127.0.0.1:6667</code>, <code>/quote CALLSIGN SM0XYZ</code>, join
-<code>#rf</code>. The station nick appears as <code>SM0ABC|7</code>. The hub prints frames in
-<code>axlisten</code> format.</p>
+<code>#rf</code>. The station nick appears as <code>SM0ABC|7</code>. Your IRC chat stays on the
+internet until a control operator <code>RADIO GRANT</code>s your registered nick (or
+you <code>OPER</code>). The hub prints frames in <code>axlisten</code> format.</p>
 <h2 id="3-real-rf-via-direwolf">3. Real RF via Direwolf<a class="headerlink" href="#3-real-rf-via-direwolf" title="Permanent link">&para;</a></h2>
 <p>ax25ircd never talks to a radio. It talks <strong>KISS</strong> to a TNC. Direwolf is the
 usual TNC: it takes sound-card audio, modulates AX.25, and offers KISS on TCP
@@ -1042,8 +1044,12 @@ first, then ax25ircd.</p>
 <td><code>6667</code></td>
 </tr>
 <tr>
-<td>Speak on <code>#rf</code></td>
+<td>Speak on <code>#rf</code> (IRC)</td>
 <td><code>/quote CALLSIGN YOURCALL</code> first</td>
+</tr>
+<tr>
+<td>Radiate from IRC</td>
+<td>registered nick + <code>RADIO GRANT</code> (or <code>OPER</code>) + CALLSIGN</td>
 </tr>
 <tr>
 <td>On-air status</td>
@@ -1055,7 +1061,7 @@ first, then ax25ircd.</p>
 </tr>
 <tr>
 <td>Control operator</td>
-<td><code>/oper sm0abc change-me</code> then <code>RADIO OFF</code> / <code>RADIO HEARD</code></td>
+<td><code>/oper sm0abc change-me</code> then <code>RADIO GRANT</code> / <code>RADIO OFF</code></td>
 </tr>
 </tbody>
 </table>

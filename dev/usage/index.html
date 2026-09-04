@@ -27,7 +27,7 @@
     
     
       
-        <title>IRC - ax25ircd</title>
+        <title>IRC and privileges - ax25ircd</title>
       
     
     
@@ -111,7 +111,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              IRC
+              IRC and privileges
             
           </span>
         </div>
@@ -486,7 +486,7 @@
   <span class="md-ellipsis">
     
   
-    IRC
+    IRC and privileges
   
 
     
@@ -504,7 +504,7 @@
   <span class="md-ellipsis">
     
   
-    IRC
+    IRC and privileges
   
 
     
@@ -530,10 +530,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#local-commands" class="md-nav__link">
+  <a href="#letting-an-internet-user-key-the-transmitter" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Local commands
+        Letting an internet user key the transmitter
       
     </span>
   </a>
@@ -541,10 +541,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#control-operator-after-oper" class="md-nav__link">
+  <a href="#letting-an-rf-station-on-the-air" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Control operator (after OPER)
+        Letting an RF station on the air
       
     </span>
   </a>
@@ -552,10 +552,43 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#identity" class="md-nav__link">
+  <a href="#after-a-restart" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Identity
+        After a restart
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#channel-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Channel modes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#user-and-member-flags" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        User and member flags
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#commands" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Commands
       
     </span>
   </a>
@@ -863,10 +896,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#local-commands" class="md-nav__link">
+  <a href="#letting-an-internet-user-key-the-transmitter" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Local commands
+        Letting an internet user key the transmitter
       
     </span>
   </a>
@@ -874,10 +907,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#control-operator-after-oper" class="md-nav__link">
+  <a href="#letting-an-rf-station-on-the-air" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Control operator (after OPER)
+        Letting an RF station on the air
       
     </span>
   </a>
@@ -885,10 +918,43 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#identity" class="md-nav__link">
+  <a href="#after-a-restart" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Identity
+        After a restart
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#channel-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Channel modes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#user-and-member-flags" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        User and member flags
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#commands" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Commands
       
     </span>
   </a>
@@ -938,61 +1004,183 @@
 
 
 <h1 id="irc">IRC<a class="headerlink" href="#irc" title="Permanent link">&para;</a></h1>
-<p>Connect any RFC 1459 client to <code>127.0.0.1:6667</code>. Join <code>#local</code> for internet-only
-chat. <code>#rf</code> is <code>+rm</code>: moderated and bridged. Only a valid callsign (or a server
-operator) gets voice. Unidentified users may join and listen.</p>
-<h2 id="local-commands">Local commands<a class="headerlink" href="#local-commands" title="Permanent link">&para;</a></h2>
-<p>Beyond RFC 1459:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>CALLSIGN &lt;call&gt;     identify with an amateur callsign; on +r channels this
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>                    grants +v (permission to speak)
-<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>CALLSIGN            show what you are currently identified as
-<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>REGISTER &lt;password&gt; bind the current nick to an Argon2id hash on disk
-<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>IDENTIFY &lt;password&gt; prove you own a registered nick
-<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>UNREGISTER &lt;password&gt;
-<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>RADIO               public transmitter status (ON/OFF, callsign, frames)
-<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>KICK &lt;chan&gt; &lt;nick&gt;  channel operator or server operator
-<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>KILL &lt;nick&gt;         server operator only
+<p>Connect any RFC 1459 client to <code>127.0.0.1:6667</code>. Two kinds of people share a
+bridged channel. They are not the same account.</p>
+<ul>
+<li><strong>Internet user</strong> — ordinary nick (<code>alice</code>). Registers, may be granted RF-TX,
+  claims a callsign with <code>CALLSIGN</code>. The nick itself is not a callsign.</li>
+<li><strong>RF station</strong> — <code>ax25irc-station</code> or any AIRC client. Already on the air.
+  Appears as a reserved nick derived from the AX.25 source (<code>SM0ABC-7</code> →
+  <code>SM0ABC|7</code>). No <code>REGISTER</code>, no <code>RADIO GRANT</code>. Restrict with
+  <code>policy.allow_callsigns</code> / <code>deny_callsigns</code>.</li>
+</ul>
+<p>Callsign-shaped nicks (<code>SM0ABC|7</code>, <code>SM0ABC-7</code>, <code>SM0ABC\7</code>) are reserved for
+stations heard on the air. An internet user cannot take them.</p>
+<p>Speaking on IRC and radiating are separate. Without RF-TX your messages stay
+on the internet even in <code>#rf</code>.</p>
+<h2 id="letting-an-internet-user-key-the-transmitter">Letting an internet user key the transmitter<a class="headerlink" href="#letting-an-internet-user-key-the-transmitter" title="Permanent link">&para;</a></h2>
+<p>Three things. The nick does <strong>not</strong> have to look like a callsign.</p>
+<ol>
+<li><strong>Register the nick.</strong> <code>/quote REGISTER &lt;password&gt;</code> then, on later
+   connects, <code>/quote IDENTIFY &lt;password&gt;</code>. Written to <code>accounts.file</code>
+   (<code>nicks.json</code> by default).</li>
+<li><strong>A control operator grants RF-TX.</strong> They <code>OPER</code>, then
+   <code>/quote RADIO GRANT alice</code>. Refused if the nick is not registered — there
+   would be nothing to persist. The flag is stored on that account and
+   applied immediately if they are online.</li>
+<li><strong>Claim a callsign.</strong> <code>/quote CALLSIGN SM0XYZ</code>. Required every session
+   unless the nick is identified, in which case the last claim is restored
+   from the nick file. Still a logged claim, not proof of licence.</li>
+</ol>
+<p>Then join <code>#rf</code>. If an RF station is in the channel and the transmitter is on,
+<code>PRIVMSG #rf</code> is radiated. You will get a NOTICE when it actually goes out.</p>
+<p>A control operator (<code>OPER</code>) has RF-TX for that session without a grant. They
+still need <code>CALLSIGN</code> before their text is radiated.</p>
+<p><code>UNREGISTER</code> deletes the account, including the grant and stored callsign.
+Changing nick drops <code>IDENTIFY</code>; RF-TX comes back only after <code>IDENTIFY</code> on a
+nick that still has the grant.</p>
+<h2 id="letting-an-rf-station-on-the-air">Letting an RF station on the air<a class="headerlink" href="#letting-an-rf-station-on-the-air" title="Permanent link">&para;</a></h2>
+<p>The station transmits with its own radio. The gateway does not grant it RF-TX.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>ax25irc-station<span class="w"> </span>--call<span class="w"> </span>SM0ABC-7<span class="w"> </span>--gateway<span class="w"> </span>SK0MT-1<span class="w"> </span>--channel<span class="w"> </span><span class="s1">'#rf'</span>
 </code></pre></div>
-<p>Channel operators are listed in the config (<code>operators = ["alice"]</code>) and
-receive <code>+o</code> after <code>IDENTIFY</code>.</p>
-<h2 id="control-operator-after-oper">Control operator (after OPER)<a class="headerlink" href="#control-operator-after-oper" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>RADIO STATUS            transmitter state, frame and byte counters, stations heard
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>RADIO OFF               stop transmitting immediately; IRC keeps running
-<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>RADIO ON                resume
-<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>RADIO ID                identify now
-<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>RADIO HEARD             stations, last heard, queue depth, drops
-<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>RADIO MAIL              what is held, and for whom
-<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>RADIO KICK &lt;callsign&gt;   remove a station's presence
+<p>If <code>allow_callsigns</code> is empty, any plausible amateur callsign may use the RF
+side. A non-empty list is a closed system. <code>deny_callsigns</code> bans a station
+(SSID 0 bans every SSID of that call).</p>
+<h2 id="after-a-restart">After a restart<a class="headerlink" href="#after-a-restart" title="Permanent link">&para;</a></h2>
+<p><code>Accounts::load</code> reads <code>nicks.json</code> at startup. There is no other privilege
+store.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Survives</th>
+<th>Lost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Registered nicks, password hashes, RF-TX grants, last CALLSIGN</td>
+<td><code>nicks.json</code></td>
+<td></td>
+</tr>
+<tr>
+<td>Channels, <code>+r</code>, channel operator lists, OPER passwords</td>
+<td>config file</td>
+<td>runtime <code>MODE</code> changes</td>
+</tr>
+<tr>
+<td>Who is connected, mailbox, RF sessions, <code>OPER</code> this session</td>
+<td></td>
+<td>yes — in memory</td>
+</tr>
+</tbody>
+</table>
+<p>On connect, <code>IDENTIFY</code> reloads RF-TX and the stored callsign. <code>OPER</code> is entered
+again each session. The mailbox is a cache, not a mail server.</p>
+<h2 id="channel-modes">Channel modes<a class="headerlink" href="#channel-modes" title="Permanent link">&para;</a></h2>
+<p>Set in <code>[[channels]]</code> in the config. Reloaded on start. Only <code>OPER</code> can change
+<code>+r</code> at runtime, and that change is not written back to the file.</p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>+r</code></td>
+<td>Bridged to RF. Config: <code>rf = true</code>. JOIN-created channels are never <code>+r</code>.</td>
+</tr>
+<tr>
+<td><code>+m</code></td>
+<td>Moderated. Default on <code>+r</code> channels: only <code>+v</code> / <code>+o</code> may <code>PRIVMSG</code>.</td>
+</tr>
+<tr>
+<td><code>+t</code></td>
+<td>Topic locked (default).</td>
+</tr>
+<tr>
+<td><code>+k</code> / <code>+l</code></td>
+<td>Key / limit, as usual.</td>
+</tr>
+<tr>
+<td><code>+n</code></td>
+<td>Always on. No external messages.</td>
+</tr>
+</tbody>
+</table>
+<p>A <code>+r</code> message is radiated only if the transmitter is on, at least one RF
+station is in the channel, the sender has RF-TX, and they have a CALLSIGN.</p>
+<h2 id="user-and-member-flags">User and member flags<a class="headerlink" href="#user-and-member-flags" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Where</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>+v</code></td>
+<td>channel</td>
+<td>May speak on a <code>+m</code> channel. On <code>+r</code>, a CALLSIGN (or OPER) grants this. Does <strong>not</strong> mean the text is radiated.</td>
+</tr>
+<tr>
+<td><code>+o</code></td>
+<td>channel</td>
+<td>Channel operator. On <code>+r</code>, only a server OPER may grant it. Config <code>operators = ["alice"]</code> applies after IDENTIFY.</td>
+</tr>
+<tr>
+<td><code>+o</code></td>
+<td>user (<code>MODE</code> yourself)</td>
+<td>Control operator (<code>OPER</code> this session).</td>
+</tr>
+<tr>
+<td><code>+R</code></td>
+<td>user</td>
+<td>RF-TX. <code>WHOIS</code> says so too.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="commands">Commands<a class="headerlink" href="#commands" title="Permanent link">&para;</a></h2>
+<p>RFC 1459 <code>NICK</code> <code>USER</code> <code>JOIN</code> <code>PART</code> <code>PRIVMSG</code> <code>NOTICE</code> <code>TOPIC</code> <code>NAMES</code> <code>LIST</code>
+<code>WHO</code> <code>WHOIS</code> <code>MODE</code> <code>MOTD</code> <code>LUSERS</code> <code>AWAY</code> <code>PING</code> <code>PONG</code> <code>QUIT</code> <code>KICK</code> work as
+usual. Local extensions:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>OPER &lt;name&gt; &lt;pass&gt;   control operator this session ([[opers]] in the config)
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>CALLSIGN &lt;call&gt;      claim a callsign; +v on +r. Required before radiation.
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>CALLSIGN             show the current claim
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>REGISTER &lt;password&gt;  bind this nick to an Argon2id hash on disk
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>IDENTIFY &lt;password&gt;  prove you own it; reloads RF-TX and last CALLSIGN
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>UNREGISTER &lt;password&gt;
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>RADIO                transmitter status (anyone)
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>KICK &lt;chan&gt; &lt;nick&gt;   channel op or OPER
+<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>KILL &lt;nick&gt;          OPER only
 </code></pre></div>
-<p>Channel mode <code>+r</code> marks a channel as bridged to RF. Only a control operator can
-set or clear it, and channels created on the fly by <code>JOIN</code> are never <code>+r</code>.</p>
-<h2 id="identity">Identity<a class="headerlink" href="#identity" title="Permanent link">&para;</a></h2>
-<p>RF stations appear under their callsign: <code>SM0ABC-7</code> becomes the nickname
-<code>SM0ABC|7</code> (IRC nicks cannot contain <code>-</code>). Callsign-shaped nicknames are
-reserved, so an IP user cannot impersonate a station.</p>
-<p>AX.25 has no authentication and this server does not pretend otherwise. A
-callsign heard on the air is a claim; <code>CALLSIGN</code> from an IP user is a claim.
-Both are logged. If you need real authentication, it belongs on the IP side —
-TLS and a tunnel — and the RF side should be treated as what it is: a public
-party line.</p>
+<p>After <code>OPER</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>RADIO STATUS              transmitter, frames, stations heard
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>RADIO OFF / ON            kill switch; IRC keeps running
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>RADIO ID                  identify now
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>RADIO HEARD               stations, last heard, queue depth
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>RADIO MAIL                held private messages (in memory, expires)
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>RADIO KICK &lt;callsign&gt;     drop an RF station's presence
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>RADIO GRANT &lt;nick&gt;        persist RF-TX on a registered nick
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>RADIO REVOKE &lt;nick&gt;       take it away (also persisted)
+</code></pre></div>
 <h2 id="held-messages">Held messages<a class="headerlink" href="#held-messages" title="Permanent link">&para;</a></h2>
-<p>A private message to a callsign that is not currently on frequency is held and
-delivered when the station is next heard, carrying its age:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>-&gt; PRIVMSG SM0ABC|7 :meet on 145.500 at 1900
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>&lt;- NOTICE: SM0ABC-7 is not on frequency. Held for delivery when the station
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>   is next heard (1 waiting, dropped after 24h).
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>
-<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>   ... later, on the station ...
-<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>   *alice* [held 3h] meet on 145.500 at 1900
+<p>A private message to a callsign that is not on frequency is held and delivered
+when the station is next heard, carrying its age. Bounded and expiring; gone
+on restart. See <code>mailbox_*</code> in the config.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>-&gt; PRIVMSG SM0ABC|7 :meet on 145.500 at 1900
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>&lt;- NOTICE: SM0ABC-7 is not on frequency. Held for delivery when the station
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>   is next heard (1 waiting, dropped after 24h).
 </code></pre></div>
-<p>Bounded per station, bounded overall, and expiring — see <code>mailbox_*</code> in the
-config. A gateway is not a mail server.</p>
 <h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h2>
-<p>Every option is documented inline in <code>ax25ircd.example.toml</code>. The validator
-refuses configurations that would put you in an awkward position, including an
-identification interval over ten minutes, a gateway "callsign" that is not a
-plausible callsign, more than two digipeater hops, and <code>radio.enabled</code> with no
-bridged channel.</p>
+<p>Every option is documented inline in <code>ax25ircd.example.toml</code>. Unknown keys are
+refused. The validator also refuses an identification interval over ten
+minutes, a gateway "callsign" that is not a plausible callsign, more than two
+digipeater hops, and <code>radio.enabled</code> with no bridged channel.</p>
 
 
 

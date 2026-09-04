@@ -475,7 +475,7 @@
   <span class="md-ellipsis">
     
   
-    IRC
+    IRC and privileges
   
 
     
@@ -1095,10 +1095,10 @@ broadly, some only with specific countries under a third-party agreement, some
 not at all. An IRC gateway is a third-party traffic machine by construction.</p>
 <p>What the software does:</p>
 <ul>
-<li><code>policy.require_callsign_for_rf</code> (on by default) means an IP user's messages
-  are not transmitted until they have identified with <code>CALLSIGN &lt;call&gt;</code>. Users
+<li>An IP user's messages are not transmitted until they have <code>CALLSIGN</code> <em>and</em>
+  RF-TX (a persisted <code>RADIO GRANT</code> on a registered nick, or <code>OPER</code>). Users
   who have not are told why, and their message still reaches the IRC side of
-  the channel.</li>
+  the channel. See <a href="../usage/">usage.md</a>.</li>
 <li><code>policy.allow_callsigns</code> turns the gateway into a closed system: only listed
   stations may use it at all.</li>
 <li><code>policy.deny_callsigns</code> bans specific stations; a listed callsign with SSID 0
@@ -1154,7 +1154,7 @@ permitted for your licence class.</p>
       station.</li>
 <li>[ ] The frequency permits automatic control for your licence class, and local
       users know you are there.</li>
-<li>[ ] <code>require_callsign_for_rf = true</code> unless you have a specific reason.</li>
+<li>[ ] Internet users who may radiate have registered nicks and a <code>RADIO GRANT</code>.</li>
 <li>[ ] <code>allow_callsigns</code> populated if your rules require a closed system.</li>
 <li>[ ] You can reach <code>RADIO OFF</code> within a minute, from wherever you are.</li>
 <li>[ ] Logs are being kept somewhere you can read them later.</li>

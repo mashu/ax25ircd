@@ -634,7 +634,7 @@
   <span class="md-ellipsis">
     
   
-    IRC
+    IRC and privileges
   
 
     
@@ -1162,10 +1162,12 @@ Direwolf is already listening.</p>
 <a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="c1">#  /quote RADIO</span>
 </code></pre></div>
 <p><code>RADIO</code> should show the transmitter <strong>ON</strong>. <code>#rf</code> is <code>+rm</code>: without a callsign
-you can listen, you cannot speak. Change the example OPER password before you
-bind to a public address.</p>
+you can listen, you cannot speak. Without RF-TX your speech stays on IRC.
+Change the example OPER password before you bind to a public address.</p>
 <h2 id="8-first-message-that-actually-keys-the-radio">8. First message that actually keys the radio<a class="headerlink" href="#8-first-message-that-actually-keys-the-radio" title="Permanent link">&para;</a></h2>
-<p>Send a short line in <code>#rf</code>. If <code>notice_air_relay</code> is on, the server notices
+<p><code>CALLSIGN</code> lets you speak on IRC. Radiation needs RF-TX: <code>OPER</code>, or a
+registered nick that a control operator has <code>RADIO GRANT</code>ed. Then send a short
+line in <code>#rf</code>. If <code>notice_air_relay</code> is on, the server notices
 <code>Relayed to RF (YOURCALL-1)…</code>. Watch Direwolf for PTT and a 300-baud frame.</p>
 <table>
 <thead>
@@ -1176,8 +1178,12 @@ bind to a public address.</p>
 </thead>
 <tbody>
 <tr>
-<td>Speak on <code>#rf</code></td>
+<td>Speak on <code>#rf</code> (IRC)</td>
 <td><code>/quote CALLSIGN YOURCALL</code> then <code>/join #rf</code></td>
+</tr>
+<tr>
+<td>Radiate from IRC</td>
+<td>registered nick + <code>RADIO GRANT</code> (or <code>OPER</code>) — <a href="../usage/">usage.md</a></td>
 </tr>
 <tr>
 <td>Transmitter status</td>
@@ -1189,7 +1195,7 @@ bind to a public address.</p>
 </tr>
 <tr>
 <td>Control operator</td>
-<td><code>/oper …</code> then <code>RADIO OFF</code> / <code>RADIO HEARD</code></td>
+<td><code>/oper …</code> then <code>RADIO OFF</code> / <code>RADIO GRANT</code> / <code>RADIO HEARD</code></td>
 </tr>
 </tbody>
 </table>
@@ -1208,6 +1214,7 @@ callsign with <code>-</code> turned into <code>|</code> (<code>YOURCALL|7</code>
 <li>QMX still in Digi or IQ — audio looks like noise to Direwolf.</li>
 <li>Hamlib 2057 unknown — switch PTT to <code>RIG 2028</code>.</li>
 <li>No <code>+v</code> on <code>#rf</code> — you skipped <code>CALLSIGN</code>.</li>
+<li>Spoke on <code>#rf</code> but nothing on the air — no RF-TX grant; <code>OPER</code> or <code>RADIO GRANT</code>.</li>
 <li>Practice with no RF: <code>ax25irc-kisshub --bind 127.0.0.1:8001</code> and the same
   toml, indoors. Still do not enable radio toward a real antenna until you
   mean it.</li>
@@ -1269,13 +1276,13 @@ hamlib. See <a href="../protocol/">Protocol</a> and <a href="../design/">Design<
         
         
           
-          <a href="../usage/" class="md-footer__link md-footer__link--next" aria-label="Next: IRC">
+          <a href="../usage/" class="md-footer__link md-footer__link--next" aria-label="Next: IRC and privileges">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                IRC
+                IRC and privileges
               </div>
             </div>
             <div class="md-footer__button md-icon">

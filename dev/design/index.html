@@ -475,7 +475,7 @@
   <span class="md-ellipsis">
     
   
-    IRC
+    IRC and privileges
   
 
     
@@ -1281,9 +1281,10 @@ respect. See <a href="../regulatory/">regulatory.md</a> for the detail; the desi
   transmitted since the last one — and again at shutdown.</li>
 <li><strong>Control operator responsibility.</strong> Everything the station radiates is the
   licensee's responsibility, including traffic that originated with an
-  anonymous stranger on the Internet. Hence <code>require_callsign_for_rf</code>, the
-  ciphertext screen, the deny/allow lists, the <code>RADIO OFF</code> kill switch, and
-  the monitor log that records every frame in the same format as <code>axlisten</code>.</li>
+  anonymous stranger on the Internet. Hence RF-TX grants, the CALLSIGN
+  requirement, the ciphertext screen, the deny/allow lists, the <code>RADIO OFF</code>
+  kill switch, and the monitor log that records every frame in the same
+  format as <code>axlisten</code>.</li>
 </ul>
 <h2 id="3-architecture">3. Architecture<a class="headerlink" href="#3-architecture" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>                    ┌──────────────────────────────────────────┐
@@ -1332,22 +1333,36 @@ air?" once, in one place.</p>
 authentication, and adding cryptographic authentication is legally fraught in
 several jurisdictions (and useless against a replay attack over a broadcast
 medium unless you also add a nonce exchange, which costs airtime).</p>
-<p>The design therefore does not pretend:</p>
+<p>The RF side therefore does not pretend: an AX.25 source address is logged, a
+station's IRC nick is derived from it (<code>SM0ABC-7</code> → <code>SM0ABC|7</code>), and
+callsign-shaped nicknames are reserved so an IP user cannot sit on
+<code>SM0ABC|7</code>, <code>SM0ABC\7</code> (RFC 1459 casemapping) or <code>SM0ABC-7</code>. Allow/deny lists
+decide which callsigns the gateway will talk to. Treat the radio as a public
+party line.</p>
+<p>The IP side is where real authentication belongs, and it is also where the
+licensee's risk is: an IRC <code>PRIVMSG</code> that the gateway radiates is third-party
+traffic under the gateway callsign. Speaking on IRC and radiating are
+separate:</p>
 <ul>
-<li>An RF station's nickname is derived from its callsign: <code>SM0ABC-7</code> becomes
-  <code>SM0ABC|7</code> (IRC nicks cannot contain <code>-</code>).</li>
-<li>Callsign-shaped nicknames are <strong>reserved</strong>. An IP user cannot take <code>SM0ABC</code>
-  as a nickname; the <code>NICK</code> handler rejects anything that parses as a plausible
-  amateur callsign.</li>
-<li>IP users identify with <code>CALLSIGN &lt;call&gt;</code>. This is recorded, shown in <code>WHOIS</code>,
-  logged, and explicitly described to the user as unverified.</li>
-<li>RF stations never receive channel operator status automatically.</li>
-<li>Everything is logged with the callsign in the AX.25 source address, so the
-  control operator can reconstruct who transmitted what.</li>
+<li><strong>Listen and local chat are open.</strong> Anyone who can connect may join a <code>+r</code>
+  channel, hear RF traffic, and talk to other IRC users. <code>CALLSIGN</code> grants
+  <code>+v</code> (permission to speak on the moderated channel). Those messages stay
+  on the internet until the next point.</li>
+<li><strong>RF-TX is a persisted grant on a registered nick.</strong> The user <code>REGISTER</code>s,
+  a control operator <code>RADIO GRANT</code>s that nick (stored in <code>nicks.json</code>), and
+  the user <code>IDENTIFY</code>s on later connects. <code>CALLSIGN</code> is still required, and
+  is restored from the nick file after IDENTIFY. <code>OPER</code> has RF-TX for that
+  session without a grant.</li>
+<li>RF stations are not IRC accounts. Their identity is the AX.25 source
+  address; <code>allow_callsigns</code> / <code>deny_callsigns</code> are the gate.</li>
 </ul>
-<p>If you need real authentication, the honest answer is that it belongs on the IP
-side (TLS plus SASL) and that the RF side is, and should be treated as, a
-public party line.</p>
+<p>Commands, flags, and what survives a restart: <a href="../usage/">usage.md</a>.</p>
+<p>A typical club setup: internet users join <code>#rf</code> to follow the QSO; only the
+control operator and nicks they have granted can key the transmitter.
+<code>ax25irc-station</code> is not an IRC client — it speaks AIRC over KISS.</p>
+<p>If you need TLS, put it in front of the IP listener. It protects the hop to
+the gateway and stops there. Everything that reaches the antenna is in the
+clear, by law and by design.</p>
 <h2 id="5-channel-model">5. Channel model<a class="headerlink" href="#5-channel-model" title="Permanent link">&para;</a></h2>
 <p>Channels carry one extra mode: <code>+r</code>, "bridged to RF".</p>
 <ul>
@@ -1355,8 +1370,9 @@ public party line.</p>
   station radiates is not a user-level decision.</li>
 <li>Channels created on the fly by <code>JOIN</code> are never <code>+r</code>.</li>
 <li>An RF station that joins a non-<code>+r</code> channel is told <code>404</code>.</li>
-<li>A message to a <code>+r</code> channel is transmitted only if at least one registered RF
-  station is currently in it. Nobody listening means no transmission.</li>
+<li>A message to a <code>+r</code> channel is radiated only if at least one RF station is
+  in it, the sender holds RF-TX, and they have a CALLSIGN. Nobody listening,
+  or an ordinary IRC client without RF-TX, means the text stays on IRC.</li>
 </ul>
 <p>Everything else (<code>+m</code>, <code>+t</code>, <code>+k</code>, <code>+l</code>, <code>+o</code>, <code>+v</code>) behaves as usual and
 applies to both populations.</p>
@@ -1481,7 +1497,10 @@ to every user at registration.</p>
 <a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>RADIO OFF | ON          kill switch
 <a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>RADIO ID                identify now
 <a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>RADIO HEARD             stations, last heard, queue depth, drops
-<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>RADIO KICK &lt;callsign&gt;   remove a station's presence
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>RADIO MAIL              held private messages
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>RADIO KICK &lt;callsign&gt;   remove a station's presence
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>RADIO GRANT &lt;nick&gt;      persist RF-TX on a registered nick
+<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>RADIO REVOKE &lt;nick&gt;     take it away
 </code></pre></div>
 <h2 id="81-development-without-a-radio">8.1 Development without a radio<a class="headerlink" href="#81-development-without-a-radio" title="Permanent link">&para;</a></h2>
 <p><code>ax25irc-kisshub</code> is a virtual channel: every TCP client that connects is a
