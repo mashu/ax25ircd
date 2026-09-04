@@ -1,0 +1,1657 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="IRC server with an AX.25 packet-radio gateway">
+      
+      
+      
+        <link rel="canonical" href="https://mashu.github.io/ax25ircd/v0.1.0/design/">
+      
+      
+        <link rel="prev" href="../station/">
+      
+      
+        <link rel="next" href="../protocol/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/ax25ircd.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Design - ax25ircd</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#ax25irc-design" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="ax25ircd" class="md-header__button md-logo" aria-label="ax25ircd" data-md-component="logo">
+      
+  <img src="../assets/ax25ircd.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            ax25ircd
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Design
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+    
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/mashu/ax25ircd" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    mashu/ax25ircd
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="ax25ircd" class="md-nav__button md-logo" aria-label="ax25ircd" data-md-component="logo">
+      
+  <img src="../assets/ax25ircd.svg" alt="logo">
+
+    </a>
+    ax25ircd
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/mashu/ax25ircd" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    mashu/ax25ircd
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick start
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Quick start
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../qmx/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    QMX on Debian
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Using
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Using
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IRC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../station/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Station and kisshub
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-what-this-is" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. What this is
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-the-two-constraints-that-shape-everything" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. The two constraints that shape everything
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. The two constraints that shape everything">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#21-physics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.1 Physics
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#22-law" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.2 Law
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Architecture
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="3. Architecture">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#31-concurrency" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.1 Concurrency
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#32-the-delivery-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.2 The Delivery type
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-identity-and-trust" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Identity and trust
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-channel-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Channel model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-reliability" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Reliability
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#61-store-and-forward" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.1 Store and forward
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-failure-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Failure modes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-operating-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. Operating it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#81-development-without-a-radio" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.1 Development without a radio
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#9-testing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. Testing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#10-deliberate-non-goals" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10. Deliberate non-goals
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#11-possible-future-work" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        11. Possible future work
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../regulatory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Regulatory
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../packaging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Packaging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-what-this-is" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. What this is
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-the-two-constraints-that-shape-everything" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. The two constraints that shape everything
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. The two constraints that shape everything">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#21-physics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.1 Physics
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#22-law" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.2 Law
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Architecture
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="3. Architecture">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#31-concurrency" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.1 Concurrency
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#32-the-delivery-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.2 The Delivery type
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-identity-and-trust" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Identity and trust
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-channel-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Channel model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-reliability" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Reliability
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#61-store-and-forward" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.1 Store and forward
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-failure-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Failure modes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-operating-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. Operating it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#81-development-without-a-radio" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.1 Development without a radio
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#9-testing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. Testing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#10-deliberate-non-goals" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10. Deliberate non-goals
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#11-possible-future-work" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        11. Possible future work
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="ax25irc-design">AX25IRC design<a class="headerlink" href="#ax25irc-design" title="Permanent link">&para;</a></h1>
+<h2 id="1-what-this-is">1. What this is<a class="headerlink" href="#1-what-this-is" title="Permanent link">&para;</a></h2>
+<p>An IRC server that is simultaneously an AX.25 packet radio gateway. Two
+populations share the same channels:</p>
+<ul>
+<li><strong>IP users</strong> with an ordinary IRC client (irssi, WeeChat, HexChat, Textual)
+  over TCP.</li>
+<li><strong>RF stations</strong> with a radio and a TNC, speaking a compact protocol (AIRC/1)
+  carried in AX.25 UI frames.</li>
+</ul>
+<p>A message sent in a bridged channel reaches both. Nothing else does: the design
+is mostly about deciding what is <em>not</em> worth putting on the air.</p>
+<h2 id="2-the-two-constraints-that-shape-everything">2. The two constraints that shape everything<a class="headerlink" href="#2-the-two-constraints-that-shape-everything" title="Permanent link">&para;</a></h2>
+<h3 id="21-physics">2.1 Physics<a class="headerlink" href="#21-physics" title="Permanent link">&para;</a></h3>
+<p>A typical VHF packet channel is 1200 baud AFSK, half duplex, shared, with no
+collision detection. That is about 120 bytes per second of theoretical
+throughput, and perhaps half of that once TXDELAY, preamble, collisions and
+retries are accounted for. A single 256 byte frame occupies the channel for
+roughly two seconds.</p>
+<p>IRC's wire format is hostile to this. A single channel message costs:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>:SM0ABC|7!rf@sk0mt.ax25 PRIVMSG #rf :hello                    58 bytes
+</code></pre></div>
+<p>of which 40 bytes are prefix and syntax. The same message in AIRC/1:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>A1 05 00 00 07 00 01 | #rf US hello                           8 + 10 bytes
+</code></pre></div>
+<p>At 1200 baud that difference is roughly 0.3 seconds of channel time per
+message, every message. Multiply by a channel with ten users and it is the
+difference between a usable QSO and an unusable one.</p>
+<p>Consequences that appear throughout the code:</p>
+<ul>
+<li>The RF side never sees numerics, MOTDs, WHOIS replies, nick changes or (by
+  default) join/part notices.</li>
+<li>Channel traffic is transmitted <strong>once</strong>, as a broadcast, not once per
+  listening station.</li>
+<li>Messages that arrive from the air are <strong>not</strong> re-transmitted: every station
+  in range already heard them. Repeating is opt-in
+  (<code>radio.repeat_rf_traffic</code>), for hidden-terminal situations only.</li>
+<li>Rate limits and length caps are on by default and are not configurable to
+  "unlimited".</li>
+<li>Transmissions are paced (<code>tx_pacing_ms</code>) so the gateway cannot monopolise a
+  channel it shares with APRS, NET/ROM and other people's QSOs.</li>
+</ul>
+<h3 id="22-law">2.2 Law<a class="headerlink" href="#22-law" title="Permanent link">&para;</a></h3>
+<p>Amateur licences almost everywhere impose three rules that a gateway must
+respect. See <a href="../regulatory/">regulatory.md</a> for the detail; the design consequences are:</p>
+<ul>
+<li><strong>No obscured meaning.</strong> No encryption, no compression that is not publicly
+  documented, no private codes. This kills the obvious "just run IRC over
+  TLS over the radio" approach, and it means the on-air protocol has to be
+  documented and readable. AIRC/1 is plain UTF-8 behind an 8 byte header.</li>
+<li><strong>Identification.</strong> An automatically transmitting station must identify at
+  intervals (10 minutes in most jurisdictions). The server refuses to start
+  with <code>id_interval_secs &gt; 600</code>, and transmits an ID frame whenever it has
+  transmitted since the last one — and again at shutdown.</li>
+<li><strong>Control operator responsibility.</strong> Everything the station radiates is the
+  licensee's responsibility, including traffic that originated with an
+  anonymous stranger on the Internet. Hence <code>require_callsign_for_rf</code>, the
+  ciphertext screen, the deny/allow lists, the <code>RADIO OFF</code> kill switch, and
+  the monitor log that records every frame in the same format as <code>axlisten</code>.</li>
+</ul>
+<h2 id="3-architecture">3. Architecture<a class="headerlink" href="#3-architecture" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>                    ┌──────────────────────────────────────────┐
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>   radio ── TNC ───►│ ax25::tnc      KISS framing, reconnect,   │
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>        (KISS/TCP   │                TX pacing, TX queue        │
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>         or serial) └───────────────┬──────────────────────────┘
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>                                    │ Ax25Frame
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>                    ┌───────────────▼──────────────────────────┐
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>                    │ ax25::frame    addresses, UI frames       │
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>                    │ airc::frame    AIRC/1 codec               │
+<a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>                    │ airc::session  seq, ACK, fragments, dedup │
+<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>                    └───────────────┬──────────────────────────┘
+<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>                                    │ AircFrame
+<a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>                    ┌───────────────▼──────────────────────────┐
+<a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a>                    │ bridge         RF ⇄ IRC translation       │
+<a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>                    │ policy         airtime + legality gates   │
+<a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a>                    └───────────────┬──────────────────────────┘
+<a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a>                                    │ Delivery
+<a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a>                    ┌───────────────▼──────────────────────────┐
+<a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a>   IRC client ─TCP─►│ server         users, channels, event loop│
+<a id="__codelineno-2-19" name="__codelineno-2-19" href="#__codelineno-2-19"></a>                    │ irc::client    RFC 1459 line protocol     │
+<a id="__codelineno-2-20" name="__codelineno-2-20" href="#__codelineno-2-20"></a>                    └──────────────────────────────────────────┘
+</code></pre></div>
+<h3 id="31-concurrency">3.1 Concurrency<a class="headerlink" href="#31-concurrency" title="Permanent link">&para;</a></h3>
+<p>One task owns all mutable state. Everything else — each client connection, the
+TNC link, the timer — sends <code>Event</code> values into a single <code>mpsc</code> channel and the
+server task processes them in order. There is no lock anywhere in the message
+path and no <code>Arc&lt;Mutex&lt;State&gt;&gt;</code>.</p>
+<p>This matters more than usual here, because the two sides have wildly different
+latencies (microseconds on TCP, seconds on RF) and a lock-based design would
+let a slow radio write block an IRC client. Instead the radio has a bounded
+transmit queue: when it fills, frames are dropped and counted, and the IRC side
+never notices.</p>
+<h3 id="32-the-delivery-type">3.2 The <code>Delivery</code> type<a class="headerlink" href="#32-the-delivery-type" title="Permanent link">&para;</a></h3>
+<p>The bridge does not translate IRC lines into AX.25 frames. Both are rendered
+from a neutral <code>Delivery</code> value:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="n">Delivery</span><span class="p">::</span><span class="n">Privmsg</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">from_nick</span><span class="p">,</span><span class="w"> </span><span class="n">from_prefix</span><span class="p">,</span><span class="w"> </span><span class="n">target</span><span class="p">,</span><span class="w"> </span><span class="n">text</span><span class="p">,</span><span class="w"> </span><span class="n">notice</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>An IP user gets <code>:nick!user@host PRIVMSG #rf :text</code>. An RF station gets
+<code>MSG ["#rf", "nick", "text"]</code> in 8 + n bytes. A <code>Delivery::Quit</code> renders for IP
+and renders to <em>nothing</em> for RF, because a quit notice is not worth two seconds
+of airtime. Adding a new event type means answering "what does this cost on the
+air?" once, in one place.</p>
+<h2 id="4-identity-and-trust">4. Identity and trust<a class="headerlink" href="#4-identity-and-trust" title="Permanent link">&para;</a></h2>
+<p>On the air, identity is a claim. Anyone can transmit any callsign; AX.25 has no
+authentication, and adding cryptographic authentication is legally fraught in
+several jurisdictions (and useless against a replay attack over a broadcast
+medium unless you also add a nonce exchange, which costs airtime).</p>
+<p>The design therefore does not pretend:</p>
+<ul>
+<li>An RF station's nickname is derived from its callsign: <code>SM0ABC-7</code> becomes
+  <code>SM0ABC|7</code> (IRC nicks cannot contain <code>-</code>).</li>
+<li>Callsign-shaped nicknames are <strong>reserved</strong>. An IP user cannot take <code>SM0ABC</code>
+  as a nickname; the <code>NICK</code> handler rejects anything that parses as a plausible
+  amateur callsign.</li>
+<li>IP users identify with <code>CALLSIGN &lt;call&gt;</code>. This is recorded, shown in <code>WHOIS</code>,
+  logged, and explicitly described to the user as unverified.</li>
+<li>RF stations never receive channel operator status automatically.</li>
+<li>Everything is logged with the callsign in the AX.25 source address, so the
+  control operator can reconstruct who transmitted what.</li>
+</ul>
+<p>If you need real authentication, the honest answer is that it belongs on the IP
+side (TLS plus SASL) and that the RF side is, and should be treated as, a
+public party line.</p>
+<h2 id="5-channel-model">5. Channel model<a class="headerlink" href="#5-channel-model" title="Permanent link">&para;</a></h2>
+<p>Channels carry one extra mode: <code>+r</code>, "bridged to RF".</p>
+<ul>
+<li>Only a control operator (<code>OPER</code>) can set or clear <code>+r</code>. Deciding what your
+  station radiates is not a user-level decision.</li>
+<li>Channels created on the fly by <code>JOIN</code> are never <code>+r</code>.</li>
+<li>An RF station that joins a non-<code>+r</code> channel is told <code>404</code>.</li>
+<li>A message to a <code>+r</code> channel is transmitted only if at least one registered RF
+  station is currently in it. Nobody listening means no transmission.</li>
+</ul>
+<p>Everything else (<code>+m</code>, <code>+t</code>, <code>+k</code>, <code>+l</code>, <code>+o</code>, <code>+v</code>) behaves as usual and
+applies to both populations.</p>
+<h2 id="6-reliability">6. Reliability<a class="headerlink" href="#6-reliability" title="Permanent link">&para;</a></h2>
+<p>UI frames are unacknowledged datagrams. AX.25 connected mode exists, but it
+would give us one virtual circuit per station, no broadcast, head-of-line
+blocking across independent conversations, and an implementation dependency on
+whatever the far end runs. So AIRC/1 does its own:</p>
+<table>
+<thead>
+<tr>
+<th>Traffic</th>
+<th>Mode</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Channel messages, presence, ID</td>
+<td>broadcast, unreliable, deduplicated by sequence number</td>
+<td>one transmission serves every station in range</td>
+</tr>
+<tr>
+<td>Private messages, welcome, error, NAMES replies</td>
+<td>unicast, ACKed, retried</td>
+<td>it matters that this one station got it</td>
+</tr>
+</tbody>
+</table>
+<p>Retransmission is stop-and-wait with <strong>linear</strong> backoff, one message in flight
+per station and a bounded queue behind it. Exponential backoff is wrong here:
+the usual cause of loss is a collision, not congestion at a router, and backing
+off to minutes turns a QSO into a mailbox.</p>
+<p>Fragmentation is at the AIRC layer, not AX.25's: all fragments share a sequence
+number and carry <code>index</code>/<code>total</code>, reassembly is bounded by a timer, and a
+sequence number reused with a different fragment count resets the buffer.</p>
+<p>Duplicates are suppressed per station with a 64-entry window — but a duplicate
+is still ACKed, because a repeat almost always means our previous ACK was the
+frame that got lost.</p>
+<h2 id="61-store-and-forward">6.1 Store and forward<a class="headerlink" href="#61-store-and-forward" title="Permanent link">&para;</a></h2>
+<p>A station is on a hilltop for twenty minutes and in a valley for two hours.
+A private message to a station that is not currently in range is therefore
+held rather than refused, and delivered as a <code>STORED</code> frame (carrying its age)
+the moment the station is next heard.</p>
+<p>The limits are the design. The mailbox is bounded per station
+(<code>mailbox_per_station</code>), bounded across the gateway (<code>mailbox_total</code>) and
+expires (<code>mailbox_ttl_secs</code>), because an unbounded queue on a shared amateur
+channel eventually becomes somebody's free mail server. Held messages pass the
+same policy screen as live traffic <em>at the time they are accepted</em>, so nothing
+can be smuggled onto the air by waiting.</p>
+<p><code>RADIO MAIL</code> shows the control operator what is waiting for whom.</p>
+<h2 id="7-failure-modes">7. Failure modes<a class="headerlink" href="#7-failure-modes" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Behaviour</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TNC socket dies</td>
+<td>reconnect with capped exponential backoff; IRC side unaffected</td>
+</tr>
+<tr>
+<td>Transmit queue full</td>
+<td>frames dropped and counted; visible in <code>RADIO STATUS</code></td>
+</tr>
+<tr>
+<td>Station stops answering</td>
+<td>3 retries, then the station is declared lost and its IRC presence quits with "Signal lost"</td>
+</tr>
+<tr>
+<td>Station goes quiet</td>
+<td>removed after <code>peer_idle_timeout_secs</code></td>
+</tr>
+<tr>
+<td>Corrupt frame from the air</td>
+<td>logged in monitor format, ignored; never fatal</td>
+</tr>
+<tr>
+<td>Non-AIRC traffic on frequency (APRS, NET/ROM)</td>
+<td>logged at debug, ignored</td>
+</tr>
+<tr>
+<td>Frame from an implausible callsign</td>
+<td>ignored</td>
+</tr>
+<tr>
+<td>Someone floods from RF</td>
+<td>token bucket drops the traffic; no reply is transmitted, because answering a flood with transmissions is how you jam your own channel</td>
+</tr>
+<tr>
+<td>Client never registers</td>
+<td>dropped after <code>registration_timeout_secs</code></td>
+</tr>
+<tr>
+<td>Message for a station that is out of range</td>
+<td>held, bounded and expiring; delivered as <code>STORED</code> on next contact</td>
+</tr>
+<tr>
+<td>Control operator needs the transmitter off <em>now</em></td>
+<td><code>RADIO OFF</code> — IRC keeps running</td>
+</tr>
+</tbody>
+</table>
+<h2 id="8-operating-it">8. Operating it<a class="headerlink" href="#8-operating-it" title="Permanent link">&para;</a></h2>
+<p>Typical deployment with Direwolf (step-by-step, including QMX:
+<a href="../quickstart/">quickstart.md</a>, <a href="../qmx/">qmx.md</a>):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>[direwolf]  ADEVICE plughw:1,0 / MODEM 1200 / KISSPORT 8001
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>     │  KISS over TCP :8001
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>[ax25ircd]  radio.tnc.kind = "tcp", port 8001
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>     │  TCP :6667 on localhost
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>[stunnel or ssh -L]  ── the Internet
+</code></pre></div>
+<p>The IP side should be behind TLS or a tunnel. Note the asymmetry: TLS protects
+the hop between the user and the gateway, and stops there. Everything that
+reaches the antenna is in the clear, by law and by design. The server says this
+to every user at registration.</p>
+<p>Control operator console (requires <code>OPER</code>):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>RADIO STATUS            transmitter state, frames, bytes, stations heard
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>RADIO OFF | ON          kill switch
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>RADIO ID                identify now
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>RADIO HEARD             stations, last heard, queue depth, drops
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>RADIO KICK &lt;callsign&gt;   remove a station's presence
+</code></pre></div>
+<h2 id="81-development-without-a-radio">8.1 Development without a radio<a class="headerlink" href="#81-development-without-a-radio" title="Permanent link">&para;</a></h2>
+<p><code>ax25irc-kisshub</code> is a virtual channel: every TCP client that connects is a
+station on the same frequency, and a KISS frame from one is delivered to all
+the others. With it, the whole system runs on a laptop:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>ax25irc-kisshub<span class="w"> </span>--bind<span class="w"> </span><span class="m">127</span>.0.0.1:8001<span class="w"> </span><span class="p">&amp;</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>ax25ircd<span class="w"> </span>-c<span class="w"> </span>ax25ircd.toml<span class="w"> </span><span class="p">&amp;</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>ax25irc-station<span class="w"> </span>--call<span class="w"> </span>SM0ABC-7<span class="w"> </span>--gateway<span class="w"> </span>SK0MT-1<span class="w"> </span>--channel<span class="w"> </span><span class="s1">'#rf'</span>
+</code></pre></div>
+<p>The hub prints every frame in <code>axlisten</code> monitor format, which is how the
+sequence-space bug described in <a href="../protocol/">protocol.md</a> §3.1 was found: the gateway
+had separate counters for unicast and broadcast, so a station discarded its
+first broadcast as a duplicate of the welcome it had already received.</p>
+<h2 id="9-testing">9. Testing<a class="headerlink" href="#9-testing" title="Permanent link">&para;</a></h2>
+<p>The awkward parts of this system are timeouts, retries, reassembly and
+fragmentation, so <code>airc::session</code> is a pure state machine: it takes an explicit
+<code>now</code> and returns the frames to transmit. Its tests run in microseconds and
+cover retry-then-give-up, ACK releasing a queued message, duplicate
+suppression, bounded queues and fragment reassembly.</p>
+<p>Above that, <code>TncConfig::loopback()</code> provides an in-process fake TNC. The
+integration tests in <code>tests/gateway.rs</code> drive a real <code>Server</code> with a real KISS
+codec on one side and a fake IRC client on the other, and assert on actual
+transmitted bytes: that a station's JOIN appears on IRC, that a message heard
+on the air is <em>not</em> re-transmitted, that an unidentified IP user's message
+never reaches the antenna, that ciphertext is refused, and that an ACKed
+private message is not retried.</p>
+<h2 id="10-deliberate-non-goals">10. Deliberate non-goals<a class="headerlink" href="#10-deliberate-non-goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Server linking.</strong> IRC's server-to-server protocol assumes cheap, reliable
+  links. Two gateways on the same frequency should share a channel over the
+  air, not netsplit at 1200 baud.</li>
+<li><strong>DCC, CTCP, file transfer.</strong> Not on this medium.</li>
+<li><strong>Encryption of any kind on the RF path.</strong></li>
+<li><strong>Pretending RF identity is authenticated.</strong></li>
+</ul>
+<h2 id="11-possible-future-work">11. Possible future work<a class="headerlink" href="#11-possible-future-work" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Multiple RF ports</strong> (2 m + 70 cm, or 1200 + 9600 baud) with per-channel
+  port mapping. The TNC layer already carries a KISS port number.</li>
+<li><strong>FX.25 / IL2P</strong> forward error correction, where the TNC supports it — pure
+  win on a weak-signal channel and legally uncontroversial.</li>
+<li><strong>Digest mode</strong>: a station on a handheld subscribes to a channel and receives
+  a periodic summary instead of every message.</li>
+<li><strong>APRS interop</strong>: answer APRS messages addressed to the gateway, so anyone
+  with a stock APRS radio can send a line into a channel.</li>
+<li><strong>IRCv3 <code>server-time</code>, <code>echo-message</code>, <code>chghost</code></strong> on the IP side, where they
+  cost nothing.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../station/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Station and kisshub">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Station and kisshub
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../protocol/" class="md-footer__link md-footer__link--next" aria-label="Next: Protocol">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Protocol
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      MIT. You are the licensee.
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/mashu/ax25ircd" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "content.code.copy", "content.tabs.link", "toc.follow", "search.suggest"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"alias": true, "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

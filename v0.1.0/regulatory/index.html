@@ -1,0 +1,1309 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="IRC server with an AX.25 packet-radio gateway">
+      
+      
+      
+        <link rel="canonical" href="https://mashu.github.io/ax25ircd/v0.1.0/regulatory/">
+      
+      
+        <link rel="prev" href="../protocol/">
+      
+      
+        <link rel="next" href="../packaging/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/ax25ircd.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Regulatory - ax25ircd</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#regulatory-notes" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="ax25ircd" class="md-header__button md-logo" aria-label="ax25ircd" data-md-component="logo">
+      
+  <img src="../assets/ax25ircd.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            ax25ircd
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Regulatory
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+    
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/mashu/ax25ircd" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    mashu/ax25ircd
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="ax25ircd" class="md-nav__button md-logo" aria-label="ax25ircd" data-md-component="logo">
+      
+  <img src="../assets/ax25ircd.svg" alt="logo">
+
+    </a>
+    ax25ircd
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/mashu/ax25ircd" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    mashu/ax25ircd
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick start
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Quick start
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../qmx/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    QMX on Debian
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Using
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Using
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IRC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../station/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Station and kisshub
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Regulatory
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Regulatory
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-the-four-rules-that-matter-here" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. The four rules that matter here
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="1. The four rules that matter here">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#11-no-obscured-meaning" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.1 No obscured meaning
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#12-station-identification" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.2 Station identification
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#13-third-party-traffic" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.3 Third-party traffic
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#14-content-and-purpose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.4 Content and purpose
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-automatic-control" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Automatic control
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-before-you-go-on-the-air-checklist" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Before you go on the air — checklist
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-regional-pointers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Regional pointers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-if-in-doubt" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. If in doubt
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../packaging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Packaging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-the-four-rules-that-matter-here" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. The four rules that matter here
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="1. The four rules that matter here">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#11-no-obscured-meaning" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.1 No obscured meaning
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#12-station-identification" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.2 Station identification
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#13-third-party-traffic" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.3 Third-party traffic
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#14-content-and-purpose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.4 Content and purpose
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-automatic-control" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Automatic control
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-before-you-go-on-the-air-checklist" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Before you go on the air — checklist
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-regional-pointers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Regional pointers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-if-in-doubt" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. If in doubt
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="regulatory-notes">Regulatory notes<a class="headerlink" href="#regulatory-notes" title="Permanent link">&para;</a></h1>
+<p><strong>This is not legal advice.</strong> It is a summary of the rules that shaped the
+design, written by people who are not your regulator. Amateur radio rules vary
+by country and change over time. Before you enable <code>radio.enabled</code>, read your
+own licence conditions and your national regulations, and satisfy <em>yourself</em>
+that what this software does is permitted where you are. You, the licensee, are
+responsible for everything your station transmits.</p>
+<h2 id="1-the-four-rules-that-matter-here">1. The four rules that matter here<a class="headerlink" href="#1-the-four-rules-that-matter-here" title="Permanent link">&para;</a></h2>
+<h3 id="11-no-obscured-meaning">1.1 No obscured meaning<a class="headerlink" href="#11-no-obscured-meaning" title="Permanent link">&para;</a></h3>
+<p>Amateur transmissions must not use codes or ciphers intended to hide the
+meaning of a message. In the United States this is 47 CFR §97.113(a)(4); most
+other administrations have an equivalent, and the ITU Radio Regulations
+(Article 25.2A) say the same thing internationally.</p>
+<p>What the software does:</p>
+<ul>
+<li>AIRC/1 is plain UTF-8 behind a documented 8-octet header. The specification
+  is published in <a href="../protocol/">protocol.md</a> precisely so that anyone monitoring the
+  frequency can decode it.</li>
+<li>No compression, no encryption, no dictionary coding — even though all three
+  would save meaningful airtime.</li>
+<li><code>policy.block_apparent_ciphertext</code> refuses to transmit text that looks like a
+  PGP block or a long high-entropy base64 token. It is a conservative
+  heuristic, not a guarantee: it catches the obvious cases and leaves judgement
+  to you.</li>
+<li>TLS, if you put it in front of the IP side, protects the hop between the user
+  and the gateway and stops there. This asymmetry is stated to every user at
+  registration.</li>
+</ul>
+<p>Note the grey area the software does <em>not</em> enter: authentication (as opposed to
+concealment) is treated differently in different jurisdictions, and some
+administrations explicitly permit it for control links. There is no signing or
+challenge-response in AIRC/1. If you want it, understand your local position
+first.</p>
+<h3 id="12-station-identification">1.2 Station identification<a class="headerlink" href="#12-station-identification" title="Permanent link">&para;</a></h3>
+<p>An automatically controlled station must identify itself at intervals — ten
+minutes in most jurisdictions (§97.119(a) in the US; similar elsewhere), and at
+the end of a series of transmissions.</p>
+<p>What the software does:</p>
+<ul>
+<li>Refuses to start if <code>radio.id_interval_secs</code> is 0 or greater than 600.</li>
+<li>Transmits an <code>ID</code> frame carrying the gateway callsign whenever the interval
+  has elapsed <em>and</em> the station has transmitted since the last ID. It does not
+  identify an idle station, because that is just QRM.</li>
+<li>Transmits an ID on clean shutdown if anything was transmitted since the last
+  one.</li>
+<li><code>RADIO ID</code> identifies on demand.</li>
+<li>Every AX.25 frame also carries the gateway callsign in its source address.</li>
+</ul>
+<p>Your callsign, not the network's, goes in <code>radio.callsign</code>, and the config
+check rejects anything that is not a plausible amateur callsign (it must
+contain both a letter and a digit — <code>GATEWAY</code> is refused).</p>
+<h3 id="13-third-party-traffic">1.3 Third-party traffic<a class="headerlink" href="#13-third-party-traffic" title="Permanent link">&para;</a></h3>
+<p>When an unlicensed person's message is transmitted by your station, that is
+third-party traffic. Rules differ sharply: some administrations permit it
+broadly, some only with specific countries under a third-party agreement, some
+not at all. An IRC gateway is a third-party traffic machine by construction.</p>
+<p>What the software does:</p>
+<ul>
+<li><code>policy.require_callsign_for_rf</code> (on by default) means an IP user's messages
+  are not transmitted until they have identified with <code>CALLSIGN &lt;call&gt;</code>. Users
+  who have not are told why, and their message still reaches the IRC side of
+  the channel.</li>
+<li><code>policy.allow_callsigns</code> turns the gateway into a closed system: only listed
+  stations may use it at all.</li>
+<li><code>policy.deny_callsigns</code> bans specific stations; a listed callsign with SSID 0
+  bans every SSID of that station.</li>
+<li>Nothing is transmitted to a <code>+r</code> channel unless at least one RF station is
+  actually in it.</li>
+</ul>
+<p>The <code>CALLSIGN</code> command records a <em>claim</em>. It is not verification. If your
+regulator's position requires you to know that the originator is licensed, you
+need an out-of-band process (a closed <code>allow_callsigns</code> list, club membership,
+whatever) — the software will not do it for you and does not pretend to.</p>
+<h3 id="14-content-and-purpose">1.4 Content and purpose<a class="headerlink" href="#14-content-and-purpose" title="Permanent link">&para;</a></h3>
+<p>Amateur radio is not a common carrier. Business communications, broadcasting,
+music, obscenity and (in most places) encrypted or commercial traffic are
+prohibited. An open IRC channel bridged to RF will eventually carry something
+you did not want radiated.</p>
+<p>What the software does:</p>
+<ul>
+<li>Strips IRC formatting and control characters before transmission — what goes
+  on the air is readable in a terminal.</li>
+<li>Caps message length (<code>max_rf_text_len</code>, default 160 characters) and rate
+  (token buckets per station and per IP user).</li>
+<li>Logs every frame in <code>axlisten</code>-compatible monitor format so you can
+  reconstruct what your station transmitted and when.</li>
+<li>Gives the control operator <code>RADIO OFF</code> (immediate transmitter kill, IRC keeps
+  running), <code>RADIO KICK &lt;callsign&gt;</code>, and <code>MODE #chan -r</code> to unbridge a channel.</li>
+</ul>
+<p>It does not do content filtering beyond that, and you should not expect it to.
+The control operator is a person, not a config file.</p>
+<h2 id="2-automatic-control">2. Automatic control<a class="headerlink" href="#2-automatic-control" title="Permanent link">&para;</a></h2>
+<p>Running this gateway means your station transmits without a human at the
+controls. Most administrations allow automatic control for specific station
+types on specific bands and segments — in the US, §97.109(d) permits it for
+stations in the auto-control subbands, and packet is one of the intended uses.
+Check that the frequency you plan to use is one where automatic control is
+permitted for your licence class.</p>
+<p>Practical consequences:</p>
+<ul>
+<li>Keep the control operator reachable. <code>OPER</code> plus <code>RADIO OFF</code> should be
+  possible from your phone.</li>
+<li>Pick a frequency that is used for packet by local convention, and coordinate
+  with whoever else is on it. <code>tx_pacing_ms</code> exists so you can be a good
+  neighbour; do not set it to 0 on a shared channel.</li>
+<li><code>radio.path</code> is capped at two digipeater hops, and empty is best. Long paths
+  are the classic way to make yourself unpopular.</li>
+</ul>
+<h2 id="3-before-you-go-on-the-air-checklist">3. Before you go on the air — checklist<a class="headerlink" href="#3-before-you-go-on-the-air-checklist" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[ ] Read your licence conditions on automatic control, third-party traffic
+      and encryption.</li>
+<li>[ ] <code>radio.callsign</code> is <em>your</em> callsign (or your club's, with permission).</li>
+<li>[ ] <code>id_interval_secs</code> ≤ 600 and <code>id_text</code> says something useful about the
+      station.</li>
+<li>[ ] The frequency permits automatic control for your licence class, and local
+      users know you are there.</li>
+<li>[ ] <code>require_callsign_for_rf = true</code> unless you have a specific reason.</li>
+<li>[ ] <code>allow_callsigns</code> populated if your rules require a closed system.</li>
+<li>[ ] You can reach <code>RADIO OFF</code> within a minute, from wherever you are.</li>
+<li>[ ] Logs are being kept somewhere you can read them later.</li>
+<li>[ ] <code>tx_pacing_ms</code> is set so you occupy a sane fraction of the channel.</li>
+<li>[ ] You have listened on the frequency for a while first.</li>
+</ul>
+<h2 id="4-regional-pointers">4. Regional pointers<a class="headerlink" href="#4-regional-pointers" title="Permanent link">&para;</a></h2>
+<p>These are starting points for your own reading, not authority:</p>
+<ul>
+<li><strong>United States</strong> — 47 CFR Part 97, especially §97.109 (control),
+  §97.113 (prohibited transmissions), §97.115 (third-party), §97.119 (ID),
+  §97.221 (automatically controlled digital stations).</li>
+<li><strong>United Kingdom</strong> — Ofcom Amateur Radio Licence terms, notably the clauses
+  on unattended operation and message content.</li>
+<li><strong>Sweden</strong> — PTS regulations (PTSFS) on amateur radio; SSA publishes
+  practical guidance on packet and unattended stations.</li>
+<li><strong>Germany</strong> — AFuG/AFuV; unattended operation has specific notification
+  requirements.</li>
+<li><strong>Canada</strong> — RBR-4.</li>
+<li><strong>IARU Region 1</strong> — band plans, for choosing a frequency that will not annoy
+  anyone.</li>
+</ul>
+<h2 id="5-if-in-doubt">5. If in doubt<a class="headerlink" href="#5-if-in-doubt" title="Permanent link">&para;</a></h2>
+<p>Leave <code>radio.enabled = false</code>. The server is a perfectly good IRC daemon
+without it, and <code>radio.tnc.kind = "loopback"</code> lets you exercise the entire
+gateway path — including the on-air protocol — with nothing reaching an
+antenna.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../protocol/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Protocol">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Protocol
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../packaging/" class="md-footer__link md-footer__link--next" aria-label="Next: Packaging">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Packaging
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      MIT. You are the licensee.
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/mashu/ax25ircd" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "content.code.copy", "content.tabs.link", "toc.follow", "search.suggest"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"alias": true, "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
