@@ -44,6 +44,10 @@ pub struct User {
     /// Set for RF users, and for IP users who have identified with `CALLSIGN`.
     pub callsign: Option<Callsign>,
     pub registered: bool,
+    /// Proven ownership of a REGISTER'd nick (IDENTIFY succeeded).
+    pub nick_identified: bool,
+    /// If set, this nick is registered by someone else and must be IDENTIFY'd.
+    pub identify_by: Option<Instant>,
     pub oper: bool,
     pub away: Option<String>,
     pub channels: HashSet<String>,
@@ -64,6 +68,8 @@ impl User {
             host,
             callsign: None,
             registered: false,
+            nick_identified: false,
+            identify_by: None,
             oper: false,
             away: None,
             channels: HashSet::new(),
@@ -85,7 +91,7 @@ impl User {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MemberFlags {
     pub op: bool,
     pub voice: bool,
@@ -116,6 +122,8 @@ pub struct Channel {
     pub topic_locked: bool,
     pub key: Option<String>,
     pub limit: Option<usize>,
+    /// Lowercased nicks that receive +o after IDENTIFY.
+    pub operators: HashSet<String>,
 }
 
 impl Channel {
@@ -127,10 +135,12 @@ impl Channel {
             topic_time: 0,
             members: HashMap::new(),
             rf,
-            moderated: false,
+            // RF channels are +m: only callsign-voiced users (and ops) may speak.
+            moderated: rf,
             topic_locked: true,
             key: None,
             limit: None,
+            operators: HashSet::new(),
         }
     }
 
@@ -221,28 +231,75 @@ impl State {
             .or_insert_with(|| Channel::new(name, rf))
     }
 
-    pub fn join(&mut self, id: &UserId, channel: &str) -> bool {
+    pub fn join(&mut self, id: &UserId, channel: &str) -> Option<MemberFlags> {
         let key = lower(channel);
-        let Some(chan) = self.channels.get_mut(&key) else {
-            return false;
+        let (rf, first, operators) = {
+            let chan = self.channels.get(&key)?;
+            if chan.members.contains_key(id) {
+                return None;
+            }
+            (chan.rf, chan.members.is_empty(), chan.operators.clone())
         };
-        if chan.members.contains_key(id) {
-            return false;
+        let flags = self.flags_for_parts(id, rf, first, &operators);
+        if let Some(chan) = self.channels.get_mut(&key) {
+            chan.members.insert(id.clone(), flags);
         }
-        let first = chan.members.is_empty();
-        chan.members.insert(
-            id.clone(),
-            MemberFlags {
-                // The first IP user in an empty channel gets ops; RF stations
-                // never do, because the callsign is unauthenticated.
-                op: first && !id.is_rf(),
-                voice: false,
-            },
-        );
         if let Some(user) = self.users.get_mut(id) {
             user.channels.insert(key);
         }
-        true
+        Some(flags)
+    }
+
+    pub fn flags_for_parts(
+        &self,
+        id: &UserId,
+        rf: bool,
+        first: bool,
+        operators: &HashSet<String>,
+    ) -> MemberFlags {
+        let Some(user) = self.users.get(id) else {
+            return MemberFlags::default();
+        };
+        let configured_op = operators.contains(&lower(&user.nick)) && user.nick_identified;
+        if rf {
+            MemberFlags {
+                op: user.oper || configured_op,
+                voice: user.callsign.is_some() || user.oper,
+            }
+        } else {
+            MemberFlags {
+                op: (first && !id.is_rf()) || user.oper || configured_op,
+                voice: false,
+            }
+        }
+    }
+
+    pub fn apply_intended_flags(&mut self, id: &UserId, channel: &str) -> Option<(MemberFlags, MemberFlags)> {
+        let key = lower(channel);
+        let (old, rf, operators) = {
+            let chan = self.channels.get(&key)?;
+            let old = *chan.members.get(id)?;
+            (old, chan.rf, chan.operators.clone())
+        };
+        let new = self.flags_for_parts(id, rf, false, &operators);
+        if old == new {
+            return None;
+        }
+        if let Some(flags) = self
+            .channels
+            .get_mut(&key)
+            .and_then(|c| c.members.get_mut(id))
+        {
+            *flags = new;
+        }
+        Some((old, new))
+    }
+
+    pub fn ip_count_from_host(&self, host: &str) -> usize {
+        self.users
+            .values()
+            .filter(|u| !u.is_rf() && u.host == host)
+            .count()
     }
 
     pub fn part(&mut self, id: &UserId, channel: &str) -> bool {
@@ -332,17 +389,27 @@ mod tests {
     }
 
     #[test]
-    fn first_ip_user_gets_ops_rf_never_does() {
+    fn first_ip_user_gets_ops_on_local_not_on_rf() {
         let mut s = State::default();
         let rf = UserId::Rf("SM0ABC".parse().unwrap());
-        s.insert_user(user(rf.clone(), "SM0ABC"));
+        let mut rf_user = user(rf.clone(), "SM0ABC");
+        rf_user.callsign = Some("SM0ABC".parse().unwrap());
+        s.insert_user(rf_user);
         s.insert_user(user(UserId::Ip(1), "alice"));
         s.ensure_channel("#rf", true);
+        s.ensure_channel("#local", false);
 
-        assert!(s.join(&rf, "#rf"));
-        assert!(!s.channel("#rf").unwrap().members[&rf].op);
-        assert!(s.join(&UserId::Ip(1), "#rf"));
-        assert!(!s.channel("#rf").unwrap().members[&UserId::Ip(1)].op);
+        let rf_flags = s.join(&rf, "#rf").unwrap();
+        assert!(!rf_flags.op, "RF stations never get channel ops");
+        assert!(rf_flags.voice, "a callsign is voiced on +r");
+
+        let ip_on_rf = s.join(&UserId::Ip(1), "#rf").unwrap();
+        assert!(!ip_on_rf.op);
+        assert!(!ip_on_rf.voice, "no callsign, no voice");
+
+        s.insert_user(user(UserId::Ip(2), "bob"));
+        let local = s.join(&UserId::Ip(2), "#local").unwrap();
+        assert!(local.op, "first IP user on a local channel gets ops");
     }
 
     #[test]
@@ -351,7 +418,7 @@ mod tests {
         s.insert_user(user(UserId::Ip(1), "alice"));
         s.set_nick(&UserId::Ip(1), "alice");
         s.ensure_channel("#a", false);
-        s.join(&UserId::Ip(1), "#a");
+        assert!(s.join(&UserId::Ip(1), "#a").is_some());
         assert_eq!(s.remove_user(&UserId::Ip(1)), vec!["#a"]);
         assert!(s.channel("#a").unwrap().members.is_empty());
         assert!(!s.nick_taken("alice"));

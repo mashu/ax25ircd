@@ -8,11 +8,13 @@
 //!   is what allows their traffic to be relayed to RF.
 //! * `RADIO <subcommand>` - the control operator's console.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tracing::info;
 
+use crate::accounts::AccountError;
 use crate::airc::{encode_fields, Kind};
+use crate::callsign::Callsign;
 use crate::irc::message::{is_channel_name, is_valid_nick, lower, Message};
 use crate::irc::numerics as num;
 use crate::policy::Verdict;
@@ -32,6 +34,16 @@ impl Server {
 
         let registered = self.state.user(&uid).map(|u| u.registered).unwrap_or(false);
         let cmd = msg.command.as_str();
+
+        if registered
+            && !matches!(cmd, "PONG" | "PING" | "QUIT")
+            && !self.policy.ip_cmd_rate_ok(&id.to_string(), Instant::now())
+        {
+            self.notice_user(&uid, "Slow down: command flood protection.");
+            let id_s = id.to_string();
+            self.audit.event("flood_cmd", &[("id", &id_s)]);
+            return;
+        }
 
         if !registered && !matches!(cmd, "PASS" | "NICK" | "USER" | "QUIT" | "PING" | "PONG" | "CAP")
         {
@@ -97,6 +109,11 @@ impl Server {
             "OPER" => self.cmd_oper(&uid, &msg),
             "CALLSIGN" => self.cmd_callsign(&uid, &msg),
             "RADIO" => self.cmd_radio(&uid, &msg),
+            "KICK" => self.cmd_kick(&uid, &msg),
+            "KILL" => self.cmd_kill(&uid, &msg),
+            "REGISTER" => self.cmd_register(&uid, &msg),
+            "IDENTIFY" => self.cmd_identify(&uid, &msg),
+            "UNREGISTER" => self.cmd_unregister(&uid, &msg),
             other => {
                 self.numeric(&uid, num::ERR_UNKNOWNCOMMAND, &[other, "Unknown command"]);
             }
@@ -166,17 +183,35 @@ impl Server {
             self.numeric(uid, num::ERR_NICKNAMEINUSE, &[&nick, "Nickname is already in use"]);
             return;
         }
+        let claimed = self.accounts.is_registered(&nick);
+        let timeout = Duration::from_secs(self.config.accounts.identify_timeout_secs);
         if let Some(u) = self.state.user_mut(uid) {
             u.got_nick = true;
+            u.nick_identified = false;
+            u.identify_by = if claimed {
+                Some(Instant::now() + timeout)
+            } else {
+                None
+            };
+        }
+        if claimed {
+            self.notice_user(
+                uid,
+                &format!(
+                    "This nick is registered. IDENTIFY <password> within {} seconds or it will be released.",
+                    self.config.accounts.identify_timeout_secs
+                ),
+            );
         }
 
         if was_registered {
             let d = Delivery::NickChange {
                 old_nick: old,
                 prefix,
-                new_nick: nick,
+                new_nick: nick.clone(),
             };
             self.broadcast_peers(uid, &d, true);
+            self.refresh_privileges(uid);
         } else {
             self.try_complete_registration(uid);
         }
@@ -217,6 +252,12 @@ impl Server {
         if let Some(u) = self.state.user_mut(uid) {
             u.registered = true;
         }
+        if let Some(u) = self.state.user(uid) {
+            self.audit.event(
+                "register",
+                &[("nick", &u.nick), ("user", &u.username), ("host", &u.host)],
+            );
+        }
 
         let server = self.server_name().to_string();
         let network = self.config.server.network.clone();
@@ -239,22 +280,35 @@ impl Server {
         self.numeric(uid, num::RPL_CREATED, &["This server was created at startup"]);
         self.numeric(uid, num::RPL_MYINFO, &[&server, "ax25ircd-0.1", "iow", "mnrtkl"]);
 
+        let radio = if self.rf_available() { "ON" } else { "OFF" };
         let isupport = format!(
             "CHANTYPES=#& PREFIX=(ov)@+ NICKLEN={} CHANNELLEN=50 CASEMAPPING=rfc1459 \
-             NETWORK={} MAXTARGETS=1 TOPICLEN=200 RFPACLEN={}",
-            self.config.server.max_nick_len, network, self.config.radio.paclen
+             NETWORK={} MAXTARGETS=1 TOPICLEN=200 CHANMODES=k,l,r,mnt RADIO={} RFCALL={}",
+            self.config.server.max_nick_len,
+            network,
+            radio,
+            self.config.radio.callsign
         );
         self.numeric(uid, num::RPL_ISUPPORT, &[&isupport, "are supported by this server"]);
 
         self.send_lusers(uid);
         self.send_motd(uid);
 
-        if self.config.radio.enabled {
+        let status = self.radio_status_line();
+        self.notice_user(uid, &status);
+        self.notice_user(
+            uid,
+            "On +r channels only a valid CALLSIGN gets +v (permission to speak). \
+             REGISTER <password> to keep a nick. IDENTIFY <password> to claim it. \
+             RADIO shows whether this station is transmitting.",
+        );
+        if self.accounts.is_registered(&user.nick) {
             self.notice_user(
                 uid,
-                "This server bridges to amateur packet radio. Anything you send to a \
-                 channel marked +r is transmitted on the air, in the clear, under the \
-                 gateway's licence. Identify with CALLSIGN <yourcall> first.",
+                &format!(
+                    "{} is registered. IDENTIFY <password> within {} seconds.",
+                    user.nick, self.config.accounts.identify_timeout_secs
+                ),
             );
         }
     }
@@ -347,9 +401,14 @@ impl Server {
             self.state.ensure_channel(name, false);
         }
 
-        if !self.state.join(uid, name) {
+        if self.state.join(uid, name).is_none() {
             return;
         }
+        let flags = self
+            .state
+            .channel(name)
+            .and_then(|c| c.members.get(uid).copied())
+            .unwrap_or_default();
         let real_name = self
             .state
             .channel(name)
@@ -361,13 +420,23 @@ impl Server {
             .map(|u| (u.nick.clone(), u.prefix()))
             .unwrap_or_default();
         let d = Delivery::Join {
-            nick,
+            nick: nick.clone(),
             prefix,
             channel: real_name.clone(),
         };
         self.broadcast_channel(&real_name, &d, None);
+        let server = self.server_name().to_string();
+        if flags.op {
+            self.announce_mode(&real_name, &server, "+o", &[&nick]);
+        }
+        if flags.voice {
+            self.announce_mode(&real_name, &server, "+v", &[&nick]);
+        }
         self.send_topic(uid, &real_name, false);
         self.send_names(uid, &real_name);
+        if self.state.channel(&real_name).map(|c| c.rf).unwrap_or(false) {
+            self.notice_rf_join(uid, &real_name);
+        }
     }
 
     fn cmd_part(&mut self, uid: &UserId, msg: &Message) {
@@ -565,6 +634,13 @@ impl Server {
         if target.oper {
             self.numeric(uid, num::RPL_WHOISOPERATOR, &[&target.nick, "is a control operator"]);
         }
+        if target.nick_identified {
+            self.numeric(
+                uid,
+                num::RPL_WHOISREGNICK,
+                &[&target.nick, "is a registered nick"],
+            );
+        }
         if let (UserId::Rf(call), Some(peer)) = (&target.id, {
             let c = target.id.callsign().cloned();
             c.and_then(|c| self.sessions.peer(&c))
@@ -630,7 +706,13 @@ impl Server {
                 '+' => adding = true,
                 '-' => adding = false,
                 'm' => {
-                    if let Some(ch) = self.state.channel_mut(&target) {
+                    if chan.rf && !is_oper {
+                        self.numeric(
+                            uid,
+                            num::ERR_NOPRIVILEGES,
+                            &["Only a control operator may change +m on an RF channel"],
+                        );
+                    } else if let Some(ch) = self.state.channel_mut(&target) {
                         ch.moderated = adding;
                     }
                 }
@@ -663,6 +745,14 @@ impl Server {
                 'o' | 'v' => {
                     let who = msg.param(arg_index).map(|s| s.to_string());
                     arg_index += 1;
+                    if c == 'o' && chan.rf && !is_oper {
+                        self.numeric(
+                            uid,
+                            num::ERR_NOPRIVILEGES,
+                            &["Only a control operator may grant +o on an RF channel"],
+                        );
+                        continue;
+                    }
                     if let Some(target_id) = who.as_deref().and_then(|n| self.find_target(n)) {
                         if let Some(ch) = self.state.channel_mut(&target) {
                             if let Some(flags) = ch.members.get_mut(&target_id) {
@@ -704,8 +794,15 @@ impl Server {
                 u.oper = true;
             }
             self.numeric(uid, num::RPL_YOUREOPER, &["You are now a control operator"]);
+            if let Some(u) = self.state.user(uid) {
+                self.audit.event("oper", &[("nick", &u.nick), ("host", &u.host)]);
+            }
+            self.refresh_privileges(uid);
         } else {
             self.numeric(uid, num::ERR_PASSWDMISMATCH, &["Password incorrect"]);
+            if let Some(u) = self.state.user(uid) {
+                self.audit.event("oper_fail", &[("nick", &u.nick), ("host", &u.host)]);
+            }
         }
     }
 
@@ -739,8 +836,23 @@ impl Server {
                 return;
             }
             if chan.moderated && !member.map(|f| f.op || f.voice).unwrap_or(false) {
-                self.numeric(uid, num::ERR_CANNOTSENDTOCHAN, &[&chan.name, "Channel is moderated (+m)"]);
+                self.numeric(uid, num::ERR_CANNOTSENDTOCHAN, &[&chan.name, "Channel is moderated (+m); identify with CALLSIGN for +v"]);
                 return;
+            }
+
+            if chan.rf {
+                let key = format!("{}:{}" , sender.nick, chan.name);
+                if !self.policy.rf_channel_rate_ok(&key, Instant::now()) {
+                    self.notice_user(
+                        uid,
+                        "Flood protection: too many messages on the RF channel. Slow down.",
+                    );
+                    self.audit.event(
+                        "flood_rf",
+                        &[("nick", &sender.nick), ("channel", &chan.name)],
+                    );
+                    return;
+                }
             }
 
             let mut allow_rf = chan.rf && chan.has_rf_members() && self.rf_available();
@@ -749,6 +861,11 @@ impl Server {
                 match self.screen_for_air(uid, &sender.nick, &text) {
                     Some(screened) => text = screened,
                     None => allow_rf = false,
+                }
+            } else if chan.rf {
+                let why = self.channel_air_line(&chan.name);
+                if !why.is_empty() {
+                    self.notice_user(uid, &why);
                 }
             }
             let d = Delivery::Privmsg {
@@ -759,6 +876,16 @@ impl Server {
                 notice,
             };
             self.broadcast_channel_ex(&chan.name, &d, Some(uid), allow_rf);
+            if allow_rf && self.config.radio.notice_air_relay && !notice {
+                self.notice_user(
+                    uid,
+                    &format!(
+                        "Relayed to RF ({}). {} station(s) on frequency.",
+                        self.config.radio.callsign,
+                        self.sessions.peers().count()
+                    ),
+                );
+            }
             return;
         }
 
@@ -919,6 +1046,12 @@ impl Server {
             u.callsign = Some(call.clone());
         }
         info!(?uid, %call, "IP user claimed a callsign");
+        if let Some(u) = self.state.user(uid) {
+            self.audit.event(
+                "callsign",
+                &[("nick", &u.nick), ("call", &call.to_string()), ("host", &u.host)],
+            );
+        }
         self.notice_user(
             uid,
             &format!(
@@ -926,51 +1059,70 @@ impl Server {
                  as such. You are responsible for your own transmissions."
             ),
         );
+        self.refresh_privileges(uid);
     }
 
     fn cmd_radio(&mut self, uid: &UserId, msg: &Message) {
-        if !self.state.user(uid).map(|u| u.oper).unwrap_or(false) {
+        let sub = msg.param(0).unwrap_or("STATUS").to_ascii_uppercase();
+        let oper = self.state.user(uid).map(|u| u.oper).unwrap_or(false);
+        if matches!(sub.as_str(), "STATUS") {
+            let status = self.radio_status_line();
+            self.notice_user(uid, &status);
+            if oper {
+                let s = self.stats.clone();
+                self.notice_user(
+                    uid,
+                    &format!(
+                        "frames rx {} tx {} dropped {} ({} bytes); stations {}; mail {}",
+                        s.rf_frames_rx,
+                        s.rf_frames_tx,
+                        s.rf_frames_dropped,
+                        s.rf_bytes_tx,
+                        self.sessions.peers().count(),
+                        self.mailbox.len()
+                    ),
+                );
+            }
+            return;
+        }
+        if !oper {
             self.numeric(uid, num::ERR_NOPRIVILEGES, &["Permission denied"]);
             return;
         }
-        let sub = msg.param(0).unwrap_or("STATUS").to_ascii_uppercase();
         match sub.as_str() {
-            "STATUS" => {
-                let s = self.stats.clone();
-                let lines = vec![
-                    format!(
-                        "transmitter: {}",
-                        if self.rf_available() { "ON" } else { "OFF" }
-                    ),
-                    format!(
-                        "station: {} via {}",
-                        self.config.radio.callsign,
-                        if self.config.radio.path.is_empty() {
-                            "direct".to_string()
-                        } else {
-                            self.config.radio.path.join(",")
-                        }
-                    ),
-                    format!(
-                        "frames rx {} tx {} dropped {} ({} bytes transmitted)",
-                        s.rf_frames_rx, s.rf_frames_tx, s.rf_frames_dropped, s.rf_bytes_tx
-                    ),
-                    format!("stations heard: {}", self.sessions.peers().count()),
-                    format!("messages held: {}", self.mailbox.len()),
-                ];
-                for l in lines {
-                    self.notice_user(uid, &l);
-                }
-            }
             "OFF" => {
                 self.rf_enabled = false;
                 info!("transmitter disabled by control operator");
                 self.notice_user(uid, "Transmitter disabled. The IRC side keeps running.");
+                self.audit.event("radio_off", &[]);
+                let line = self.radio_status_line();
+                for ch in self
+                    .state
+                    .channels
+                    .values()
+                    .filter(|c| c.rf)
+                    .map(|c| c.name.clone())
+                    .collect::<Vec<_>>()
+                {
+                    self.notice_rf_audience(&ch, &line);
+                }
             }
             "ON" => {
                 if self.config.radio.enabled {
                     self.rf_enabled = true;
                     self.notice_user(uid, "Transmitter enabled.");
+                    self.audit.event("radio_on", &[]);
+                    let line = self.radio_status_line();
+                    for ch in self
+                        .state
+                        .channels
+                        .values()
+                        .filter(|c| c.rf)
+                        .map(|c| c.name.clone())
+                        .collect::<Vec<_>>()
+                    {
+                        self.notice_rf_audience(&ch, &line);
+                    }
                 } else {
                     self.notice_user(uid, "Radio support is disabled in the configuration.");
                 }
@@ -1025,6 +1177,172 @@ impl Server {
                 "RADIO STATUS | ON | OFF | ID | HEARD | MAIL | KICK <callsign>",
             ),
         }
+    }
+
+    fn cmd_kick(&mut self, uid: &UserId, msg: &Message) {
+        let Some(channel) = msg.param(0).map(|s| s.to_string()) else {
+            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["KICK", "Not enough parameters"]);
+            return;
+        };
+        let Some(who) = msg.param(1).map(|s| s.to_string()) else {
+            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["KICK", "Not enough parameters"]);
+            return;
+        };
+        let reason = msg.param(2).unwrap_or("Kicked").to_string();
+        let Some(chan) = self.state.channel(&channel).cloned() else {
+            self.numeric(uid, num::ERR_NOSUCHCHANNEL, &[&channel, "No such channel"]);
+            return;
+        };
+        if !self.is_chanop(uid, &chan.name) {
+            self.numeric(uid, num::ERR_CHANOPRIVSNEEDED, &[&chan.name, "You're not channel operator"]);
+            return;
+        }
+        let Some(target) = self.find_target(&who) else {
+            self.numeric(uid, num::ERR_NOSUCHNICK, &[&who, "No such nick"]);
+            return;
+        };
+        if !chan.members.contains_key(&target) {
+            self.numeric(uid, num::ERR_USERNOTINCHANNEL, &[&who, &chan.name, "They aren't on that channel"]);
+            return;
+        }
+        let kicker = self.state.user(uid).map(|u| u.prefix()).unwrap_or_default();
+        let line = Message::new("KICK", vec![chan.name.clone(), who.clone(), reason.clone()])
+            .with_prefix(kicker)
+            .to_string();
+        for member in self.state.members(&chan.name) {
+            if let UserId::Ip(id) = member {
+                self.send_raw(id, line.clone());
+            }
+        }
+        self.state.part(&target, &chan.name);
+        self.audit.event("kick", &[("channel", &chan.name), ("nick", &who), ("reason", &reason)]);
+        if let UserId::Rf(call) = &target {
+            if let Some(peer) = self.sessions.peer_mut(call) {
+                peer.channels.remove(&chan.name);
+            }
+        }
+    }
+
+    fn cmd_kill(&mut self, uid: &UserId, msg: &Message) {
+        if !self.state.user(uid).map(|u| u.oper).unwrap_or(false) {
+            self.numeric(uid, num::ERR_NOPRIVILEGES, &["Permission denied"]);
+            return;
+        }
+        let Some(who) = msg.param(0).map(|s| s.to_string()) else {
+            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["KILL", "Not enough parameters"]);
+            return;
+        };
+        let reason = msg.param(1).unwrap_or("Killed").to_string();
+        let Some(target) = self.find_target(&who) else {
+            self.numeric(uid, num::ERR_NOSUCHNICK, &[&who, "No such nick"]);
+            return;
+        };
+        self.audit.event("kill", &[("nick", &who), ("reason", &reason)]);
+        if let UserId::Ip(id) = target {
+            self.send_raw(id, format!("ERROR :Killed ({reason})"));
+        }
+        self.quit_user(&target, &format!("Killed ({reason})"));
+    }
+
+    fn cmd_register(&mut self, uid: &UserId, msg: &Message) {
+        let Some(password) = msg.param(0) else {
+            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["REGISTER", "Not enough parameters"]);
+            return;
+        };
+        let Some(user) = self.state.user(uid).cloned() else {
+            return;
+        };
+        if let Ok(call) = Callsign::from_nick(&user.nick) {
+            if call.looks_like_amateur_call() {
+                self.notice_user(uid, "Callsign nicks cannot be registered; they belong to RF stations.");
+                return;
+            }
+        }
+        if user.nick_identified && self.accounts.is_registered(&user.nick) {
+            match self.accounts.set_password(&user.nick, password, self.config.accounts.min_password_len) {
+                Ok(()) => self.notice_user(uid, "Password updated."),
+                Err(e) => self.notice_account_error(uid, e),
+            }
+            return;
+        }
+        match self.accounts.register(&user.nick, password, self.config.accounts.min_password_len) {
+            Ok(()) => {
+                if let Some(u) = self.state.user_mut(uid) {
+                    u.nick_identified = true;
+                    u.identify_by = None;
+                }
+                self.notice_user(
+                    uid,
+                    "Nick registered. The password is stored as an Argon2id hash, not recoverable. IDENTIFY on next connect.",
+                );
+                self.audit.event("nick_register", &[("nick", &user.nick), ("host", &user.host)]);
+                self.refresh_privileges(uid);
+            }
+            Err(e) => self.notice_account_error(uid, e),
+        }
+    }
+
+    fn cmd_identify(&mut self, uid: &UserId, msg: &Message) {
+        let Some(password) = msg.param(0) else {
+            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["IDENTIFY", "Not enough parameters"]);
+            return;
+        };
+        let Some(user) = self.state.user(uid).cloned() else {
+            return;
+        };
+        match self.accounts.verify(&user.nick, password) {
+            Ok(()) => {
+                if let Some(u) = self.state.user_mut(uid) {
+                    u.nick_identified = true;
+                    u.identify_by = None;
+                }
+                self.notice_user(uid, "Password accepted. You own this nick for this session.");
+                self.audit.event("identify", &[("nick", &user.nick), ("host", &user.host)]);
+                self.refresh_privileges(uid);
+            }
+            Err(e) => self.notice_account_error(uid, e),
+        }
+    }
+
+    fn cmd_unregister(&mut self, uid: &UserId, msg: &Message) {
+        let Some(password) = msg.param(0) else {
+            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["UNREGISTER", "Not enough parameters"]);
+            return;
+        };
+        let Some(user) = self.state.user(uid).cloned() else {
+            return;
+        };
+        if self.accounts.verify(&user.nick, password).is_err() {
+            self.notice_user(uid, "Password incorrect.");
+            return;
+        }
+        match self.accounts.drop_nick(&user.nick) {
+            Ok(()) => {
+                if let Some(u) = self.state.user_mut(uid) {
+                    u.nick_identified = false;
+                }
+                self.notice_user(uid, "Nick unregistered.");
+                self.audit.event("nick_drop", &[("nick", &user.nick)]);
+                self.refresh_privileges(uid);
+            }
+            Err(e) => self.notice_account_error(uid, e),
+        }
+    }
+
+    fn notice_account_error(&mut self, uid: &UserId, e: AccountError) {
+        let text = match e {
+            AccountError::TooShort => format!(
+                "Password too short (minimum {} characters).",
+                self.config.accounts.min_password_len
+            ),
+            AccountError::TooLong => "Password too long.".into(),
+            AccountError::Hash => "Could not hash the password.".into(),
+            AccountError::Io => "Could not write the nick database.".into(),
+            AccountError::Taken => "That nick is already registered. IDENTIFY to claim it.".into(),
+            AccountError::BadPassword => "Password incorrect.".into(),
+            AccountError::NotRegistered => "That nick is not registered. REGISTER <password> first.".into(),
+        };
+        self.notice_user(uid, &text);
     }
 
     fn force_id(&mut self) {

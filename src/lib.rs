@@ -18,6 +18,8 @@
 
 pub mod airc;
 pub mod ax25;
+pub mod accounts;
+pub mod audit;
 pub mod bridge;
 pub mod callsign;
 pub mod config;

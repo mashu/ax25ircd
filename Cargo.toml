@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 description = "IRC server with an AX.25 packet-radio gateway for amateur radio operators"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 readme = "README.md"
 default-run = "ax25ircd"
 keywords = ["irc", "ax25", "ham-radio", "packet-radio", "amateur-radio"]
@@ -24,6 +24,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
 anyhow = "1"
+serde_json = "1"
+argon2 = { version = "0.5", features = ["std"] }
+password-hash = "0.5"
 
 # Serial KISS TNC support is optional so the core builds with no C deps.
 tokio-serial = { version = "5", optional = true }

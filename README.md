@@ -29,6 +29,10 @@ and later.
 
 ## Quick start
 
+Laptop, virtual channel, Direwolf, and QRP Labs QMX: **`docs/QUICKSTART.md`**.
+
+Short version, IRC only:
+
 ```sh
 cargo build --release
 cp ax25ircd.example.toml ax25ircd.toml
@@ -37,35 +41,9 @@ $EDITOR ax25ircd.toml            # at minimum: server.name
 ./target/release/ax25ircd -c ax25ircd.toml
 ```
 
-With `radio.enabled = false` this is a plain IRC server. Connect on
-`127.0.0.1:6667` and join `#local`.
-
-To exercise the whole radio path without transmitting, set
-`radio.enabled = true` and `radio.tnc.kind = "loopback"`.
-
-For real RF, run Direwolf with `KISSPORT 8001` and point `[radio.tnc]` at it:
-
-```toml
-[radio]
-enabled = true
-callsign = "SK0MT-1"          # your callsign; it identifies the station
-id_interval_secs = 540        # must be <= 600
-
-[radio.tnc]
-kind = "tcp"
-host = "127.0.0.1"
-port = 8001
-```
-
-**Read `docs/REGULATORY.md` before you enable the radio.** Doing so makes your
-station transmit automatically, under your licence, carrying other people's
-traffic.
-
-Serial TNCs need a feature flag:
-
-```sh
-cargo build --release --features serial
-```
+Connect on `127.0.0.1:6667` and join `#local`. Leave `radio.enabled = false`
+until you have read `docs/REGULATORY.md` and the radio section of the
+quickstart.
 
 ## Trying the whole thing without a radio
 
@@ -161,11 +139,21 @@ config. A gateway is not a mail server.
 Beyond RFC 1459, two local commands:
 
 ```
-CALLSIGN <call>     identify with an amateur callsign (required before your
-                    traffic will be relayed to RF; recorded as an unverified
-                    claim and logged as such)
+CALLSIGN <call>     identify with an amateur callsign; on +r channels this
+                    grants +v (permission to speak). Unidentified users may
+                    join and listen only. Recorded as an unverified claim.
 CALLSIGN            show what you are currently identified as
+REGISTER <password> bind the current nick to an Argon2id hash on disk
+IDENTIFY <password> prove you own a registered nick
+UNREGISTER <password>
+RADIO               public transmitter status (ON/OFF, callsign, frames)
+KICK <chan> <nick>  channel operator or server operator
+KILL <nick>         server operator only
 ```
+
+`#rf` is `+rm`: moderated and bridged. Only a valid callsign (or a server
+operator) gets voice. Channel operators are listed in the config
+(`operators = ["alice"]`) and receive `+o` after `IDENTIFY`.
 
 For control operators (after `OPER`):
 
@@ -233,6 +221,7 @@ src/
     ax25irc-station.rs   client for the radio side
     ax25irc-kisshub.rs   virtual channel for development
 docs/
+  QUICKSTART.md      laptop, Direwolf, QMX
   DESIGN.md          why it is built this way
   PROTOCOL.md        AIRC/1 specification
   REGULATORY.md      the rules, and what the software does about them
@@ -241,8 +230,7 @@ tests/
 packaging/
   ax25ircd.service   systemd unit (SIGINT on stop, so the station signs off)
 ax25ircd.example.toml
-LICENSE-MIT
-LICENSE-APACHE
+LICENSE
 ```
 
 ## Not doing
@@ -253,4 +241,4 @@ file transfer, and encryption of any kind on the RF path.
 
 ## Licence
 
-MIT or Apache-2.0, at your option.
+MIT. See `LICENSE`.

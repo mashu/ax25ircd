@@ -11,7 +11,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::accounts::Accounts;
 use crate::airc::{encode_fields, AircFrame, Kind, SessionConfig, Sessions};
+use crate::audit::Audit;
 use crate::ax25::{Ax25Frame, TncHandle};
 use crate::callsign::Callsign;
 use crate::config::Config;
@@ -103,6 +105,8 @@ pub struct Server {
     /// Messages held for stations that are out of range.
     pub mailbox: Mailbox,
     pub stats: Stats,
+    pub accounts: Accounts,
+    pub audit: Audit,
     tnc: Option<TncHandle>,
     outputs: HashMap<ClientId, mpsc::UnboundedSender<String>>,
     /// Runtime kill switch for the transmitter (`RADIO OFF`). The control
@@ -130,23 +134,30 @@ impl Server {
                 chan.topic = Some(ch.topic.clone());
                 chan.topic_setter = config.server.name.clone();
             }
+            chan.operators = ch
+                .operators
+                .iter()
+                .map(|n| lower(n))
+                .collect();
         }
-        let policy = Policy::new(crate::config::PolicyConfig {
-            max_rf_text_len: config.policy.max_rf_text_len,
-            rf_msgs_per_min: config.policy.rf_msgs_per_min,
-            rf_burst: config.policy.rf_burst,
-            ip_to_rf_msgs_per_min: config.policy.ip_to_rf_msgs_per_min,
-            block_apparent_ciphertext: config.policy.block_apparent_ciphertext,
-            require_callsign_for_rf: config.policy.require_callsign_for_rf,
-            deny_callsigns: config.policy.deny_callsigns.clone(),
-            allow_callsigns: config.policy.allow_callsigns.clone(),
-        });
+        let policy = Policy::new(config.policy.clone());
         let mailbox = Mailbox::new(
             config.radio.mailbox_enabled,
             config.radio.mailbox_per_station,
             config.radio.mailbox_total,
             Duration::from_secs(config.radio.mailbox_ttl_secs),
         );
+        let accounts = match Accounts::load(&config.accounts.file) {
+            Ok(a) => a,
+            Err(e) => {
+                warn!(
+                    path = %config.accounts.file,
+                    "nick accounts file unreadable ({e}); starting empty"
+                );
+                Accounts::empty(&config.accounts.file)
+            }
+        };
+        let audit = Audit::open(config.logging.audit_file.as_deref());
         Self {
             rf_enabled: config.radio.enabled && tnc.is_some(),
             config,
@@ -155,6 +166,8 @@ impl Server {
             sessions,
             mailbox,
             stats: Stats::default(),
+            accounts,
+            audit,
             tnc,
             outputs: HashMap::new(),
             last_id: Instant::now(),
@@ -177,8 +190,21 @@ impl Server {
         let now = Instant::now();
         match event {
             Event::Connected { id, host, out } => {
+                let cap = self.config.listen.max_conns_per_host;
+                if cap > 0 && self.state.ip_count_from_host(&host) >= cap as usize {
+                    let _ = out.send(format!(
+                        "ERROR :Too many connections from {host} (max {cap})"
+                    ));
+                    self.audit.event(
+                        "connect_denied",
+                        &[("host", &host), ("reason", "max_conns_per_host")],
+                    );
+                    return;
+                }
                 self.outputs.insert(id, out);
                 self.stats.ip_connections += 1;
+                let id_s = id.to_string();
+                self.audit.event("connect", &[("id", &id_s), ("host", &host)]);
                 let user = User::new(UserId::Ip(id), host, now);
                 self.state.insert_user(user);
             }
@@ -188,7 +214,18 @@ impl Server {
                 }
             }
             Event::Disconnected { id, reason } => {
-                self.quit_user(&UserId::Ip(id), &reason);
+                let uid = UserId::Ip(id);
+                if let Some(u) = self.state.user(&uid) {
+                    self.audit.event(
+                        "disconnect",
+                        &[
+                            ("nick", &u.nick),
+                            ("host", &u.host),
+                            ("reason", &reason),
+                        ],
+                    );
+                }
+                self.quit_user(&uid, &reason);
                 self.outputs.remove(&id);
             }
             Event::Rf(frame) => self.handle_rf_frame(frame, now),
@@ -216,6 +253,7 @@ impl Server {
         }
         self.maybe_identify(now);
         self.expire_unregistered(now);
+        self.expire_unidentified(now);
     }
 
     /// Drop connections that never finished the NICK/USER handshake. Open
@@ -235,6 +273,60 @@ impl Server {
                 self.send_raw(id, "ERROR :Registration timeout".into());
             }
             self.quit_user(&uid, "Registration timeout");
+        }
+    }
+
+    /// A registered nick that was never IDENTIFY'd is released.
+    fn expire_unidentified(&mut self, now: Instant) {
+        let stale: Vec<UserId> = self
+            .state
+            .users
+            .values()
+            .filter(|u| {
+                !u.is_rf()
+                    && !u.nick_identified
+                    && u.identify_by.map(|d| now >= d).unwrap_or(false)
+            })
+            .map(|u| u.id.clone())
+            .collect();
+        for uid in stale {
+            let old = self
+                .state
+                .user(&uid)
+                .map(|u| u.nick.clone())
+                .unwrap_or_default();
+            let guest = format!("Guest{}", match uid {
+                UserId::Ip(id) => id,
+                UserId::Rf(_) => 0,
+            });
+            if let Some(u) = self.state.user_mut(&uid) {
+                u.identify_by = None;
+            }
+            if self.state.nick_taken(&guest) {
+                self.notice_user(&uid, "This nick is registered. Disconnecting.");
+                if let UserId::Ip(id) = uid {
+                    self.send_raw(id, "ERROR :Identify timeout on a registered nick".into());
+                }
+                self.quit_user(&uid, "Identify timeout");
+                continue;
+            }
+            let prefix = self.state.user(&uid).map(|u| u.prefix()).unwrap_or_default();
+            let _ = self.state.set_nick(&uid, &guest);
+            let d = Delivery::NickChange {
+                old_nick: old.clone(),
+                prefix,
+                new_nick: guest.clone(),
+            };
+            self.broadcast_peers(&uid, &d, true);
+            self.notice_user(
+                &uid,
+                &format!("{old} is registered. Your nick is now {guest}. IDENTIFY to reclaim it."),
+            );
+            self.refresh_privileges(&uid);
+            self.audit.event(
+                "identify_timeout",
+                &[("old", &old), ("guest", &guest)],
+            );
         }
     }
 
@@ -479,6 +571,13 @@ impl Server {
             self.stats.rf_frames_tx += 1;
             self.stats.rf_bytes_tx += len as u64;
             self.transmitted_since_id = true;
+            let kind = format!("{:?}", frame.kind);
+            let n = len.to_string();
+            let dest_s = dest.to_string();
+            self.audit.event(
+                "rf_tx",
+                &[("dest", &dest_s), ("kind", &kind), ("bytes", &n)],
+            );
         } else {
             self.stats.rf_frames_dropped += 1;
         }
@@ -544,9 +643,38 @@ impl Server {
             };
             self.broadcast_peers(uid, &d, false);
         }
+        let rf_channels: Vec<String> = if user.is_rf() {
+            user.channels
+                .iter()
+                .filter_map(|k| {
+                    self.state.channels.get(k).and_then(|c| {
+                        if c.rf {
+                            Some(c.name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.state.remove_user(uid);
         if let UserId::Rf(call) = uid {
             self.sessions.forget(call);
+        }
+        for ch in rf_channels {
+            if !self
+                .state
+                .channel(&ch)
+                .map(|c| c.has_rf_members())
+                .unwrap_or(true)
+            {
+                self.notice_rf_audience(
+                    &ch,
+                    "No RF station remains in this channel. Messages stay on IRC until one joins.",
+                );
+            }
         }
     }
 
@@ -567,6 +695,142 @@ impl Server {
 
     pub fn channel_key(&self, name: &str) -> String {
         lower(name)
+    }
+
+    pub fn is_chanop(&self, uid: &UserId, channel: &str) -> bool {
+        if self.state.user(uid).map(|u| u.oper).unwrap_or(false) {
+            return true;
+        }
+        self.state
+            .channel(channel)
+            .and_then(|c| c.members.get(uid).copied())
+            .map(|f| f.op)
+            .unwrap_or(false)
+    }
+
+    pub fn radio_status_line(&self) -> String {
+        if !self.config.radio.enabled {
+            return "Radio gateway is disabled. This is a plain IRC server; nothing is radiated."
+                .into();
+        }
+        let call = &self.config.radio.callsign;
+        if !self.rf_enabled {
+            return format!(
+                "Radio gateway: transmitter OFF. Station {call}. Nothing is being radiated."
+            );
+        }
+        if !self.tnc.is_some() {
+            return format!("Radio gateway: no TNC. Station {call}. Nothing is being radiated.");
+        }
+        format!(
+            "Radio gateway: transmitter ON, station {call}, {} RF station(s) heard, {} frames TX / {} RX ({} bytes on air).",
+            self.sessions.peers().count(),
+            self.stats.rf_frames_tx,
+            self.stats.rf_frames_rx,
+            self.stats.rf_bytes_tx
+        )
+    }
+
+    pub fn channel_air_line(&self, channel: &str) -> String {
+        let Some(chan) = self.state.channel(channel) else {
+            return String::new();
+        };
+        if !chan.rf {
+            return format!("{channel} is Internet-only. Nothing here goes on the air.");
+        }
+        if !self.rf_available() {
+            return format!(
+                "{channel} is +r (bridged) but the transmitter is OFF. Messages stay on IRC."
+            );
+        }
+        if !chan.has_rf_members() {
+            return format!(
+                "{channel} is +r, transmitter ON ({}). No RF station is in the channel, so messages stay on IRC until one joins.",
+                self.config.radio.callsign
+            );
+        }
+        format!(
+            "{channel} is +r, transmitter ON ({}). Messages from +v users are sent on the air.",
+            self.config.radio.callsign
+        )
+    }
+
+    pub fn announce_mode(&mut self, channel: &str, setter: &str, changes: &str, args: &[&str]) {
+        let mut params = vec![channel.to_string(), changes.to_string()];
+        params.extend(args.iter().map(|s| (*s).to_string()));
+        let line = Message::new("MODE", params)
+            .with_prefix(setter.to_string())
+            .to_string();
+        for member in self.state.members(channel) {
+            if let UserId::Ip(id) = member {
+                self.send_raw(id, line.clone());
+            }
+        }
+    }
+
+    /// Recompute +o/+v on every channel this user is in, and tell IRC clients.
+    pub fn refresh_privileges(&mut self, uid: &UserId) {
+        let channels: Vec<String> = self
+            .state
+            .user(uid)
+            .map(|u| {
+                u.channels
+                    .iter()
+                    .filter_map(|k| self.state.channels.get(k).map(|c| c.name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let nick = self
+            .state
+            .user(uid)
+            .map(|u| u.nick.clone())
+            .unwrap_or_default();
+        let server = self.server_name().to_string();
+        for ch in channels {
+            let Some((old, new)) = self.state.apply_intended_flags(uid, &ch) else {
+                continue;
+            };
+            if old.op != new.op {
+                self.announce_mode(
+                    &ch,
+                    &server,
+                    if new.op { "+o" } else { "-o" },
+                    &[&nick],
+                );
+            }
+            if old.voice != new.voice {
+                self.announce_mode(
+                    &ch,
+                    &server,
+                    if new.voice { "+v" } else { "-v" },
+                    &[&nick],
+                );
+            }
+        }
+    }
+
+    pub fn notice_rf_join(&mut self, uid: &UserId, channel: &str) {
+        self.notice_user(
+            uid,
+            &format!(
+                "{channel} is +rm: bridged to amateur radio. Only users identified with a \
+                 valid callsign receive +v and may speak. Everyone else may listen."
+            ),
+        );
+        let status = self.radio_status_line();
+        self.notice_user(uid, &status);
+        let air = self.channel_air_line(channel);
+        if !air.is_empty() {
+            self.notice_user(uid, &air);
+        }
+    }
+
+    pub fn notice_rf_audience(&mut self, channel: &str, text: &str) {
+        for uid in self.state.members(channel) {
+            if !uid.is_rf() {
+                self.notice_user(&uid, text);
+            }
+        }
     }
 }
 

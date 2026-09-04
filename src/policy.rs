@@ -75,16 +75,22 @@ pub struct Policy {
     pub config: PolicyConfig,
     rf_out: RateLimiter,
     ip_to_rf: RateLimiter,
+    rf_channel: RateLimiter,
+    ip_cmds: RateLimiter,
 }
 
 impl Policy {
     pub fn new(config: PolicyConfig) -> Self {
         let rf_out = RateLimiter::new(config.rf_msgs_per_min, config.rf_burst);
         let ip_to_rf = RateLimiter::new(config.ip_to_rf_msgs_per_min, config.rf_burst);
+        let rf_channel = RateLimiter::new(config.rf_channel_msgs_per_min, config.rf_channel_burst);
+        let ip_cmds = RateLimiter::new(config.ip_cmds_per_min, config.ip_cmd_burst);
         Self {
             config,
             rf_out,
             ip_to_rf,
+            rf_channel,
+            ip_cmds,
         }
     }
 
@@ -117,6 +123,14 @@ impl Policy {
         self.ip_to_rf.check(key, now)
     }
 
+    pub fn rf_channel_rate_ok(&mut self, key: &str, now: Instant) -> bool {
+        self.rf_channel.check(key, now)
+    }
+
+    pub fn ip_cmd_rate_ok(&mut self, key: &str, now: Instant) -> bool {
+        self.ip_cmds.check(key, now)
+    }
+
     /// Check and normalise a message body that is about to be transmitted.
     pub fn screen_outbound(&self, text: &str) -> Verdict {
         let cleaned = sanitize(text);
@@ -142,6 +156,8 @@ impl Policy {
     pub fn expire(&mut self, now: Instant) {
         self.rf_out.expire(now, Duration::from_secs(3600));
         self.ip_to_rf.expire(now, Duration::from_secs(3600));
+        self.rf_channel.expire(now, Duration::from_secs(3600));
+        self.ip_cmds.expire(now, Duration::from_secs(3600));
     }
 }
 

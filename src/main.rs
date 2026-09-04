@@ -2,7 +2,9 @@
 //!
 //! Usage: `ax25ircd [--config path] [--check]`
 
+use std::fs::OpenOptions;
 use std::sync::atomic::AtomicU64;
+use std::sync::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,16 +14,10 @@ use ax25ircd::irc::client::{listen, ListenerOptions};
 use ax25ircd::server::{self, Event, Server};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
+use tracing_subscriber::prelude::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ax25ircd=info".into()),
-        )
-        .init();
-
     let mut path = "ax25ircd.toml".to_string();
     let mut check_only = false;
     let mut args = std::env::args().skip(1);
@@ -45,6 +41,28 @@ async fn main() -> anyhow::Result<()> {
         println!("{path}: configuration is valid");
         return Ok(());
     }
+
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "ax25ircd=info".into());
+    let stdout = tracing_subscriber::fmt::layer();
+    if let Some(log_path) = &config.logging.file {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)?;
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(Mutex::new(file));
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(stdout)
+            .with(file_layer)
+            .init();
+        info!(path = %log_path, "logging to file");
+    } else {
+        tracing_subscriber::registry().with(filter).with(stdout).init();
+    }
+
     let config = Arc::new(config);
 
     // Radio link.

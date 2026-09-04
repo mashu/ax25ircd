@@ -222,7 +222,8 @@ can be smuggled onto the air by waiting.
 
 ## 8. Operating it
 
-Typical deployment with Direwolf:
+Typical deployment with Direwolf (step-by-step, including QMX:
+`docs/QUICKSTART.md`):
 
 ```
 [direwolf]  ADEVICE plughw:1,0 / MODEM 1200 / KISSPORT 8001

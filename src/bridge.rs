@@ -213,24 +213,40 @@ impl Server {
             );
             return;
         }
-        if !self.state.join(&uid, &display) {
+        if self.state.join(&uid, &display).is_none() {
             return;
         }
         if let Some(peer) = self.sessions.peer_mut(call) {
             peer.channels.insert(display.clone());
         }
+        let flags = self
+            .state
+            .channel(&display)
+            .and_then(|c| c.members.get(&uid).copied())
+            .unwrap_or_default();
         let (nick, prefix) = self
             .state
             .user(&uid)
             .map(|u| (u.nick.clone(), u.prefix()))
             .unwrap_or_default();
         let d = Delivery::Join {
-            nick,
+            nick: nick.clone(),
             prefix,
             channel: display.clone(),
         };
         // Other stations on frequency heard the JOIN themselves.
         self.broadcast_channel_ex(&display, &d, Some(&uid), false);
+        if flags.voice {
+            let server = self.server_name().to_string();
+            self.announce_mode(&display, &server, "+v", &[&nick]);
+        }
+        if self.state.channel(&display).map(|c| c.has_rf_members()).unwrap_or(false) {
+            let call_s = call.to_string();
+            self.notice_rf_audience(
+                &display,
+                &format!("RF station {call_s} is on frequency. Messages from +v users will be radiated."),
+            );
+        }
 
         let names = self.state.names_of(&display).join(",");
         let topic = self
@@ -270,6 +286,17 @@ impl Server {
         };
         self.broadcast_channel_ex(channel, &d, Some(uid), false);
         self.state.part(uid, channel);
+        if !self
+            .state
+            .channel(channel)
+            .map(|c| c.has_rf_members())
+            .unwrap_or(true)
+        {
+            self.notice_rf_audience(
+                channel,
+                "No RF station remains in this channel. Messages stay on IRC until one joins.",
+            );
+        }
     }
 
     fn rf_message(&mut self, src: &Callsign, target: &str, text: &str, notice: bool, now: Instant) {

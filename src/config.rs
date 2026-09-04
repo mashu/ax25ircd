@@ -23,6 +23,10 @@ pub struct Config {
     pub channels: Vec<ChannelConfig>,
     #[serde(default)]
     pub opers: Vec<OperConfig>,
+    #[serde(default)]
+    pub logging: LoggingConfig,
+    #[serde(default)]
+    pub accounts: AccountsConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +56,9 @@ pub struct ListenConfig {
     pub ping_interval_secs: u64,
     #[serde(default = "default_registration_timeout")]
     pub registration_timeout_secs: u64,
+    /// Simultaneous IP connections from one host. 0 disables the cap.
+    #[serde(default = "default_max_conns_per_host")]
+    pub max_conns_per_host: u32,
 }
 
 impl Default for ListenConfig {
@@ -60,6 +67,7 @@ impl Default for ListenConfig {
             bind: default_bind(),
             ping_interval_secs: default_ping_interval(),
             registration_timeout_secs: default_registration_timeout(),
+            max_conns_per_host: default_max_conns_per_host(),
         }
     }
 }
@@ -119,6 +127,9 @@ pub struct RadioConfig {
     /// off unless you actually have a hidden-terminal problem.
     #[serde(default)]
     pub repeat_rf_traffic: bool,
+    /// NOTICE the sender when a channel message is actually put on the air.
+    #[serde(default = "default_true")]
+    pub notice_air_relay: bool,
 }
 
 impl Default for RadioConfig {
@@ -170,7 +181,7 @@ impl Default for TncSection {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
     /// Longest message body relayed to RF. Longer messages are truncated and
@@ -200,6 +211,16 @@ pub struct PolicyConfig {
     /// If non-empty, only these callsigns may use the gateway.
     #[serde(default)]
     pub allow_callsigns: Vec<String>,
+    /// IRC-side flood cap on +r channels (messages dropped, not just kept off the air).
+    #[serde(default = "default_rf_channel_msgs")]
+    pub rf_channel_msgs_per_min: u32,
+    #[serde(default = "default_rf_channel_burst")]
+    pub rf_channel_burst: u32,
+    /// Commands per minute per IP nick (JOIN/PRIVMSG/MODE/...).
+    #[serde(default = "default_ip_cmds_per_min")]
+    pub ip_cmds_per_min: u32,
+    #[serde(default = "default_ip_cmd_burst")]
+    pub ip_cmd_burst: u32,
 }
 
 impl Default for PolicyConfig {
@@ -213,6 +234,10 @@ impl Default for PolicyConfig {
             require_callsign_for_rf: true,
             deny_callsigns: Vec::new(),
             allow_callsigns: Vec::new(),
+            rf_channel_msgs_per_min: default_rf_channel_msgs(),
+            rf_channel_burst: default_rf_channel_burst(),
+            ip_cmds_per_min: default_ip_cmds_per_min(),
+            ip_cmd_burst: default_ip_cmd_burst(),
         }
     }
 }
@@ -226,6 +251,9 @@ pub struct ChannelConfig {
     /// Relay this channel over the air.
     #[serde(default)]
     pub rf: bool,
+    /// Nicks that receive +o on join after IDENTIFY.
+    #[serde(default)]
+    pub operators: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,6 +263,40 @@ pub struct OperConfig {
     /// Plain password. This server does not pretend to be a security product;
     /// run it behind TLS or on localhost and treat OPER as a local console.
     pub password: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoggingConfig {
+    /// Extra copy of tracing output (journald/stderr still get it).
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Append-only audit trail: connections, callsigns, kicks, RF TX.
+    #[serde(default)]
+    pub audit_file: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountsConfig {
+    /// JSON file of Argon2id nick hashes. Created on first REGISTER.
+    #[serde(default = "default_nicks_file")]
+    pub file: String,
+    /// How long a user may sit on a registered nick without IDENTIFY.
+    #[serde(default = "default_identify_timeout")]
+    pub identify_timeout_secs: u64,
+    #[serde(default = "default_min_password")]
+    pub min_password_len: usize,
+}
+
+impl Default for AccountsConfig {
+    fn default() -> Self {
+        Self {
+            file: default_nicks_file(),
+            identify_timeout_secs: default_identify_timeout(),
+            min_password_len: default_min_password(),
+        }
+    }
 }
 
 impl Config {
@@ -394,6 +456,30 @@ fn default_ip_msgs_per_min() -> u32 {
 }
 fn default_true() -> bool {
     true
+}
+fn default_max_conns_per_host() -> u32 {
+    8
+}
+fn default_rf_channel_msgs() -> u32 {
+    10
+}
+fn default_rf_channel_burst() -> u32 {
+    4
+}
+fn default_ip_cmds_per_min() -> u32 {
+    90
+}
+fn default_ip_cmd_burst() -> u32 {
+    30
+}
+fn default_nicks_file() -> String {
+    "nicks.json".into()
+}
+fn default_identify_timeout() -> u64 {
+    60
+}
+fn default_min_password() -> usize {
+    8
 }
 
 #[cfg(test)]

@@ -36,6 +36,10 @@ kind = "loopback"
 [policy]
 require_callsign_for_rf = true
 
+[accounts]
+file = "target/test-nicks.json"
+identify_timeout_secs = 60
+
 [[channels]]
 name = "#rf"
 topic = "gateway channel"
@@ -234,13 +238,14 @@ async fn irc_message_needs_a_callsign_before_it_is_transmitted() {
     h.send("PRIVMSG #rf :hello radio");
     let lines = h.drain_client();
     assert!(
-        lines.iter().any(|l| l.contains("CALLSIGN")),
-        "unidentified users should be told why nothing was transmitted: {lines:?}"
+        lines.iter().any(|l| l.contains(" 404 ") || l.contains("+m")),
+        "unidentified users must not speak on #rf: {lines:?}"
     );
     let tx = h.transmitted().await;
     assert!(tx.iter().all(|(_, a)| a.kind != Kind::Msg));
 
     h.send("CALLSIGN SM0XYZ");
+    h.drain_client();
     h.send("PRIVMSG #rf :hello radio");
     h.drain_client();
 

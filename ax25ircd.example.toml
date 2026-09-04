@@ -13,6 +13,7 @@ motd = [
   "SK0MT packet gateway, 144.800 MHz, 1200 baud AFSK",
   "Channels marked +r are transmitted on the air in the clear.",
   "Identify with: /quote CALLSIGN SM0ABC",
+  "Keep a nick with: /quote REGISTER <password>   then  /quote IDENTIFY <password>",
 ]
 max_nick_len = 30
 max_channels_per_user = 20
@@ -25,6 +26,19 @@ max_channels_per_user = 20
 bind = ["127.0.0.1:6667"]
 ping_interval_secs = 120
 registration_timeout_secs = 60
+max_conns_per_host = 8
+
+[logging]
+# Extra copy of tracing output. stderr/journald still get the same lines.
+# file = "ax25ircd.log"
+# Who connected, claimed a callsign, flooded, kicked, and what went on the air.
+# audit_file = "audit.log"
+
+[accounts]
+# Argon2id hashes of nick passwords. Created on first REGISTER.
+file = "nicks.json"
+identify_timeout_secs = 60
+min_password_len = 8
 
 [radio]
 enabled = false
@@ -67,6 +81,9 @@ mailbox_ttl_secs = 86400
 # each other. Doubles the airtime cost of every message.
 repeat_rf_traffic = false
 
+# NOTICE the sender when a channel message is actually put on the air.
+notice_air_relay = true
+
 [radio.tnc]
 # "tcp" (Direwolf, ax25-tools KISS-over-TCP), "serial" (needs --features
 # serial), or "loopback" for a dry run that transmits nothing.
@@ -91,6 +108,10 @@ max_rf_text_len = 160
 rf_msgs_per_min = 6
 rf_burst = 4
 ip_to_rf_msgs_per_min = 10
+rf_channel_msgs_per_min = 10
+rf_channel_burst = 4
+ip_cmds_per_min = 90
+ip_cmd_burst = 30
 block_apparent_ciphertext = true
 require_callsign_for_rf = true
 deny_callsigns = []
@@ -100,6 +121,7 @@ allow_callsigns = []   # empty means "anyone"
 name = "#rf"
 topic = "Bridged to 144.800 MHz - everything here is transmitted"
 rf = true
+operators = ["sm0abc"]
 
 [[channels]]
 name = "#local"

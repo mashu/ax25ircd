@@ -3,6 +3,9 @@
 
 # Operator copy of the example config; never commit a live one.
 /ax25ircd.toml
+/nicks.json
+/ax25ircd.log
+/audit.log
 
 # Editor / OS noise
 .idea/
