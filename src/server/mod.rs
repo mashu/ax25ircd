@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::accounts::Accounts;
@@ -16,7 +16,7 @@ use crate::airc::{encode_fields, AircFrame, Kind, SessionConfig, Sessions};
 use crate::audit::Audit;
 use crate::ax25::{Ax25Frame, TncHandle};
 use crate::callsign::Callsign;
-use crate::config::Config;
+use crate::config::{Config, IpRfTxMode};
 use crate::irc::message::{lower, Message};
 use crate::policy::Policy;
 
@@ -30,6 +30,9 @@ pub enum Event {
         id: ClientId,
         host: String,
         out: mpsc::UnboundedSender<String>,
+        /// Fired by the server when it drops the user (QUIT/KILL/timeout)
+        /// so the connection task actually closes the socket.
+        hangup: Option<oneshot::Sender<()>>,
     },
     Line {
         id: ClientId,
@@ -39,11 +42,31 @@ pub enum Event {
         id: ClientId,
         reason: String,
     },
+    /// Argon2 finished off the event loop.
+    AuthFinished {
+        id: ClientId,
+        kind: AuthKind,
+        nick: String,
+        result: Result<(), crate::accounts::AccountError>,
+        password_hash: Option<String>,
+    },
     /// A frame heard on the air.
     Rf(Ax25Frame),
     /// Periodic housekeeping: retransmissions, timeouts, station ID.
     Tick,
     Shutdown,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AuthKind {
+    Identify,
+    Register,
+    Unregister,
+}
+
+struct IpLink {
+    out: mpsc::UnboundedSender<String>,
+    hangup: Option<oneshot::Sender<()>>,
 }
 
 /// A thing that happened, in a form that can be rendered either as IRC text or
@@ -108,7 +131,9 @@ pub struct Server {
     pub accounts: Accounts,
     pub audit: Audit,
     tnc: Option<TncHandle>,
-    outputs: HashMap<ClientId, mpsc::UnboundedSender<String>>,
+    outputs: HashMap<ClientId, IpLink>,
+    /// Used to run Argon2 off this task. Tests leave it unset and hash inline.
+    events: Option<mpsc::Sender<Event>>,
     /// Runtime kill switch for the transmitter (`RADIO OFF`). The control
     /// operator must be able to stop the station radiating, immediately,
     /// without killing the IRC side.
@@ -170,10 +195,15 @@ impl Server {
             audit,
             tnc,
             outputs: HashMap::new(),
+            events: None,
             last_id: Instant::now(),
             transmitted_since_id: false,
             started: SystemTime::now(),
         }
+    }
+
+    pub fn attach_events(&mut self, tx: mpsc::Sender<Event>) {
+        self.events = Some(tx);
     }
 
     pub fn server_name(&self) -> &str {
@@ -189,19 +219,27 @@ impl Server {
     pub fn handle(&mut self, event: Event) {
         let now = Instant::now();
         match event {
-            Event::Connected { id, host, out } => {
+            Event::Connected {
+                id,
+                host,
+                out,
+                hangup,
+            } => {
                 let cap = self.config.listen.max_conns_per_host;
                 if cap > 0 && self.state.ip_count_from_host(&host) >= cap as usize {
                     let _ = out.send(format!(
                         "ERROR :Too many connections from {host} (max {cap})"
                     ));
+                    if let Some(h) = hangup {
+                        let _ = h.send(());
+                    }
                     self.audit.event(
                         "connect_denied",
                         &[("host", &host), ("reason", "max_conns_per_host")],
                     );
                     return;
                 }
-                self.outputs.insert(id, out);
+                self.outputs.insert(id, IpLink { out, hangup });
                 self.stats.ip_connections += 1;
                 let id_s = id.to_string();
                 self.audit.event("connect", &[("id", &id_s), ("host", &host)]);
@@ -226,7 +264,15 @@ impl Server {
                     );
                 }
                 self.quit_user(&uid, &reason);
-                self.outputs.remove(&id);
+            }
+            Event::AuthFinished {
+                id,
+                kind,
+                nick,
+                result,
+                password_hash,
+            } => {
+                self.finish_auth(id, kind, nick, result, password_hash);
             }
             Event::Rf(frame) => self.handle_rf_frame(frame, now),
             Event::Tick => self.tick(now),
@@ -344,9 +390,20 @@ impl Server {
     // ------------------------------------------------------------- IP output
 
     pub fn send_raw(&mut self, id: ClientId, line: String) {
-        if let Some(out) = self.outputs.get(&id) {
-            if out.send(line).is_err() {
-                self.outputs.remove(&id);
+        if let Some(link) = self.outputs.get(&id) {
+            if link.out.send(line).is_err() {
+                self.drop_ip_link(id);
+            }
+        }
+    }
+
+    /// Close the TCP connection. Dropping the output channel stops the writer;
+    /// firing `hangup` stops the reader, so the socket is not left as a zombie
+    /// that no longer counts toward `max_conns_per_host`.
+    fn drop_ip_link(&mut self, id: ClientId) {
+        if let Some(link) = self.outputs.remove(&id) {
+            if let Some(h) = link.hangup {
+                let _ = h.send(());
             }
         }
     }
@@ -660,6 +717,9 @@ impl Server {
             Vec::new()
         };
         self.state.remove_user(uid);
+        if let UserId::Ip(id) = uid {
+            self.drop_ip_link(*id);
+        }
         if let UserId::Rf(call) = uid {
             self.sessions.forget(call);
         }
@@ -691,6 +751,53 @@ impl Server {
 
     pub fn is_rf_channel(&self, name: &str) -> bool {
         self.state.channel(name).map(|c| c.rf).unwrap_or(false)
+    }
+
+    /// May this IP user have a message radiated? RF stations always may:
+    /// they are already on the air. See `policy.ip_rf_tx`.
+    pub fn user_may_tx_rf(&self, uid: &UserId) -> bool {
+        let Some(user) = self.state.user(uid) else {
+            return false;
+        };
+        if user.is_rf() {
+            return true;
+        }
+        if user.oper {
+            return true;
+        }
+        match self.config.policy.ip_rf_tx {
+            IpRfTxMode::Off => false,
+            IpRfTxMode::Oper => false,
+            IpRfTxMode::Key | IpRfTxMode::Account => user.rf_tx,
+            IpRfTxMode::Callsign => user.callsign.is_some(),
+        }
+    }
+
+    pub fn refresh_rf_tx(&mut self, uid: &UserId) {
+        let Some(user) = self.state.user(uid) else {
+            return;
+        };
+        if user.is_rf() {
+            return;
+        }
+        let nick = user.nick.clone();
+        let identified = user.nick_identified;
+        let listed = self
+            .config
+            .policy
+            .rf_tx_nicks
+            .iter()
+            .any(|n| lower(n) == lower(&nick));
+        let account = identified && (listed || self.accounts.grants_rf_tx(&nick));
+        if let Some(u) = self.state.user_mut(uid) {
+            if account {
+                u.rf_tx = true;
+            }
+            // OPER and RFKEY set rf_tx directly; do not clear them here.
+            if u.oper {
+                u.rf_tx = true;
+            }
+        }
     }
 
     pub fn channel_key(&self, name: &str) -> String {
@@ -750,7 +857,7 @@ impl Server {
             );
         }
         format!(
-            "{channel} is +r, transmitter ON ({}). Messages from +v users are sent on the air.",
+            "{channel} is +r, transmitter ON ({}). Messages from users with RF-TX privilege are sent on the air; others stay on IRC.",
             self.config.radio.callsign
         )
     }
@@ -770,6 +877,7 @@ impl Server {
 
     /// Recompute +o/+v on every channel this user is in, and tell IRC clients.
     pub fn refresh_privileges(&mut self, uid: &UserId) {
+        self.refresh_rf_tx(uid);
         let channels: Vec<String> = self
             .state
             .user(uid)
@@ -813,8 +921,9 @@ impl Server {
         self.notice_user(
             uid,
             &format!(
-                "{channel} is +rm: bridged to amateur radio. Only users identified with a \
-                 valid callsign receive +v and may speak. Everyone else may listen."
+                "{channel} is +rm: bridged to amateur radio. Identify with CALLSIGN for +v \
+                 (permission to speak here). Messages go on the air only with RF-TX privilege \
+                 (IDENTIFY to a granted nick, RFKEY, or OPER) — everyone else is heard on IRC only."
             ),
         );
         let status = self.radio_status_line();

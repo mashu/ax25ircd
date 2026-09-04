@@ -182,6 +182,7 @@ async fn pump(
     let mut decoder = KissDecoder::new(config.max_frame);
     let mut buf = vec![0u8; 4096];
     let mut next_tx = tokio::time::Instant::now();
+    let mut pending_tx: Option<Ax25Frame> = None;
 
     loop {
         tokio::select! {
@@ -205,22 +206,38 @@ async fn pump(
                     }
                 }
             }
-            Some(frame) = tx_queue.recv() => {
+            Some(frame) = tx_queue.recv(), if pending_tx.is_none() => {
                 let now = tokio::time::Instant::now();
-                if next_tx > now {
-                    tokio::time::sleep_until(next_tx).await;
+                if now >= next_tx {
+                    write_kiss_frame(&mut link, config, &frame).await?;
+                    next_tx = tokio::time::Instant::now() + config.tx_pacing;
+                } else {
+                    pending_tx = Some(frame);
                 }
-                let bytes = frame.encode();
-                if bytes.len() > config.max_frame {
-                    warn!("refusing to transmit oversized frame ({} bytes)", bytes.len());
-                    continue;
+            }
+            _ = tokio::time::sleep_until(next_tx), if pending_tx.is_some() => {
+                if let Some(frame) = pending_tx.take() {
+                    write_kiss_frame(&mut link, config, &frame).await?;
+                    next_tx = tokio::time::Instant::now() + config.tx_pacing;
                 }
-                debug!(target: "rf::tx", "{}", frame.to_monitor_line());
-                link.write_all(&kiss::encode(config.kiss_port, kiss::CMD_DATA, &bytes)).await?;
-                link.flush().await?;
-                next_tx = tokio::time::Instant::now() + config.tx_pacing;
             }
             else => return Ok(()),
         }
     }
+}
+
+async fn write_kiss_frame(
+    link: &mut Box<dyn ReadWrite>,
+    config: &TncConfig,
+    frame: &Ax25Frame,
+) -> io::Result<()> {
+    let bytes = frame.encode();
+    if bytes.len() > config.max_frame {
+        warn!("refusing to transmit oversized frame ({} bytes)", bytes.len());
+        return Ok(());
+    }
+    debug!(target: "rf::tx", "{}", frame.to_monitor_line());
+    link.write_all(&kiss::encode(config.kiss_port, kiss::CMD_DATA, &bytes))
+        .await?;
+    link.flush().await
 }

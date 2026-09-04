@@ -23,6 +23,9 @@ pub struct NickAccount {
     pub nick: String,
     pub password_hash: String,
     pub created_unix: u64,
+    /// Operator-granted right to have this nick's messages put on the air.
+    #[serde(default)]
+    pub rf_tx: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -97,6 +100,7 @@ impl Accounts {
                 nick: nick.to_string(),
                 password_hash: hash,
                 created_unix,
+                rf_tx: false,
             },
         );
         self.save()
@@ -125,11 +129,64 @@ impl Accounts {
         self.save()
     }
 
+    /// Insert a nick whose password was already hashed off the event loop.
+    pub fn insert_hashed(&mut self, nick: &str, password_hash: String) -> Result<(), AccountError> {
+        let key = lower(nick);
+        if self.store.nicks.contains_key(&key) {
+            return Err(AccountError::Taken);
+        }
+        let created_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.store.nicks.insert(
+            key,
+            NickAccount {
+                nick: nick.to_string(),
+                password_hash,
+                created_unix,
+                rf_tx: false,
+            },
+        );
+        self.save()
+    }
+
+    pub fn set_password_hash(&mut self, nick: &str, password_hash: String) -> Result<(), AccountError> {
+        let Some(acc) = self.store.nicks.get_mut(&lower(nick)) else {
+            return Err(AccountError::NotRegistered);
+        };
+        acc.password_hash = password_hash;
+        self.save()
+    }
+
     pub fn drop_nick(&mut self, nick: &str) -> Result<(), AccountError> {
         if self.store.nicks.remove(&lower(nick)).is_none() {
             return Err(AccountError::NotRegistered);
         }
         self.save()
+    }
+
+    pub fn set_rf_tx(&mut self, nick: &str, rf_tx: bool) -> Result<(), AccountError> {
+        let Some(acc) = self.store.nicks.get_mut(&lower(nick)) else {
+            return Err(AccountError::NotRegistered);
+        };
+        acc.rf_tx = rf_tx;
+        self.save()
+    }
+
+    pub fn grants_rf_tx(&self, nick: &str) -> bool {
+        self.store
+            .nicks
+            .get(&lower(nick))
+            .map(|a| a.rf_tx)
+            .unwrap_or(false)
+    }
+
+    pub fn hash_for(&self, nick: &str) -> Option<String> {
+        self.store
+            .nicks
+            .get(&lower(nick))
+            .map(|a| a.password_hash.clone())
     }
 
     fn save(&self) -> Result<(), AccountError> {
@@ -143,7 +200,7 @@ impl Accounts {
     }
 }
 
-fn hash_password(password: &str) -> Result<String, AccountError> {
+pub(crate) fn hash_password(password: &str) -> Result<String, AccountError> {
     let salt = SaltString::generate(&mut OsRng);
     hasher()
         .hash_password(password.as_bytes(), &salt)
@@ -151,7 +208,7 @@ fn hash_password(password: &str) -> Result<String, AccountError> {
         .map_err(|_| AccountError::Hash)
 }
 
-fn verify_password(password: &str, hash: &str) -> Result<(), AccountError> {
+pub(crate) fn verify_password(password: &str, hash: &str) -> Result<(), AccountError> {
     let parsed = PasswordHash::new(hash).map_err(|_| AccountError::Hash)?;
     hasher()
         .verify_password(password.as_bytes(), &parsed)

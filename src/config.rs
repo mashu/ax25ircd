@@ -9,6 +9,32 @@ use serde::Deserialize;
 
 use crate::callsign::Callsign;
 
+/// Who among IP clients may have their messages put on the air.
+///
+/// IRC clients always hear RF traffic in a `+r` channel and may talk to each
+/// other there. Radiation is a separate privilege: the gateway's licence is
+/// on the line, so the default is operator-granted rather than "anyone who
+/// typed CALLSIGN".
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IpRfTxMode {
+    /// Never. The IRC side is a listen/chat overlay; only RF stations speak
+    /// on the air.
+    Off,
+    /// Only a control operator (`OPER`).
+    Oper,
+    /// `RFKEY <password>` matching `rf_tx_password`. OPER always can.
+    Key,
+    /// IDENTIFY to a nick listed in `rf_tx_nicks`, or an account with `rf_tx`.
+    /// OPER always can. This is the default: regular IRC clients work, the
+    /// air stays closed until the licensee grants someone.
+    #[default]
+    Account,
+    /// Legacy: a `CALLSIGN` claim is enough (still subject to
+    /// `require_callsign_for_rf` and the allow/deny lists).
+    Callsign,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -221,6 +247,21 @@ pub struct PolicyConfig {
     pub ip_cmds_per_min: u32,
     #[serde(default = "default_ip_cmd_burst")]
     pub ip_cmd_burst: u32,
+    /// Who among IP clients may radiate. See [`IpRfTxMode`].
+    #[serde(default)]
+    pub ip_rf_tx: IpRfTxMode,
+    /// Shared key for `RFKEY`. Empty/absent disables the command unless
+    /// `ip_rf_tx = "key"`, which then fails validation.
+    #[serde(default)]
+    pub rf_tx_password: Option<String>,
+    /// Nicks that receive RF-TX after IDENTIFY (`ip_rf_tx = "account"`).
+    #[serde(default)]
+    pub rf_tx_nicks: Vec<String>,
+    /// IDENTIFY / REGISTER / RFKEY / OPER guesses per minute per host.
+    #[serde(default = "default_identify_per_min")]
+    pub identify_per_min: u32,
+    #[serde(default = "default_identify_burst")]
+    pub identify_burst: u32,
 }
 
 impl Default for PolicyConfig {
@@ -238,6 +279,11 @@ impl Default for PolicyConfig {
             rf_channel_burst: default_rf_channel_burst(),
             ip_cmds_per_min: default_ip_cmds_per_min(),
             ip_cmd_burst: default_ip_cmd_burst(),
+            ip_rf_tx: IpRfTxMode::default(),
+            rf_tx_password: None,
+            rf_tx_nicks: Vec::new(),
+            identify_per_min: default_identify_per_min(),
+            identify_burst: default_identify_burst(),
         }
     }
 }
@@ -314,6 +360,24 @@ impl Config {
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.server.name.trim().is_empty() {
             anyhow::bail!("server.name must be set");
+        }
+        if self.listen.ping_interval_secs == 0 {
+            anyhow::bail!(
+                "listen.ping_interval_secs must be at least 1 (0 panics the connection task)"
+            );
+        }
+        if self.listen.registration_timeout_secs == 0 {
+            anyhow::bail!("listen.registration_timeout_secs must be at least 1");
+        }
+        if self.policy.ip_rf_tx == IpRfTxMode::Key
+            && self
+                .policy
+                .rf_tx_password
+                .as_ref()
+                .map(|s| s.is_empty())
+                .unwrap_or(true)
+        {
+            anyhow::bail!("policy.ip_rf_tx = \"key\" requires policy.rf_tx_password");
         }
         for ch in &self.channels {
             if !crate::irc::message::is_channel_name(&ch.name) {
@@ -481,6 +545,12 @@ fn default_identify_timeout() -> u64 {
 fn default_min_password() -> usize {
     8
 }
+fn default_identify_per_min() -> u32 {
+    6
+}
+fn default_identify_burst() -> u32 {
+    3
+}
 
 #[cfg(test)]
 mod tests {
@@ -542,5 +612,17 @@ name = "#rf"
 rf = true
 "##;
         assert!(Config::from_toml(text).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_ping_interval() {
+        let text = r##"
+[server]
+name = "test.example"
+[listen]
+ping_interval_secs = 0
+"##;
+        let err = Config::from_toml(text).unwrap_err().to_string();
+        assert!(err.contains("ping_interval_secs"), "{err}");
     }
 }

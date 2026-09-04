@@ -85,10 +85,11 @@ impl Message {
 impl fmt::Display for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(prefix) = &self.prefix {
-            write!(f, ":{prefix} ")?;
+            write!(f, ":{} ", scrub_irc(prefix))?;
         }
         write!(f, "{}", self.command)?;
         for (i, p) in self.params.iter().enumerate() {
+            let p = scrub_irc(p);
             let last = i + 1 == self.params.len();
             if last && (p.is_empty() || p.contains(' ') || p.starts_with(':')) {
                 write!(f, " :{p}")?;
@@ -98,6 +99,21 @@ impl fmt::Display for Message {
         }
         Ok(())
     }
+}
+
+/// Strip CR, LF and NUL so a field can never terminate an IRC line.
+/// Applied on every serialised message: RF-originated reasons and topics are
+/// otherwise a protocol-injection path into every IP client in the channel.
+pub fn scrub_irc(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\r' | '\n' | '\0' => ' ',
+            other => other,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// IRC "RFC 1459" casemapping: `{}|^` are the lowercase forms of `[]\~`.
@@ -125,6 +141,9 @@ pub fn is_channel_name(s: &str) -> bool {
         && !s.contains(' ')
         && !s.contains(',')
         && !s.contains('\x07')
+        && !s.contains('\r')
+        && !s.contains('\n')
+        && !s.contains('\0')
 }
 
 /// Nick rules, extended to allow the `|` we use for SSIDs (already legal in
@@ -182,7 +201,21 @@ mod tests {
         assert_eq!(lower("Nick[]\\"), "nick{}|");
         assert!(is_channel_name("#ham"));
         assert!(!is_channel_name("ham"));
+        assert!(!is_channel_name("#ham\r\nPRIVMSG"));
+        assert!(!is_channel_name("#ham\n"));
         assert!(is_valid_nick("SM0ABC|7", 30));
         assert!(!is_valid_nick("0ABC", 30));
+    }
+
+    #[test]
+    fn serialising_strips_crlf_so_rf_cannot_inject_irc_lines() {
+        let m = Message::new("QUIT", vec!["bye\r\nNOTICE alice :pwned".into()])
+            .with_prefix("SM0ABC|7!rf@radio");
+        let line = m.to_string();
+        assert!(!line.contains('\r') && !line.contains('\n'), "{line}");
+        assert!(
+            !line.contains("\r\nNOTICE") && line.starts_with(":SM0ABC|7!rf@radio QUIT :"),
+            "must remain a single IRC line: {line}"
+        );
     }
 }

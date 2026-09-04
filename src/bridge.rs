@@ -67,6 +67,9 @@ impl Server {
         let fields = msg.fields();
         match msg.kind {
             Kind::Hello => {
+                if !self.rf_ctrl_ok(src, now) {
+                    return;
+                }
                 let created = self.ensure_rf_user(src);
                 let name = self.server_name().to_string();
                 let motd = self
@@ -83,6 +86,9 @@ impl Server {
                 self.flush_mailbox(src);
             }
             Kind::Join => {
+                if !self.rf_ctrl_ok(src, now) {
+                    return;
+                }
                 let Some(channel) = fields.first().cloned() else {
                     return;
                 };
@@ -97,8 +103,11 @@ impl Server {
                 };
                 let uid = UserId::Rf(src.clone());
                 let display = self.channel_display_name(&channel);
+                let reason = crate::policy::sanitize(
+                    &fields.get(1).cloned().unwrap_or_default(),
+                );
                 if self.state.user(&uid).is_some() {
-                    self.rf_part(&uid, &display, fields.get(1).cloned().unwrap_or_default());
+                    self.rf_part(&uid, &display, reason);
                 }
                 if let Some(peer) = self.sessions.peer_mut(src) {
                     peer.channels.remove(&display);
@@ -106,7 +115,17 @@ impl Server {
             }
             Kind::Quit => {
                 let uid = UserId::Rf(src.clone());
-                let reason = fields.first().cloned().unwrap_or_else(|| "Signed off".into());
+                let reason = crate::policy::sanitize(
+                    &fields
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "Signed off".into()),
+                );
+                let reason = if reason.is_empty() {
+                    "Signed off".into()
+                } else {
+                    reason
+                };
                 self.quit_user(&uid, &reason);
             }
             Kind::Msg | Kind::Notice => {
@@ -122,6 +141,12 @@ impl Server {
                 );
             }
             Kind::Names => {
+                if !self.rf_ctrl_ok(src, now) {
+                    return;
+                }
+                if !self.sessions.peer(src).map(|p| p.registered).unwrap_or(false) {
+                    return;
+                }
                 let Some(channel) = fields.first().cloned() else {
                     return;
                 };
@@ -135,6 +160,12 @@ impl Server {
                 );
             }
             Kind::Ping => {
+                if !self.rf_ctrl_ok(src, now) {
+                    return;
+                }
+                if !self.sessions.peer(src).map(|p| p.registered).unwrap_or(false) {
+                    return;
+                }
                 let token = fields.first().cloned().unwrap_or_default();
                 self.unicast(src, Kind::Pong, encode_fields(&[&token]), false);
             }
@@ -179,7 +210,7 @@ impl Server {
                 return false;
             }
         }
-        self.sessions.touch(call, Instant::now()).registered = true;
+        self.sessions.force_touch(call, Instant::now()).registered = true;
         true
     }
 
@@ -345,6 +376,14 @@ impl Server {
             if !chan.members.contains_key(&uid) {
                 self.rf_join(src, &display);
             }
+            let mut text = text;
+            let mut repeat = self.config.radio.repeat_rf_traffic;
+            if repeat {
+                match self.policy.screen_outbound(&text) {
+                    Verdict::Allow(t) | Verdict::Truncated(t) => text = t,
+                    Verdict::Deny(_) => repeat = false,
+                }
+            }
             let d = Delivery::Privmsg {
                 from_nick: user.nick.clone(),
                 from_prefix: user.prefix(),
@@ -354,8 +393,8 @@ impl Server {
             };
             // Every station in range already heard this transmission. We only
             // repeat it if the operator has enabled store-and-forward for
-            // hidden stations, and even then it is one extra transmission.
-            let repeat = self.config.radio.repeat_rf_traffic;
+            // hidden stations, and even then it is one extra transmission —
+            // never of something policy refused.
             self.broadcast_channel_ex(&display, &d, Some(&uid), repeat);
             return;
         }
@@ -372,7 +411,12 @@ impl Server {
         };
         let text = match self.policy.screen_outbound(&text) {
             Verdict::Allow(t) | Verdict::Truncated(t) => t,
-            Verdict::Deny(_) => text,
+            Verdict::Deny(_) => {
+                if target_id.is_rf() {
+                    return;
+                }
+                text
+            }
         };
         let d = Delivery::Privmsg {
             from_nick: user.nick.clone(),
@@ -382,6 +426,15 @@ impl Server {
             notice,
         };
         self.deliver(&target_id, &d);
+    }
+
+    fn rf_ctrl_ok(&mut self, src: &Callsign, now: Instant) -> bool {
+        if self.policy.rf_station_rate_ok(src, now) {
+            true
+        } else {
+            debug!(%src, "control-frame rate limit, ignoring");
+            false
+        }
     }
 
     /// Transmit a single AIRC frame to one station (used for ACKs, which must

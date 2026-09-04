@@ -71,6 +71,9 @@ What the software does:
   are not transmitted until they have identified with `CALLSIGN <call>`. Users
   who have not are told why, and their message still reaches the IRC side of
   the channel.
+* `policy.ip_rf_tx` (default `account`) is the second gate: even with a
+  callsign, an IP client does not key the transmitter unless the operator
+  granted RF-TX. Ordinary IRC users can follow the QSO without ever radiating.
 * `policy.allow_callsigns` turns the gateway into a closed system: only listed
   stations may use it at all.
 * `policy.deny_callsigns` bans specific stations; a listed callsign with SSID 0

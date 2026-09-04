@@ -132,22 +132,42 @@ authentication, and adding cryptographic authentication is legally fraught in
 several jurisdictions (and useless against a replay attack over a broadcast
 medium unless you also add a nonce exchange, which costs airtime).
 
-The design therefore does not pretend:
+The RF side therefore does not pretend: an AX.25 source address is logged, a
+station's IRC nick is derived from it (`SM0ABC-7` → `SM0ABC|7`), and
+callsign-shaped nicknames are reserved so an IP user cannot sit on
+`SM0ABC|7`, `SM0ABC\7` (RFC 1459 casemapping) or `SM0ABC-7`. Allow/deny lists
+decide which callsigns the gateway will talk to. Treat the radio as a public
+party line.
 
-* An RF station's nickname is derived from its callsign: `SM0ABC-7` becomes
-  `SM0ABC|7` (IRC nicks cannot contain `-`).
-* Callsign-shaped nicknames are **reserved**. An IP user cannot take `SM0ABC`
-  as a nickname; the `NICK` handler rejects anything that parses as a plausible
-  amateur callsign.
-* IP users identify with `CALLSIGN <call>`. This is recorded, shown in `WHOIS`,
-  logged, and explicitly described to the user as unverified.
-* RF stations never receive channel operator status automatically.
-* Everything is logged with the callsign in the AX.25 source address, so the
-  control operator can reconstruct who transmitted what.
+The IP side is where real authentication belongs, and it is also where the
+licensee's risk is: an IRC `PRIVMSG` that the gateway radiates is third-party
+traffic under the gateway callsign. The design splits "may talk on IRC" from
+"may be put on the air":
 
-If you need real authentication, the honest answer is that it belongs on the IP
-side (TLS plus SASL) and that the RF side is, and should be treated as, a
-public party line.
+* **Listen and local chat are open.** Anyone who can connect may join a `+r`
+  channel, hear RF traffic, and talk to other IRC users. Their messages stay
+  on the internet.
+* **RF-TX is an explicit privilege.** Nothing an IP client types is radiated
+  unless `policy.ip_rf_tx` says so. The default is `account`: IDENTIFY to a
+  nick the operator listed in `rf_tx_nicks` (or `RADIO GRANT`), or `OPER`.
+  `key` uses a shared `RFKEY`. `callsign` is the old "typed CALLSIGN" behaviour
+  and is the wrong default for a server reachable from the internet. `off`
+  makes IRC a listen-only overlay.
+* `CALLSIGN` remains a logged, unverified claim. `require_callsign_for_rf`
+  (on by default) still requires it as the legal third-party identification,
+  *in addition* to RF-TX privilege.
+* `+v` on a `+r` channel still means "may speak here" (the channel is `+m`).
+  It does not mean "this goes on the air".
+
+A typical club setup: internet users join `#rf` to follow the QSO; only the
+control operator and a short list of identified club nicks can key the
+transmitter. Regular IRC clients need no extra software. The station binary
+(`ax25irc-station`) is not an IRC client — it speaks AIRC over KISS, and its
+identity is the AX.25 source callsign plus the allow list.
+
+If you need TLS or SASL, put them in front of the IP listener. They protect
+the hop to the gateway and stop there. Everything that reaches the antenna is
+in the clear, by law and by design.
 
 ## 5. Channel model
 
@@ -157,8 +177,9 @@ Channels carry one extra mode: `+r`, "bridged to RF".
   station radiates is not a user-level decision.
 * Channels created on the fly by `JOIN` are never `+r`.
 * An RF station that joins a non-`+r` channel is told `404`.
-* A message to a `+r` channel is transmitted only if at least one registered RF
-  station is currently in it. Nobody listening means no transmission.
+* A message to a `+r` channel is radiated only if at least one RF station is
+  in it **and** the sender holds RF-TX privilege. Nobody listening, or an
+  ordinary IRC client without RF-TX, means the text stays on IRC.
 
 Everything else (`+m`, `+t`, `+k`, `+l`, `+o`, `+v`) behaves as usual and
 applies to both populations.

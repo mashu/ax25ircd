@@ -35,6 +35,7 @@ kind = "loopback"
 
 [policy]
 require_callsign_for_rf = true
+ip_rf_tx = "callsign"
 
 [accounts]
 file = "target/test-nicks.json"
@@ -61,7 +62,11 @@ const CLIENT: ClientId = 1;
 
 impl Harness {
     async fn new() -> Self {
-        let config = Arc::new(Config::from_toml(CONFIG).unwrap());
+        Self::from_toml(CONFIG).await
+    }
+
+    async fn from_toml(text: &str) -> Self {
+        let config = Arc::new(Config::from_toml(text).unwrap());
         let (mut tnc_cfg, far) = TncConfig::loopback();
         tnc_cfg.max_frame = 512;
         let (handle, rf_rx) = tnc::spawn(tnc_cfg);
@@ -72,6 +77,7 @@ impl Harness {
             id: CLIENT,
             host: "127.0.0.1".into(),
             out,
+            hangup: None,
         });
         let mut h = Self {
             server,
@@ -90,6 +96,25 @@ impl Harness {
             id: CLIENT,
             line: line.to_string(),
         });
+    }
+
+    fn connect_extra(&mut self, id: ClientId, nick: &str) -> mpsc::UnboundedReceiver<String> {
+        let (out, rx) = mpsc::unbounded_channel();
+        self.server.handle(Event::Connected {
+            id,
+            host: "127.0.0.2".into(),
+            out,
+            hangup: None,
+        });
+        self.server.handle(Event::Line {
+            id,
+            line: format!("NICK {nick}"),
+        });
+        self.server.handle(Event::Line {
+            id,
+            line: format!("USER {nick} 0 * :{nick}"),
+        });
+        rx
     }
 
     fn drain_client(&mut self) -> Vec<String> {
@@ -271,6 +296,14 @@ async fn ciphertext_is_not_transmitted() {
     h.transmitted().await;
     h.drain_client();
 
+    let mut bob_rx = h.connect_extra(2, "bob");
+    let _ = drain_rx(&mut bob_rx);
+    h.server.handle(Event::Line {
+        id: 2,
+        line: "JOIN #rf".into(),
+    });
+    let _ = drain_rx(&mut bob_rx);
+
     h.send("PRIVMSG #rf :U2FsdGVkX1+8xQ2mZ9pKbNvYwErTyUiOpAsDfGhJkLzXcVbNm1234567890AbCdEf");
     let lines = h.drain_client();
     assert!(
@@ -280,8 +313,19 @@ async fn ciphertext_is_not_transmitted() {
     let tx = h.transmitted().await;
     assert!(tx.iter().all(|(_, a)| a.kind != Kind::Msg));
 
-    // ...but the message still reaches the IRC side of the channel.
-    assert!(lines.iter().any(|l| l.contains("PRIVMSG #rf")) || true);
+    let bob_lines = drain_rx(&mut bob_rx);
+    assert!(
+        bob_lines.iter().any(|l| l.contains("PRIVMSG #rf") && l.contains("U2FsdGVk")),
+        "ciphertext must still reach other IRC clients: {bob_lines:?}"
+    );
+}
+
+fn drain_rx(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Ok(line) = rx.try_recv() {
+        out.push(line);
+    }
+    out
 }
 
 #[tokio::test]
@@ -392,3 +436,145 @@ async fn unknown_nicknames_that_are_not_callsigns_still_fail_normally() {
     let lines = h.drain_client();
     assert!(lines.iter().any(|l| l.contains(" 401 ")), "{lines:?}");
 }
+
+#[tokio::test]
+async fn callsign_nicks_are_reserved_including_casemapping_and_ax25_form() {
+    let mut h = Harness::new().await;
+    h.drain_client();
+    h.send("NICK SM0ABC|7");
+    let lines = h.drain_client();
+    assert!(lines.iter().any(|l| l.contains(" 432 ")), "{lines:?}");
+    h.send("NICK SM0ABC\\7");
+    let lines = h.drain_client();
+    assert!(lines.iter().any(|l| l.contains(" 432 ")), "{lines:?}");
+    h.send("NICK SM0ABC-7");
+    let lines = h.drain_client();
+    assert!(lines.iter().any(|l| l.contains(" 432 ")), "{lines:?}");
+}
+
+#[tokio::test]
+async fn rf_quit_reason_cannot_inject_irc_lines() {
+    let mut h = Harness::new().await;
+    h.send("JOIN #rf");
+    h.station_transmits(
+        "SM0ABC-7",
+        AircFrame::new(Kind::Join, 1, encode_fields(&["#rf"])),
+    )
+    .await;
+    h.drain_client();
+
+    h.station_transmits(
+        "SM0ABC-7",
+        AircFrame::new(Kind::Quit, 2, b"gone\r\nNOTICE alice :injected".to_vec()),
+    )
+    .await;
+    let lines = h.drain_client();
+    assert!(
+        lines.iter().any(|l| l.contains("QUIT")),
+        "expected a QUIT: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|l| l.contains("QUIT") || !l.contains("NOTICE alice :injected")),
+        "CRLF in a QUIT reason must not become a new IRC command: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn default_account_mode_keeps_irc_chat_off_the_air() {
+    let toml = r##"
+[server]
+name = "test.gateway"
+[listen]
+bind = []
+[radio]
+enabled = true
+callsign = "SK0MT-1"
+destination = "AIRC"
+id_interval_secs = 60
+[radio.tnc]
+kind = "loopback"
+[policy]
+require_callsign_for_rf = true
+ip_rf_tx = "account"
+[accounts]
+file = "target/test-nicks-account.json"
+[[channels]]
+name = "#rf"
+rf = true
+"##;
+    let mut h = Harness::from_toml(toml).await;
+    h.send("CALLSIGN SM0XYZ");
+    h.send("JOIN #rf");
+    h.station_transmits(
+        "SM0ABC-7",
+        AircFrame::new(Kind::Join, 1, encode_fields(&["#rf"])),
+    )
+    .await;
+    h.transmitted().await;
+    h.drain_client();
+
+    h.send("PRIVMSG #rf :hello radio");
+    let lines = h.drain_client();
+    assert!(
+        lines.iter().any(|l| l.contains("RF-TX") || l.contains("not have RF-TX")),
+        "CALLSIGN alone must not radiate in account mode: {lines:?}"
+    );
+    let tx = h.transmitted().await;
+    assert!(
+        tx.iter().all(|(_, a)| a.kind != Kind::Msg),
+        "ordinary IRC clients must not key the transmitter"
+    );
+}
+
+#[tokio::test]
+async fn rfkey_grants_air_access() {
+    let toml = r##"
+[server]
+name = "test.gateway"
+[listen]
+bind = []
+[radio]
+enabled = true
+callsign = "SK0MT-1"
+destination = "AIRC"
+id_interval_secs = 60
+[radio.tnc]
+kind = "loopback"
+[policy]
+require_callsign_for_rf = true
+ip_rf_tx = "key"
+rf_tx_password = "club-key"
+[accounts]
+file = "target/test-nicks-key.json"
+[[channels]]
+name = "#rf"
+rf = true
+"##;
+    let mut h = Harness::from_toml(toml).await;
+    h.send("CALLSIGN SM0XYZ");
+    h.send("JOIN #rf");
+    h.station_transmits(
+        "SM0ABC-7",
+        AircFrame::new(Kind::Join, 1, encode_fields(&["#rf"])),
+    )
+    .await;
+    h.transmitted().await;
+    h.drain_client();
+
+    h.send("PRIVMSG #rf :before key");
+    h.drain_client();
+    assert!(h.transmitted().await.iter().all(|(_, a)| a.kind != Kind::Msg));
+
+    h.send("RFKEY club-key");
+    h.drain_client();
+    h.send("PRIVMSG #rf :after key");
+    h.drain_client();
+    let tx = h.transmitted().await;
+    assert!(
+        tx.iter().any(|(_, a)| a.kind == Kind::Msg && a.fields().last() == Some(&"after key".to_string())),
+        "{tx:?}"
+    );
+}
+

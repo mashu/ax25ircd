@@ -14,6 +14,7 @@ motd = [
   "Channels marked +r are transmitted on the air in the clear.",
   "Identify with: /quote CALLSIGN SM0ABC",
   "Keep a nick with: /quote REGISTER <password>   then  /quote IDENTIFY <password>",
+  "Messages go on the air only with RF-TX (IDENTIFY to a granted nick, RFKEY, or OPER).",
 ]
 max_nick_len = 30
 max_channels_per_user = 20
@@ -114,8 +115,19 @@ ip_cmds_per_min = 90
 ip_cmd_burst = 30
 block_apparent_ciphertext = true
 require_callsign_for_rf = true
+# Who among IRC clients may have messages put on the air.
+#   "off"      — never; IRC is a listen/chat overlay
+#   "oper"     — only OPER
+#   "key"      — RFKEY <password> matching rf_tx_password (OPER always can)
+#   "account"  — IDENTIFY to a nick in rf_tx_nicks, or RADIO GRANT (default)
+#   "callsign" — legacy: a CALLSIGN claim is enough
+ip_rf_tx = "account"
+# rf_tx_password = "change-me"
+rf_tx_nicks = ["sm0abc"]
+identify_per_min = 6
+identify_burst = 3
 deny_callsigns = []
-allow_callsigns = []   # empty means "anyone"
+allow_callsigns = []   # empty means "anyone" on the RF side
 
 [[channels]]
 name = "#rf"

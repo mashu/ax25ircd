@@ -28,6 +28,11 @@ pub struct SessionConfig {
     pub max_queue: usize,
     /// How many recent sequence numbers to remember per station for dedup.
     pub dedup_window: usize,
+    /// Stations we will remember at once. Further callsigns are ignored until
+    /// an idle peer expires, so a flood of unique sources cannot grow forever.
+    pub max_peers: usize,
+    /// Incomplete fragmented messages kept per station.
+    pub max_reasm: usize,
 }
 
 impl Default for SessionConfig {
@@ -40,6 +45,8 @@ impl Default for SessionConfig {
             peer_idle_timeout: Duration::from_secs(30 * 60),
             max_queue: 16,
             dedup_window: 64,
+            max_peers: 256,
+            max_reasm: 4,
         }
     }
 }
@@ -163,13 +170,32 @@ impl Sessions {
         self.peers.values()
     }
 
-    pub fn touch(&mut self, call: &Callsign, now: Instant) -> &mut Peer {
+    pub fn touch(&mut self, call: &Callsign, now: Instant) -> Option<&mut Peer> {
+        if !self.peers.contains_key(call) && self.peers.len() >= self.config.max_peers {
+            return None;
+        }
         let peer = self
             .peers
             .entry(call.clone())
             .or_insert_with(|| Peer::new(call.clone(), now));
         peer.last_heard = now;
-        peer
+        Some(peer)
+    }
+
+    /// Unlike [`Sessions::touch`], evicts the quietest peer if the table is
+    /// full so a legitimate outgoing message is never dropped on the floor.
+    pub fn force_touch(&mut self, call: &Callsign, now: Instant) -> &mut Peer {
+        if !self.peers.contains_key(call) && self.peers.len() >= self.config.max_peers {
+            if let Some(oldest) = self
+                .peers
+                .iter()
+                .min_by_key(|(_, p)| p.last_heard)
+                .map(|(c, _)| c.clone())
+            {
+                self.peers.remove(&oldest);
+            }
+        }
+        self.touch(call, now).expect("force_touch made room")
     }
 
     pub fn forget(&mut self, call: &Callsign) {
@@ -179,7 +205,9 @@ impl Sessions {
     /// Handle a frame received from `src`.
     pub fn on_receive(&mut self, src: &Callsign, frame: AircFrame, now: Instant) -> RxOutcome {
         let cfg = self.config.clone();
-        let peer = self.touch(src, now);
+        let Some(peer) = self.touch(src, now) else {
+            return RxOutcome::default();
+        };
         let mut out = RxOutcome::default();
 
         if frame.kind == Kind::Ack {
@@ -198,28 +226,42 @@ impl Sessions {
             return out;
         }
 
-        // Acknowledge before deduplicating: a repeat usually means our ACK was
-        // lost, so it needs another one.
-        if frame.wants_ack() {
-            out.transmit.push(AircFrame::new(
-                Kind::Ack,
-                frame.seq,
-                frame.seq.to_be_bytes().to_vec(),
-            ));
-        }
-
         if peer.seen.contains(&frame.seq) {
             out.duplicate = true;
+            // A duplicate of an already-delivered message is still ACKed:
+            // the usual reason for a repeat is that our ACK was lost.
+            // Incomplete fragments are not in `seen` and are not ACKed.
+            if frame.wants_ack() {
+                out.transmit.push(ack_for(frame.seq));
+            }
             return out;
         }
 
         if frame.frag_total == 1 {
+            if frame.wants_ack() {
+                out.transmit.push(ack_for(frame.seq));
+            }
             remember_seq(peer, frame.seq, cfg.dedup_window);
             out.deliver = Some(frame);
             return out;
         }
 
-        // Fragmented message: stash and wait for the rest.
+        // Fragmented message: stash and wait for the rest. ACK only when the
+        // last missing fragment arrives (PROTOCOL.md §5). ACKing fragment 0
+        // would let the sender drop the rest of the message.
+        if frame.payload.len() > cfg.max_payload() {
+            return out;
+        }
+        if !peer.reasm.contains_key(&frame.seq) && peer.reasm.len() >= cfg.max_reasm {
+            if let Some(oldest) = peer
+                .reasm
+                .iter()
+                .min_by_key(|(_, r)| r.started)
+                .map(|(s, _)| *s)
+            {
+                peer.reasm.remove(&oldest);
+            }
+        }
         let entry = peer.reasm.entry(frame.seq).or_insert_with(|| Reassembly {
             kind: frame.kind,
             flags: frame.flags,
@@ -227,7 +269,6 @@ impl Sessions {
             started: now,
         });
         if entry.parts.len() != frame.frag_total as usize {
-            // Sequence number reused with a different shape; start over.
             *entry = Reassembly {
                 kind: frame.kind,
                 flags: frame.flags,
@@ -236,17 +277,22 @@ impl Sessions {
             };
         }
         entry.parts[frame.frag_index as usize] = Some(frame.payload.clone());
-
-        if entry.parts.iter().all(|p| p.is_some()) {
-            let mut payload = Vec::new();
-            for part in entry.parts.iter().flatten() {
-                payload.extend_from_slice(part);
-            }
-            let (kind, flg) = (entry.kind, entry.flags);
-            peer.reasm.remove(&frame.seq);
-            remember_seq(peer, frame.seq, cfg.dedup_window);
-            out.deliver = Some(AircFrame::new(kind, frame.seq, payload).with_flags(flg));
+        let complete = entry.parts.iter().all(|p| p.is_some());
+        if !complete {
+            return out;
         }
+
+        let mut payload = Vec::new();
+        for part in entry.parts.iter().flatten() {
+            payload.extend_from_slice(part);
+        }
+        let (kind, flg) = (entry.kind, entry.flags);
+        peer.reasm.remove(&frame.seq);
+        remember_seq(peer, frame.seq, cfg.dedup_window);
+        if frame.wants_ack() || flg & flags::ACK_REQ != 0 {
+            out.transmit.push(ack_for(frame.seq));
+        }
+        out.deliver = Some(AircFrame::new(kind, frame.seq, payload).with_flags(flg));
         out
     }
 
@@ -263,7 +309,7 @@ impl Sessions {
     ) -> Vec<AircFrame> {
         let cfg = self.config.clone();
         let seq = self.next_seq();
-        let peer = self.touch(dst, now);
+        let peer = self.force_touch(dst, now);
         let chunks: Vec<&[u8]> = if payload.is_empty() {
             vec![&[]]
         } else {
@@ -356,6 +402,10 @@ impl Sessions {
         }
         out
     }
+}
+
+fn ack_for(seq: u16) -> AircFrame {
+    AircFrame::new(Kind::Ack, seq, seq.to_be_bytes().to_vec())
 }
 
 fn start_pending(
@@ -498,5 +548,53 @@ mod tests {
         let peer = s.peer(&call()).unwrap();
         assert_eq!(peer.queue_depth(), 3);
         assert_eq!(peer.dropped, 2);
+    }
+
+    #[test]
+    fn reliable_fragments_are_acked_only_when_complete() {
+        let cfg = SessionConfig {
+            paclen: HEADER_LEN + 4,
+            ..Default::default()
+        };
+        let mut tx = Sessions::new(cfg.clone());
+        let mut rx = Sessions::new(cfg);
+        let now = Instant::now();
+        let frames = tx.send(&call(), Kind::Msg, b"abcdefghij".to_vec(), true, now);
+        assert_eq!(frames.len(), 3);
+
+        let first = rx.on_receive(&call(), frames[0].clone(), now);
+        assert!(first.deliver.is_none());
+        assert!(
+            first.transmit.is_empty(),
+            "ACKing fragment 0 lets the sender drop the rest"
+        );
+
+        let second = rx.on_receive(&call(), frames[1].clone(), now);
+        assert!(second.deliver.is_none());
+        assert!(second.transmit.is_empty());
+
+        let last = rx.on_receive(&call(), frames[2].clone(), now);
+        assert_eq!(last.deliver.unwrap().payload, b"abcdefghij");
+        assert_eq!(last.transmit.len(), 1);
+        assert_eq!(last.transmit[0].kind, Kind::Ack);
+        assert_eq!(last.transmit[0].payload, frames[0].seq.to_be_bytes());
+    }
+
+    #[test]
+    fn peer_table_is_bounded() {
+        let cfg = SessionConfig {
+            max_peers: 2,
+            ..Default::default()
+        };
+        let mut s = Sessions::new(cfg);
+        let now = Instant::now();
+        let a: Callsign = "SM0AAA-1".parse().unwrap();
+        let b: Callsign = "SM0BBB-1".parse().unwrap();
+        let c: Callsign = "SM0CCC-1".parse().unwrap();
+        assert!(s.touch(&a, now).is_some());
+        assert!(s.touch(&b, now).is_some());
+        assert!(s.touch(&c, now).is_none(), "a third peer must not grow the table");
+        s.force_touch(&c, now);
+        assert_eq!(s.peers().count(), 2);
     }
 }

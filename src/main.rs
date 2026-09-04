@@ -129,7 +129,8 @@ QMX on Debian: https://mashu.github.io/ax25ircd/
     };
 
     let (events_tx, events_rx) = mpsc::channel::<Event>(1024);
-    let server = Server::new(config.clone(), tnc_handle);
+    let mut server = Server::new(config.clone(), tnc_handle);
+    server.attach_events(events_tx.clone());
 
     // Feed received frames into the event loop.
     if let Some(mut rf_rx) = rf_rx {

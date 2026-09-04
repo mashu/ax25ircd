@@ -185,15 +185,20 @@ impl AircFrame {
     }
 }
 
-/// Join fields with the separator. Any separator inside a field is stripped;
-/// it can never appear in a legal nick, channel name or IRC message anyway.
+/// Join fields with the separator. The separator, CR, LF and NUL inside a
+/// field are stripped: they are never legal in a nick, channel or message,
+/// and CR/LF would be IRC line injection if the field were later rendered
+/// for an IP client.
 pub fn encode_fields(fields: &[&str]) -> Vec<u8> {
     let mut out = Vec::new();
     for (i, f) in fields.iter().enumerate() {
         if i > 0 {
             out.push(FS);
         }
-        out.extend(f.bytes().filter(|&b| b != FS));
+        out.extend(
+            f.bytes()
+                .filter(|&b| b != FS && b != b'\r' && b != b'\n' && b != 0),
+        );
     }
     out
 }
@@ -212,6 +217,14 @@ mod tests {
         assert_eq!(back, f);
         assert_eq!(back.fields(), vec!["#rf", "hello there"]);
         assert!(back.wants_ack());
+    }
+
+    #[test]
+    fn encode_fields_strips_crlf() {
+        let bytes = encode_fields(&["bye\r\nNOTICE alice :x"]);
+        assert!(!bytes.contains(&b'\r'));
+        assert!(!bytes.contains(&b'\n'));
+        assert_eq!(AircFrame::new(Kind::Quit, 1, bytes).fields(), vec!["byeNOTICE alice :x"]);
     }
 
     #[test]

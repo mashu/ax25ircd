@@ -2,17 +2,19 @@
 //!
 //! The command set is deliberately small: RFC 1459 minus the parts that only
 //! make sense in a linked network (SERVER, SQUIT, services, bans-by-mask).
-//! Two commands are local extensions:
+//! Local extensions:
 //!
-//! * `CALLSIGN <call>` - an IP user identifies with an amateur callsign, which
-//!   is what allows their traffic to be relayed to RF.
+//! * `CALLSIGN <call>` - an IP user identifies with an amateur callsign (+v
+//!   on `+r` channels). This is a claim, not authentication, and does not
+//!   by itself put traffic on the air.
+//! * `RFKEY <password>` - present the shared RF-TX key.
 //! * `RADIO <subcommand>` - the control operator's console.
 
 use std::time::{Duration, Instant};
 
 use tracing::info;
 
-use crate::accounts::AccountError;
+use crate::accounts::{hash_password, verify_password, AccountError};
 use crate::airc::{encode_fields, Kind};
 use crate::callsign::Callsign;
 use crate::irc::message::{is_channel_name, is_valid_nick, lower, Message};
@@ -20,7 +22,7 @@ use crate::irc::numerics as num;
 use crate::policy::Verdict;
 
 use super::state::{ClientId, UserId};
-use super::{Delivery, Server};
+use super::{AuthKind, Delivery, Event, Server};
 
 impl Server {
     pub fn handle_client_message(&mut self, id: ClientId, msg: Message) {
@@ -108,6 +110,7 @@ impl Server {
             }
             "OPER" => self.cmd_oper(&uid, &msg),
             "CALLSIGN" => self.cmd_callsign(&uid, &msg),
+            "RFKEY" => self.cmd_rfkey(&uid, &msg),
             "RADIO" => self.cmd_radio(&uid, &msg),
             "KICK" => self.cmd_kick(&uid, &msg),
             "KILL" => self.cmd_kill(&uid, &msg),
@@ -148,28 +151,19 @@ impl Server {
             self.numeric(uid, num::ERR_ERRONEUSNICKNAME, &[&nick, "Erroneous nickname"]);
             return;
         }
-        // A nick that looks like a callsign mapping is reserved for the real
-        // station: SM0ABC|7 may only be used by SM0ABC-7 coming in over RF.
-        if let Ok(call) = crate::callsign::Callsign::from_nick(&nick) {
-            if call.looks_like_amateur_call() {
-                let owned_by_self = self
-                    .state
-                    .user(uid)
-                    .and_then(|u| u.callsign.clone())
-                    .map(|c| c == call)
-                    .unwrap_or(false);
-                if !owned_by_self {
-                    self.numeric(
-                        uid,
-                        num::ERR_ERRONEUSNICKNAME,
-                        &[
-                            &nick,
-                            "Callsign nicknames are reserved; use CALLSIGN to identify",
-                        ],
-                    );
-                    return;
-                }
-            }
+        // Callsign-shaped nicks belong to RF stations. RFC 1459 casemapping
+        // makes `\` the uppercase of `|`, so SM0ABC\7 must be rejected too,
+        // as must the AX.25 form SM0ABC-7.
+        if Callsign::reserved_from_nick(&nick).is_some() {
+            self.numeric(
+                uid,
+                num::ERR_ERRONEUSNICKNAME,
+                &[
+                    &nick,
+                    "Callsign nicknames are reserved; use CALLSIGN to identify",
+                ],
+            );
+            return;
         }
         if self.state.nick_taken(&nick) {
             self.numeric(uid, num::ERR_NICKNAMEINUSE, &[&nick, "Nickname is already in use"]);
@@ -546,18 +540,35 @@ impl Server {
             .map(|u| (u.nick.clone(), u.prefix()))
             .unwrap_or_default();
         let now = self.now_unix();
+        let topic = crate::policy::sanitize(&topic);
         if let Some(c) = self.state.channel_mut(&name) {
             c.topic = Some(topic.clone());
             c.topic_setter = nick.clone();
             c.topic_time = now;
         }
+        let mut allow_rf = chan.rf
+            && chan.has_rf_members()
+            && self.rf_available()
+            && self.user_may_tx_rf(uid);
+        let air_topic = if allow_rf {
+            match self.policy.screen_outbound(&topic) {
+                Verdict::Allow(t) | Verdict::Truncated(t) => t,
+                Verdict::Deny(reason) => {
+                    self.notice_user(uid, reason);
+                    allow_rf = false;
+                    topic.clone()
+                }
+            }
+        } else {
+            topic.clone()
+        };
         let d = Delivery::Topic {
             nick,
             prefix,
             channel: chan.name.clone(),
-            topic,
+            topic: air_topic,
         };
-        self.broadcast_channel(&chan.name, &d, None);
+        self.broadcast_channel_ex(&chan.name, &d, None, allow_rf);
     }
 
     fn cmd_list(&mut self, uid: &UserId) {
@@ -641,6 +652,13 @@ impl Server {
                 &[&target.nick, "is a registered nick"],
             );
         }
+        if target.rf_tx && !target.is_rf() {
+            self.numeric(
+                uid,
+                num::RPL_WHOISOPERATOR,
+                &[&target.nick, "has RF-TX privilege (messages may be radiated)"],
+            );
+        }
         if let (UserId::Rf(call), Some(peer)) = (&target.id, {
             let c = target.id.callsign().cloned();
             c.and_then(|c| self.sessions.peer(&c))
@@ -675,7 +693,13 @@ impl Server {
         };
         if !is_channel_name(&target) {
             let modes = if self.state.user(uid).map(|u| u.oper).unwrap_or(false) {
-                "+o"
+                if self.state.user(uid).map(|u| u.rf_tx).unwrap_or(false) {
+                    "+oR"
+                } else {
+                    "+o"
+                }
+            } else if self.state.user(uid).map(|u| u.rf_tx).unwrap_or(false) {
+                "+R"
             } else {
                 "+i"
             };
@@ -784,6 +808,9 @@ impl Server {
             self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["OPER", "Not enough parameters"]);
             return;
         };
+        if !self.auth_rate_ok(uid) {
+            return;
+        }
         let ok = self
             .config
             .opers
@@ -978,6 +1005,15 @@ impl Server {
             self.notice_user(uid, "The transmitter is off; your message stayed on the wire.");
             return None;
         }
+        if !self.user_may_tx_rf(uid) {
+            self.notice_user(
+                uid,
+                "Not relayed to RF: you do not have RF-TX privilege. \
+                 Ordinary IRC clients chat here on the internet only. \
+                 A control operator grants RF-TX via IDENTIFY to a listed nick, RFKEY, or OPER.",
+            );
+            return None;
+        }
         let identified = self.state.user(uid).and_then(|u| u.callsign.clone());
         if self.policy.config.require_callsign_for_rf && identified.is_none() {
             self.notice_user(
@@ -1060,6 +1096,37 @@ impl Server {
             ),
         );
         self.refresh_privileges(uid);
+    }
+
+    fn cmd_rfkey(&mut self, uid: &UserId, msg: &Message) {
+        if !self.auth_rate_ok(uid) {
+            return;
+        }
+        let Some(given) = msg.param(0) else {
+            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["RFKEY", "Not enough parameters"]);
+            return;
+        };
+        let Some(expected) = self.config.policy.rf_tx_password.as_ref() else {
+            self.notice_user(uid, "RFKEY is not configured on this server.");
+            return;
+        };
+        if expected.is_empty() || given != expected {
+            self.notice_user(uid, "RF-TX key rejected.");
+            if let Some(u) = self.state.user(uid) {
+                self.audit.event("rfkey_fail", &[("nick", &u.nick), ("host", &u.host)]);
+            }
+            return;
+        }
+        if let Some(u) = self.state.user_mut(uid) {
+            u.rf_tx = true;
+        }
+        self.notice_user(
+            uid,
+            "RF-TX granted for this session. Your messages in +r channels may be radiated.",
+        );
+        if let Some(u) = self.state.user(uid) {
+            self.audit.event("rfkey", &[("nick", &u.nick), ("host", &u.host)]);
+        }
     }
 
     fn cmd_radio(&mut self, uid: &UserId, msg: &Message) {
@@ -1172,9 +1239,23 @@ impl Server {
                 self.quit_user(&target, "Removed by control operator");
                 self.notice_user(uid, "Station removed.");
             }
+            "GRANT" => {
+                let Some(nick) = msg.param(1).map(|s| s.to_string()) else {
+                    self.notice_user(uid, "Usage: RADIO GRANT <nick>");
+                    return;
+                };
+                self.grant_rf_tx(uid, &nick, true);
+            }
+            "REVOKE" => {
+                let Some(nick) = msg.param(1).map(|s| s.to_string()) else {
+                    self.notice_user(uid, "Usage: RADIO REVOKE <nick>");
+                    return;
+                };
+                self.grant_rf_tx(uid, &nick, false);
+            }
             _ => self.notice_user(
                 uid,
-                "RADIO STATUS | ON | OFF | ID | HEARD | MAIL | KICK <callsign>",
+                "RADIO STATUS | ON | OFF | ID | HEARD | MAIL | KICK <callsign> | GRANT <nick> | REVOKE <nick>",
             ),
         }
     }
@@ -1249,37 +1330,32 @@ impl Server {
             self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["REGISTER", "Not enough parameters"]);
             return;
         };
+        if !self.auth_rate_ok(uid) {
+            return;
+        }
         let Some(user) = self.state.user(uid).cloned() else {
             return;
         };
-        if let Ok(call) = Callsign::from_nick(&user.nick) {
-            if call.looks_like_amateur_call() {
-                self.notice_user(uid, "Callsign nicks cannot be registered; they belong to RF stations.");
-                return;
-            }
-        }
-        if user.nick_identified && self.accounts.is_registered(&user.nick) {
-            match self.accounts.set_password(&user.nick, password, self.config.accounts.min_password_len) {
-                Ok(()) => self.notice_user(uid, "Password updated."),
-                Err(e) => self.notice_account_error(uid, e),
-            }
+        if Callsign::reserved_from_nick(&user.nick).is_some() {
+            self.notice_user(uid, "Callsign nicks cannot be registered; they belong to RF stations.");
             return;
         }
-        match self.accounts.register(&user.nick, password, self.config.accounts.min_password_len) {
-            Ok(()) => {
-                if let Some(u) = self.state.user_mut(uid) {
-                    u.nick_identified = true;
-                    u.identify_by = None;
-                }
-                self.notice_user(
-                    uid,
-                    "Nick registered. The password is stored as an Argon2id hash, not recoverable. IDENTIFY on next connect.",
-                );
-                self.audit.event("nick_register", &[("nick", &user.nick), ("host", &user.host)]);
-                self.refresh_privileges(uid);
-            }
-            Err(e) => self.notice_account_error(uid, e),
+        if password.len() < self.config.accounts.min_password_len {
+            self.notice_account_error(uid, AccountError::TooShort);
+            return;
         }
+        if password.len() > 128 {
+            self.notice_account_error(uid, AccountError::TooLong);
+            return;
+        }
+        if !user.nick_identified && self.accounts.is_registered(&user.nick) {
+            self.notice_account_error(uid, AccountError::Taken);
+            return;
+        }
+        let password = password.to_string();
+        self.run_argon2(uid, AuthKind::Register, user.nick, move || {
+            hash_password(&password).map(Some)
+        });
     }
 
     fn cmd_identify(&mut self, uid: &UserId, msg: &Message) {
@@ -1287,21 +1363,20 @@ impl Server {
             self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["IDENTIFY", "Not enough parameters"]);
             return;
         };
+        if !self.auth_rate_ok(uid) {
+            return;
+        }
         let Some(user) = self.state.user(uid).cloned() else {
             return;
         };
-        match self.accounts.verify(&user.nick, password) {
-            Ok(()) => {
-                if let Some(u) = self.state.user_mut(uid) {
-                    u.nick_identified = true;
-                    u.identify_by = None;
-                }
-                self.notice_user(uid, "Password accepted. You own this nick for this session.");
-                self.audit.event("identify", &[("nick", &user.nick), ("host", &user.host)]);
-                self.refresh_privileges(uid);
-            }
-            Err(e) => self.notice_account_error(uid, e),
-        }
+        let Some(hash) = self.accounts.hash_for(&user.nick) else {
+            self.notice_account_error(uid, AccountError::NotRegistered);
+            return;
+        };
+        let password = password.to_string();
+        self.run_argon2(uid, AuthKind::Identify, user.nick, move || {
+            verify_password(&password, &hash).map(|()| None)
+        });
     }
 
     fn cmd_unregister(&mut self, uid: &UserId, msg: &Message) {
@@ -1309,24 +1384,174 @@ impl Server {
             self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["UNREGISTER", "Not enough parameters"]);
             return;
         };
+        if !self.auth_rate_ok(uid) {
+            return;
+        }
         let Some(user) = self.state.user(uid).cloned() else {
             return;
         };
-        if self.accounts.verify(&user.nick, password).is_err() {
-            self.notice_user(uid, "Password incorrect.");
+        let Some(hash) = self.accounts.hash_for(&user.nick) else {
+            self.notice_account_error(uid, AccountError::NotRegistered);
+            return;
+        };
+        let password = password.to_string();
+        self.run_argon2(uid, AuthKind::Unregister, user.nick, move || {
+            verify_password(&password, &hash).map(|()| None)
+        });
+    }
+
+    fn auth_rate_ok(&mut self, uid: &UserId) -> bool {
+        let host = self
+            .state
+            .user(uid)
+            .map(|u| u.host.clone())
+            .unwrap_or_default();
+        if !self.policy.identify_rate_ok(&host, Instant::now()) {
+            self.notice_user(
+                uid,
+                "Slow down: too many password attempts from your host.",
+            );
+            self.audit.event("auth_throttle", &[("host", &host)]);
+            return false;
+        }
+        true
+    }
+
+    /// Hash or verify off the event loop when a sender is attached; tests
+    /// without one still run inline so they stay deterministic.
+    fn run_argon2<F>(&mut self, uid: &UserId, kind: AuthKind, nick: String, work: F)
+    where
+        F: FnOnce() -> Result<Option<String>, AccountError> + Send + 'static,
+    {
+        let UserId::Ip(id) = *uid else {
+            return;
+        };
+        if let Some(tx) = self.events.clone() {
+            tokio::spawn(async move {
+                let outcome = tokio::task::spawn_blocking(work)
+                    .await
+                    .unwrap_or(Err(AccountError::Hash));
+                let (result, password_hash) = match outcome {
+                    Ok(hash) => (Ok(()), hash),
+                    Err(e) => (Err(e), None),
+                };
+                let _ = tx
+                    .send(Event::AuthFinished {
+                        id,
+                        kind,
+                        nick,
+                        result,
+                        password_hash,
+                    })
+                    .await;
+            });
             return;
         }
-        match self.accounts.drop_nick(&user.nick) {
-            Ok(()) => {
-                if let Some(u) = self.state.user_mut(uid) {
-                    u.nick_identified = false;
-                }
-                self.notice_user(uid, "Nick unregistered.");
-                self.audit.event("nick_drop", &[("nick", &user.nick)]);
-                self.refresh_privileges(uid);
-            }
-            Err(e) => self.notice_account_error(uid, e),
+        let (result, password_hash) = match work() {
+            Ok(hash) => (Ok(()), hash),
+            Err(e) => (Err(e), None),
+        };
+        self.finish_auth(id, kind, nick, result, password_hash);
+    }
+
+    pub(crate) fn finish_auth(
+        &mut self,
+        id: ClientId,
+        kind: AuthKind,
+        nick: String,
+        result: Result<(), AccountError>,
+        password_hash: Option<String>,
+    ) {
+        let uid = UserId::Ip(id);
+        let Some(user) = self.state.user(&uid).cloned() else {
+            return;
+        };
+        if lower(&user.nick) != lower(&nick) {
+            self.notice_user(&uid, "Nick changed during password check; try again.");
+            return;
         }
+        if let Err(e) = result {
+            self.notice_account_error(&uid, e);
+            return;
+        }
+        match kind {
+            AuthKind::Identify => {
+                if let Some(u) = self.state.user_mut(&uid) {
+                    u.nick_identified = true;
+                    u.identify_by = None;
+                }
+                self.notice_user(&uid, "Password accepted. You own this nick for this session.");
+                self.audit.event("identify", &[("nick", &user.nick), ("host", &user.host)]);
+                self.refresh_privileges(&uid);
+            }
+            AuthKind::Register => {
+                let Some(hash) = password_hash else {
+                    self.notice_account_error(&uid, AccountError::Hash);
+                    return;
+                };
+                if user.nick_identified && self.accounts.is_registered(&user.nick) {
+                    if let Err(e) = self.accounts.set_password_hash(&user.nick, hash) {
+                        self.notice_account_error(&uid, e);
+                        return;
+                    }
+                    self.notice_user(&uid, "Password updated.");
+                    return;
+                }
+                if let Err(e) = self.accounts.insert_hashed(&user.nick, hash) {
+                    self.notice_account_error(&uid, e);
+                    return;
+                }
+                if let Some(u) = self.state.user_mut(&uid) {
+                    u.nick_identified = true;
+                    u.identify_by = None;
+                }
+                self.notice_user(
+                    &uid,
+                    "Nick registered. The password is stored as an Argon2id hash, not recoverable. IDENTIFY on next connect.",
+                );
+                self.audit.event("nick_register", &[("nick", &user.nick), ("host", &user.host)]);
+                self.refresh_privileges(&uid);
+            }
+            AuthKind::Unregister => {
+                match self.accounts.drop_nick(&user.nick) {
+                    Ok(()) => {
+                        if let Some(u) = self.state.user_mut(&uid) {
+                            u.nick_identified = false;
+                            u.rf_tx = u.oper;
+                        }
+                        self.notice_user(&uid, "Nick unregistered.");
+                        self.audit.event("nick_drop", &[("nick", &user.nick)]);
+                        self.refresh_privileges(&uid);
+                    }
+                    Err(e) => self.notice_account_error(&uid, e),
+                }
+            }
+        }
+    }
+
+    fn grant_rf_tx(&mut self, oper: &UserId, nick: &str, grant: bool) {
+        if let Some(target) = self.find_target(nick) {
+            if let Some(u) = self.state.user_mut(&target) {
+                u.rf_tx = grant || u.oper;
+            }
+            self.notice_user(
+                &target,
+                if grant {
+                    "A control operator granted you RF-TX. Your messages in +r channels may be radiated."
+                } else {
+                    "RF-TX revoked. Your messages stay on IRC."
+                },
+            );
+        }
+        if self.accounts.is_registered(nick) {
+            let _ = self.accounts.set_rf_tx(nick, grant);
+        }
+        let verb = if grant { "granted" } else { "revoked" };
+        self.notice_user(oper, &format!("RF-TX {verb} for {nick}."));
+        self.audit.event(
+            if grant { "rf_tx_grant" } else { "rf_tx_revoke" },
+            &[("nick", nick)],
+        );
     }
 
     fn notice_account_error(&mut self, uid: &UserId, e: AccountError) {

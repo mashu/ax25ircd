@@ -56,6 +56,8 @@ pub struct User {
     pub got_nick: bool,
     pub got_user: bool,
     pub pass_ok: bool,
+    /// May this IP user have their messages put on the air?
+    pub rf_tx: bool,
 }
 
 impl User {
@@ -78,6 +80,7 @@ impl User {
             got_nick: false,
             got_user: false,
             pass_ok: false,
+            rf_tx: false,
         }
     }
 
