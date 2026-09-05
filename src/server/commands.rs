@@ -133,7 +133,7 @@ impl Server {
             .server
             .password
             .as_ref()
-            .map(|p| p == given)
+            .map(|p| constant_time_eq(p, given))
             .unwrap_or(true);
         if let Some(u) = self.state.user_mut(uid) {
             u.pass_ok = ok;
@@ -505,8 +505,23 @@ impl Server {
             return;
         };
         let names = self.state.names_of(channel);
-        // Chunk to stay under the 512 byte line limit.
-        for chunk in names.chunks(20) {
+        // Chunk by *bytes*, not by count: 20 nicks of the default 30-character
+        // maximum is 620 bytes, past the 512-byte line limit, and the writer
+        // would silently cut the last name in half.
+        const BUDGET: usize = 400;
+        let mut chunk: Vec<String> = Vec::new();
+        let mut used = 0usize;
+        for n in names {
+            if !chunk.is_empty() && used + n.len() + 1 > BUDGET {
+                let joined = chunk.join(" ");
+                self.numeric(uid, num::RPL_NAMREPLY, &["=", &chan.name, &joined]);
+                chunk.clear();
+                used = 0;
+            }
+            used += n.len() + 1;
+            chunk.push(n);
+        }
+        if !chunk.is_empty() {
             let joined = chunk.join(" ");
             self.numeric(uid, num::RPL_NAMREPLY, &["=", &chan.name, &joined]);
         }
@@ -809,11 +824,16 @@ impl Server {
         if !self.auth_rate_ok(uid) {
             return;
         }
-        let ok = self
-            .config
-            .opers
-            .iter()
-            .any(|o| o.name == name && o.password == pass);
+        // Compare every configured oper, and compare the password in constant
+        // time. `==` on a secret leaks its length and its first differing byte
+        // through timing, and OPER is the command that hands out control of a
+        // transmitter.
+        let mut ok = false;
+        for o in &self.config.opers {
+            if constant_time_eq(&o.name, name) && constant_time_eq(&o.password, pass) {
+                ok = true;
+            }
+        }
         if ok {
             if let Some(u) = self.state.user_mut(uid) {
                 u.oper = true;
@@ -828,6 +848,24 @@ impl Server {
             if let Some(u) = self.state.user(uid) {
                 self.audit.event("oper_fail", &[("nick", &u.nick), ("host", &u.host)]);
             }
+        }
+    }
+
+    /// The key an airtime rate limiter should count against.
+    ///
+    /// Never the nickname: `/nick` is free and instantaneous, so a nick-keyed
+    /// bucket is a rate limit a user resets by typing one command. The host
+    /// survives nick changes, and reconnecting to get a fresh one is already
+    /// capped by `listen.max_conns_per_host`.
+    fn rate_key(&self, uid: &UserId) -> String {
+        match self.state.user(uid) {
+            Some(u) if u.is_rf() => u
+                .callsign
+                .as_ref()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| u.nick.clone()),
+            Some(u) => format!("ip:{}", u.host),
+            None => "unknown".into(),
         }
     }
 
@@ -866,7 +904,7 @@ impl Server {
             }
 
             if chan.rf {
-                let key = format!("{}:{}" , sender.nick, chan.name);
+                let key = format!("{}:{}", self.rate_key(uid), chan.name);
                 if !self.policy.rf_channel_rate_ok(&key, Instant::now()) {
                     self.notice_user(
                         uid,
@@ -883,7 +921,7 @@ impl Server {
             let mut allow_rf = chan.rf && chan.has_rf_members() && self.rf_available();
             let mut text = text;
             if allow_rf {
-                match self.screen_for_air(uid, &sender.nick, &text) {
+                match self.screen_for_air(uid, &text) {
                     Some(screened) => text = screened,
                     None => allow_rf = false,
                 }
@@ -920,7 +958,7 @@ impl Server {
         };
         let mut text = text;
         if target_id.is_rf() {
-            match self.screen_for_air(uid, &sender.nick, &text) {
+            match self.screen_for_air(uid, &text) {
                 Some(screened) => text = screened,
                 None => return,
             }
@@ -960,7 +998,7 @@ impl Server {
             self.numeric(uid, num::ERR_NOSUCHNICK, &[target, "No such nick/channel"]);
             return;
         }
-        let Some(text) = self.screen_for_air(uid, from, text) else {
+        let Some(text) = self.screen_for_air(uid, text) else {
             return;
         };
         let message = crate::server::mailbox::StoredMessage {
@@ -998,7 +1036,7 @@ impl Server {
     /// Common gate for anything an IP user wants to put on the air. Returns
     /// the text to transmit, or `None` if it must not be transmitted (the
     /// user has already been told why).
-    fn screen_for_air(&mut self, uid: &UserId, nick: &str, text: &str) -> Option<String> {
+    fn screen_for_air(&mut self, uid: &UserId, text: &str) -> Option<String> {
         if !self.rf_available() {
             self.notice_user(uid, "The transmitter is off; your message stayed on the wire.");
             return None;
@@ -1028,7 +1066,7 @@ impl Server {
                 return None;
             }
         }
-        if !self.policy.ip_rate_ok(nick, Instant::now()) {
+        if !self.policy.ip_rate_ok(&self.rate_key(uid), Instant::now()) {
             self.notice_user(
                 uid,
                 "Not relayed to RF: you are sending faster than the channel can carry. \
@@ -1121,6 +1159,10 @@ impl Server {
                         self.mailbox.len()
                     ),
                 );
+                if let Some(a) = self.airtime() {
+                    let summary = a.summary();
+                    self.notice_user(uid, &summary);
+                }
             }
             return;
         }
@@ -1130,9 +1172,18 @@ impl Server {
         }
         match sub.as_str() {
             "OFF" => {
+                // Identify before going quiet: an automatically controlled
+                // station has to sign off the series of transmissions it made.
+                self.id_if_needed();
                 self.rf_enabled = false;
+                // Hard inhibit: discard whatever is already queued in the TNC
+                // task instead of radiating it after the operator said stop.
+                self.set_tx_inhibit(true);
                 info!("transmitter disabled by control operator");
-                self.notice_user(uid, "Transmitter disabled. The IRC side keeps running.");
+                self.notice_user(
+                    uid,
+                    "Transmitter disabled and the transmit queue purged. The IRC side keeps running.",
+                );
                 self.audit.event("radio_off", &[]);
                 let line = self.radio_status_line();
                 for ch in self
@@ -1148,6 +1199,7 @@ impl Server {
             }
             "ON" => {
                 if self.config.radio.enabled {
+                    self.set_tx_inhibit(false);
                     self.rf_enabled = true;
                     self.notice_user(uid, "Transmitter enabled.");
                     self.audit.event("radio_on", &[]);
@@ -1193,6 +1245,41 @@ impl Server {
                     self.notice_user(uid, &r);
                 }
             }
+            "DUTY" => {
+                match self.airtime() {
+                    Some(a) => {
+                        let summary = a.summary();
+                        self.notice_user(uid, &summary);
+                        let d = &self.config.radio.duty;
+                        if d.enabled {
+                            self.notice_user(
+                                uid,
+                                &format!(
+                                    "limits: {}% of {}s, max {}s continuous then {}s cooldown, \
+                                     {}s per rolling hour, frames dropped after {}s held \
+                                     (baud {}, txdelay {}ms, txtail {}ms)",
+                                    d.max_duty_percent,
+                                    d.window_secs,
+                                    d.max_continuous_secs,
+                                    d.cooldown_secs,
+                                    d.hourly_airtime_secs,
+                                    d.max_hold_secs,
+                                    d.baud,
+                                    d.txdelay_ms,
+                                    d.txtail_ms,
+                                ),
+                            );
+                        } else {
+                            self.notice_user(
+                                uid,
+                                "The airtime governor is DISABLED in the configuration. \
+                                 Nothing is protecting the finals or the channel.",
+                            );
+                        }
+                    }
+                    None => self.notice_user(uid, "No TNC; there is no airtime to report."),
+                }
+            }
             "MAIL" => {
                 let rows = self.mailbox.summary();
                 if rows.is_empty() {
@@ -1227,7 +1314,7 @@ impl Server {
             }
             _ => self.notice_user(
                 uid,
-                "RADIO STATUS | ON | OFF | ID | HEARD | MAIL | KICK <callsign> | GRANT <nick> | REVOKE <nick>",
+                "RADIO STATUS | DUTY | ON | OFF | ID | HEARD | MAIL | KICK <callsign> | GRANT <nick> | REVOKE <nick>",
             ),
         }
     }
@@ -1568,5 +1655,36 @@ impl Server {
             .get(&lower(name))
             .map(|c| c.name.clone())
             .unwrap_or_else(|| name.to_string())
+    }
+}
+
+/// Byte comparison that does not return early.
+///
+/// Lengths are still distinguishable (they always are, over a network), but
+/// the content comparison is uniform, so an attacker cannot walk a password
+/// out one byte at a time.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let mut diff = (a.len() ^ b.len()) as u8;
+    let n = a.len().max(b.len());
+    for i in 0..n {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::constant_time_eq;
+
+    #[test]
+    fn constant_time_eq_agrees_with_plain_equality() {
+        assert!(constant_time_eq("hunter2x", "hunter2x"));
+        assert!(!constant_time_eq("hunter2x", "hunter2y"));
+        assert!(!constant_time_eq("hunter2x", "hunter2xx"));
+        assert!(!constant_time_eq("", "x"));
+        assert!(constant_time_eq("", ""));
     }
 }

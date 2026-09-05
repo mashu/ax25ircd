@@ -329,12 +329,15 @@ async fn main() -> anyhow::Result<()> {
     let cfg = TncConfig {
         link: args.link.clone(),
         kiss_port: 0,
-        max_frame: args.paclen + 32,
+        max_frame: args.paclen + 64,
         tx_pacing: Duration::from_millis(800),
         tx_queue_depth: 32,
         txdelay: None,
         persistence: None,
         slottime: None,
+        // A station client is a human typing, not an automatically
+        // controlled gateway, but the finals do not know the difference.
+        airtime: ax25ircd::ax25::AirtimeConfig::default(),
     };
     let (tnc, mut rf_rx) = tnc::spawn(cfg);
     let sessions = Sessions::new(SessionConfig {

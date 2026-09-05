@@ -56,7 +56,7 @@ struct Harness {
     server: Server,
     far: DuplexStream,
     rf_rx: mpsc::Receiver<Ax25Frame>,
-    client_rx: mpsc::UnboundedReceiver<String>,
+    client_rx: mpsc::Receiver<String>,
     decoder: KissDecoder,
 }
 
@@ -74,7 +74,7 @@ impl Harness {
         let (handle, rf_rx) = tnc::spawn(tnc_cfg);
         let mut server = Server::new(config, Some(handle));
 
-        let (out, client_rx) = mpsc::unbounded_channel();
+        let (out, client_rx) = mpsc::channel(1024);
         server.handle(Event::Connected {
             id: CLIENT,
             host: "127.0.0.1".into(),
@@ -100,8 +100,8 @@ impl Harness {
         });
     }
 
-    fn connect_extra(&mut self, id: ClientId, nick: &str) -> mpsc::UnboundedReceiver<String> {
-        let (out, rx) = mpsc::unbounded_channel();
+    fn connect_extra(&mut self, id: ClientId, nick: &str) -> mpsc::Receiver<String> {
+        let (out, rx) = mpsc::channel(1024);
         self.server.handle(Event::Connected {
             id,
             host: "127.0.0.2".into(),
@@ -135,8 +135,15 @@ impl Harness {
     /// Put a frame on the air as if a station had transmitted it, and let the
     /// server process it.
     async fn station_transmits(&mut self, from: &str, frame: AircFrame) {
+        // Stations unicast to the gateway callsign; see PROTOCOL.md §3.1.
+        self.transmits_to(from, "SK0MT-1", frame).await
+    }
+
+    /// As above, but addressed wherever the caller says. Used to check that
+    /// the gateway ignores traffic that is not its business.
+    async fn transmits_to(&mut self, from: &str, to: &str, frame: AircFrame) {
         let call: Callsign = from.parse().unwrap();
-        let ax = Ax25Frame::ui(call, "AIRC".parse().unwrap(), &[], frame.encode()).unwrap();
+        let ax = Ax25Frame::ui(call, to.parse().unwrap(), &[], frame.encode()).unwrap();
         let wire = kiss::encode(0, kiss::CMD_DATA, &ax.encode());
         self.far.write_all(&wire).await.unwrap();
         self.far.flush().await.unwrap();
@@ -296,7 +303,7 @@ async fn irc_message_needs_a_callsign_before_it_is_transmitted() {
     let (ax, airc) = tx
         .iter()
         .find(|(_, a)| a.kind == Kind::Msg)
-        .expect("OPER + CALLSIGN should put the message on the air");
+        .unwrap_or_else(|| panic!("OPER + CALLSIGN should put the message on the air; got {:?}", tx.iter().map(|(_,a)| a.kind).collect::<Vec<_>>()));
     assert_eq!(ax.destination.call.to_string(), "AIRC");
     assert_eq!(airc.fields(), vec!["#rf", "alice", "hello radio"]);
 }
@@ -338,7 +345,7 @@ async fn ciphertext_is_not_transmitted() {
     );
 }
 
-fn drain_rx(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<String> {
+fn drain_rx(rx: &mut mpsc::Receiver<String>) -> Vec<String> {
     let mut out = Vec::new();
     while let Ok(line) = rx.try_recv() {
         out.push(line);
@@ -599,3 +606,181 @@ password = "operpass1"
 }
 
 
+
+
+#[tokio::test]
+async fn frames_addressed_elsewhere_are_ignored() {
+    let mut h = Harness::new().await;
+    h.drain_client();
+
+    // Addressed to the AIRC protocol address: a broadcast, not ours to act on.
+    h.transmits_to(
+        "SM0ABC-7",
+        "AIRC",
+        AircFrame::new(Kind::Join, 1, encode_fields(&["#rf"])),
+    )
+    .await;
+    // Addressed to a different station's callsign entirely.
+    h.transmits_to(
+        "SM0XYZ-9",
+        "SK0AA-1",
+        AircFrame::new(Kind::Join, 2, encode_fields(&["#rf"])),
+    )
+    .await;
+
+    let lines = h.drain_client();
+    assert!(
+        !lines.iter().any(|l| l.contains("JOIN")),
+        "a frame not addressed to this gateway was acted on: {lines:?}"
+    );
+    assert!(
+        h.transmitted().await.is_empty(),
+        "the gateway answered traffic that was not addressed to it"
+    );
+}
+
+#[tokio::test]
+async fn a_second_gateways_downlink_does_not_start_a_loop() {
+    let mut h = Harness::new().await;
+    h.drain_client();
+
+    // Exactly what another ax25ircd on the same frequency puts on the air:
+    // a downlink MSG, [channel, from, text], addressed to AIRC. Read as an
+    // uplink it would look like a message from SK0AA-1 to "#rf" saying
+    // "bob" — which we would then relay and transmit, and so would they.
+    h.transmits_to(
+        "SK0AA-1",
+        "AIRC",
+        AircFrame::new(Kind::Msg, 7, encode_fields(&["#rf", "bob", "hello from the other gateway"])),
+    )
+    .await;
+
+    assert!(
+        h.transmitted().await.is_empty(),
+        "we answered another gateway's broadcast; two gateways would key each other forever"
+    );
+    let lines = h.drain_client();
+    assert!(
+        !lines.iter().any(|l| l.contains("hello from the other gateway")),
+        "another gateway's downlink was relayed to IRC: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn radio_off_identifies_and_purges_the_queue() {
+    let mut h = Harness::new().await;
+    h.oper_and_callsign();
+    h.send("JOIN #rf");
+    h.station_transmits("SM0ABC-7", AircFrame::new(Kind::Hello, 1, Vec::new()))
+        .await;
+    h.drain_client();
+    let before = h.transmitted().await;
+    assert!(
+        !before.is_empty(),
+        "the HELLO should have been answered on the air, so the station owes an ID"
+    );
+
+    h.send("RADIO OFF");
+    let sent = h.transmitted().await;
+    assert!(
+        sent.iter().any(|(_, f)| f.kind == Kind::Id),
+        "a station that has transmitted must identify before it goes quiet: {:?}",
+        sent.iter().map(|(_, f)| f.kind).collect::<Vec<_>>()
+    );
+
+    // Nothing more may reach the air after that.
+    h.send("PRIVMSG #rf :this must not be transmitted");
+    assert!(
+        h.transmitted().await.is_empty(),
+        "the transmitter kept radiating after RADIO OFF"
+    );
+}
+
+#[tokio::test]
+async fn names_reply_to_rf_is_bounded() {
+    let mut h = Harness::new().await;
+    h.drain_client();
+    // Fill the channel with IP users so an unbounded NAMES would be huge.
+    for i in 0..60u64 {
+        let mut rx = h.connect_extra(100 + i, &format!("user{i:02}"));
+        h.server.handle(Event::Line {
+            id: 100 + i,
+            line: "JOIN #rf".into(),
+        });
+        let _ = drain_rx(&mut rx);
+    }
+    h.station_transmits("SM0ABC-7", AircFrame::new(Kind::Hello, 1, Vec::new()))
+        .await;
+    h.ack(&AircFrame::new(Kind::Welcome, 0, Vec::new())).await;
+    let _ = h.transmitted().await;
+
+    h.station_transmits(
+        "SM0ABC-7",
+        AircFrame::new(Kind::Join, 2, encode_fields(&["#rf"])),
+    )
+    .await;
+    let sent = h.transmitted().await;
+    for (_, f) in &sent {
+        if f.kind == Kind::NamesReply {
+            assert!(
+                f.payload.len() < 400,
+                "a NAMES reply of {} octets is minutes of airtime at 300 baud",
+                f.payload.len()
+            );
+        }
+    }
+}
+
+
+#[tokio::test]
+async fn the_duty_governor_holds_the_transmitter_back() {
+    // A real 300-baud HF station: a tight duty allowance and a short run
+    // limit. The gateway must refuse to key up past them however much the
+    // IRC side wants to talk.
+    let toml = CONFIG.replace(
+        "[radio.tnc]\nkind = \"loopback\"",
+        "[radio.tnc]\nkind = \"loopback\"\n\n[radio.duty]\nenabled = true\nbaud = 300\nwindow_secs = 600\nmax_duty_percent = 5\nmax_continuous_secs = 10\ncooldown_secs = 300\nhourly_airtime_secs = 60\nmax_hold_secs = 5",
+    );
+    let mut h = Harness::from_toml(&toml).await;
+    h.oper_and_callsign();
+    h.send("JOIN #rf");
+    h.station_transmits("SM0ABC-7", AircFrame::new(Kind::Hello, 1, Vec::new()))
+        .await;
+    h.drain_client();
+    let _ = h.transmitted().await;
+
+    // Twenty full-length messages. At 300 baud each is seconds of airtime,
+    // so the 5 % / 600 s allowance is 30 s: only a handful can go out.
+    let body = "x".repeat(150);
+    for _ in 0..20 {
+        h.send(&format!("PRIVMSG #rf :{body}"));
+    }
+    let sent = h.transmitted().await;
+    let msgs = sent.iter().filter(|(_, a)| a.kind == Kind::Msg).count();
+    assert!(
+        msgs < 20,
+        "the governor let all {msgs} messages straight onto the air"
+    );
+
+    // And the operator can see why.
+    h.drain_client();
+    h.send("RADIO DUTY");
+    let lines = h.drain_client();
+    assert!(
+        lines.iter().any(|l| l.contains("duty")),
+        "RADIO DUTY told the operator nothing: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn config_rejects_a_duty_budget_that_can_never_pass_a_frame() {
+    // 1 % of 60 s is 600 ms; a 128-octet frame at 300 baud is several
+    // seconds. Nothing would ever be transmitted, and the operator would be
+    // left wondering why. Catch it at startup instead.
+    let toml = CONFIG.replace(
+        "[radio.tnc]\nkind = \"loopback\"",
+        "[radio.tnc]\nkind = \"loopback\"\n\n[radio.duty]\nwindow_secs = 60\nmax_duty_percent = 1",
+    );
+    let err = Config::from_toml(&toml).unwrap_err().to_string();
+    assert!(err.contains("duty"), "{err}");
+}

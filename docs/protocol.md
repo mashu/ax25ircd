@@ -94,6 +94,15 @@ per sender, so consuming another station's unicast traffic pollutes the
 duplicate-suppression window and causes messages meant for you to be discarded
 as duplicates.
 
+The **gateway** applies the rule more strictly still: it acts only on frames
+addressed to its own callsign, and never on broadcasts. `MSG` is the same
+`kind` in both directions but a different shape — uplink `[target, text]`,
+downlink `[target, from, text]` — so a gateway that processed broadcasts would
+read another gateway's downlink as uplink traffic from a station, relay it, and
+transmit it again. Two gateways sharing a frequency would then key each other
+indefinitely, with nobody watching either of them. Stations always unicast to
+the gateway, so nothing is lost by the restriction.
+
 ## 4. Reliability
 
 Two modes:

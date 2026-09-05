@@ -130,6 +130,86 @@ pub struct RadioConfig {
     /// NOTICE the sender when a channel message is actually put on the air.
     #[serde(default = "default_true")]
     pub notice_air_relay: bool,
+    /// Airtime and duty-cycle limits. These protect the transmitter's finals
+    /// and the shared channel; they are not the same thing as the per-user
+    /// rate limits in `[policy]`.
+    #[serde(default)]
+    pub duty: DutyConfig,
+}
+
+/// Transmitter airtime limits. Defaults are sized for a QRP HF station
+/// (a QMX-class radio at 300 baud) because that is the configuration most
+/// likely to be damaged by getting this wrong.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DutyConfig {
+    /// Turn the governor off entirely. Only reasonable into a dummy load.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// On-air symbol rate. 300 for HF SSB packet, 1200 for VHF FM.
+    #[serde(default = "default_duty_baud")]
+    pub baud: u32,
+    /// Keyed-but-idle time either side of the data, in milliseconds. These
+    /// should match the TNC's TXDELAY/TXTAIL: they are real key-down time and
+    /// at 300 baud they are a significant fraction of a short frame.
+    #[serde(default = "default_txdelay_ms")]
+    pub txdelay_ms: u64,
+    #[serde(default = "default_txtail_ms")]
+    pub txtail_ms: u64,
+    /// Sliding window the duty cycle is measured over.
+    #[serde(default = "default_duty_window")]
+    pub window_secs: u64,
+    /// Percentage of that window the station may be keyed for.
+    #[serde(default = "default_max_duty_percent")]
+    pub max_duty_percent: u32,
+    /// Longest unbroken transmit run before the transmitter is forced off to
+    /// let the power amplifier cool.
+    #[serde(default = "default_max_continuous")]
+    pub max_continuous_secs: u64,
+    /// How long that enforced cooldown lasts.
+    #[serde(default = "default_cooldown")]
+    pub cooldown_secs: u64,
+    /// Hard airtime ceiling per rolling hour. 0 disables it.
+    #[serde(default = "default_hourly_airtime")]
+    pub hourly_airtime_secs: u64,
+    /// A frame the governor has held longer than this is dropped instead of
+    /// being transmitted late. Stale traffic costs airtime and says nothing.
+    #[serde(default = "default_max_hold")]
+    pub max_hold_secs: u64,
+}
+
+impl Default for DutyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            baud: default_duty_baud(),
+            txdelay_ms: default_txdelay_ms(),
+            txtail_ms: default_txtail_ms(),
+            window_secs: default_duty_window(),
+            max_duty_percent: default_max_duty_percent(),
+            max_continuous_secs: default_max_continuous(),
+            cooldown_secs: default_cooldown(),
+            hourly_airtime_secs: default_hourly_airtime(),
+            max_hold_secs: default_max_hold(),
+        }
+    }
+}
+
+impl DutyConfig {
+    pub fn to_airtime(&self) -> crate::ax25::AirtimeConfig {
+        crate::ax25::AirtimeConfig {
+            enabled: self.enabled,
+            baud: self.baud.max(1),
+            txdelay: Duration::from_millis(self.txdelay_ms),
+            txtail: Duration::from_millis(self.txtail_ms),
+            window: Duration::from_secs(self.window_secs.max(1)),
+            max_duty: (self.max_duty_percent.min(100) as f64) / 100.0,
+            max_continuous: Duration::from_secs(self.max_continuous_secs.max(1)),
+            cooldown: Duration::from_secs(self.cooldown_secs),
+            hourly_budget: Duration::from_secs(self.hourly_airtime_secs),
+            max_hold: Duration::from_secs(self.max_hold_secs.max(1)),
+        }
+    }
 }
 
 impl Default for RadioConfig {
@@ -363,6 +443,46 @@ impl Config {
         if self.channels.iter().all(|c| !c.rf) {
             anyhow::bail!("radio.enabled is true but no channel has rf = true");
         }
+
+        let duty = &self.radio.duty;
+        if duty.enabled {
+            if duty.max_duty_percent == 0 || duty.max_duty_percent > 100 {
+                anyhow::bail!(
+                    "radio.duty.max_duty_percent must be between 1 and 100 \
+                     (use enabled = false if you really mean no limit)"
+                );
+            }
+            if duty.window_secs == 0 {
+                anyhow::bail!("radio.duty.window_secs must be at least 1");
+            }
+            if duty.max_continuous_secs == 0 {
+                anyhow::bail!("radio.duty.max_continuous_secs must be at least 1");
+            }
+            if duty.baud == 0 {
+                anyhow::bail!("radio.duty.baud must be at least 1");
+            }
+            // A frame the governor can never fit inside its own allowance
+            // would be deferred until `max_hold` and then dropped, forever.
+            let air = duty.to_airtime();
+            let biggest = crate::ax25::Governor::new(air.clone())
+                .airtime_for(self.radio.paclen + 64);
+            let allowance = air.window.mul_f64(air.max_duty);
+            if biggest > allowance {
+                anyhow::bail!(
+                    "radio.duty: a full-length frame is {:.1}s of airtime but the duty allowance \
+                     is only {:.1}s per {}s window; raise max_duty_percent or window_secs, or \
+                     lower paclen — otherwise nothing would ever be transmitted",
+                    biggest.as_secs_f64(),
+                    allowance.as_secs_f64(),
+                    air.window.as_secs()
+                );
+            }
+            if !air.hourly_budget.is_zero() && biggest > air.hourly_budget {
+                anyhow::bail!(
+                    "radio.duty.hourly_airtime_secs is smaller than a single full-length frame"
+                );
+            }
+        }
         for c in self
             .policy
             .deny_callsigns
@@ -495,6 +615,33 @@ fn default_identify_per_min() -> u32 {
 }
 fn default_identify_burst() -> u32 {
     3
+}
+fn default_duty_baud() -> u32 {
+    300
+}
+fn default_txdelay_ms() -> u64 {
+    400
+}
+fn default_txtail_ms() -> u64 {
+    300
+}
+fn default_duty_window() -> u64 {
+    600
+}
+fn default_max_duty_percent() -> u32 {
+    25
+}
+fn default_max_continuous() -> u64 {
+    30
+}
+fn default_cooldown() -> u64 {
+    60
+}
+fn default_hourly_airtime() -> u64 {
+    900
+}
+fn default_max_hold() -> u64 {
+    120
 }
 
 #[cfg(test)]

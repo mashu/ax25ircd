@@ -143,7 +143,28 @@ kind = "tcp"
 host = "127.0.0.1"
 port = 8001
 tx_pacing_ms = 2500
+
+# Keep the QMX alive. At 300 baud a full frame is about four seconds of
+# unbroken carrier, and the QMX has no thermal headroom to speak of. These
+# numbers must match the TXDELAY/TXTAIL in direwolf-qmx.conf.
+[radio.duty]
+enabled = true
+baud = 300
+txdelay_ms = 400
+txtail_ms = 300
+window_secs = 600
+max_duty_percent = 25
+max_continuous_secs = 30
+cooldown_secs = 60
+hourly_airtime_secs = 900
+max_hold_secs = 120
 ```
+
+!!! danger "Do not raise these without reading [Airtime](airtime.md)"
+    `[policy]` limits messages; `[radio.duty]` limits seconds of key-down.
+    Only the second one knows how long a transmission actually takes, and only
+    the second one is between a busy `#rf` and your finals. `RADIO DUTY` shows
+    the live figures.
 
 ```sh
 ax25ircd --check -c ~/.config/ax25ircd/ax25ircd.toml
@@ -209,6 +230,47 @@ callsign with `-` turned into `|` (`YOURCALL|7`).
 - Practice with no RF: `ax25irc-kisshub --bind 127.0.0.1:8001` and the same
   toml, indoors. Still do not enable radio toward a real antenna until you
   mean it.
+
+## 11. Can Direwolf be left out?
+
+Short answer: no, and it is not close.
+
+Direwolf is not a shim here. Between "an IRC message" and "RF out of a QMX"
+there are four jobs, and ax25ircd deliberately does none of them:
+
+| Job | Who does it | What replacing it costs |
+|---|---|---|
+| AFSK/BPSK modulation and **demodulation** | Direwolf | A soundcard modem: filters, timing recovery, DCD, and enough decoder tolerance to work on a real HF channel. This is the hard part, and Direwolf is a decade of it. |
+| ALSA capture and playback | Direwolf | Audio I/O and buffering against xruns |
+| PTT over CAT | Direwolf via hamlib | hamlib bindings or a hand-rolled Kenwood-dialect CAT driver |
+| AX.25 framing and KISS | Direwolf, and ax25ircd | Already done in `src/ax25` |
+
+The QMX itself cannot fill the gap. It is a transceiver with a USB audio
+interface and a CAT port — it has no KISS TNC, and its Digi mode is single-tone
+FSK for FT8-style modes, not AFSK, so it cannot carry AX.25 at all. There is no
+firmware setting that turns it into a TNC.
+
+So "skip Direwolf" really means "write a soundmodem". That is a real project —
+DSP, audio plumbing, and a decoder that has to work on a noisy 300 baud HF
+channel where Direwolf's multi-decoder approach earns its keep — and it would
+be a separate binary presenting the same KISS socket ax25ircd already speaks
+to. The gateway would not change at all.
+
+If the goal is **fewer moving parts**, the useful options are:
+
+* Run Direwolf as a systemd unit next to ax25ircd, so it is one `systemctl`
+  target rather than a terminal you have to remember. See
+  [Packaging](packaging.md).
+* Use `kind = "serial"` with a hardware KISS TNC (Mobilinkd, TNC-Pi) and drop
+  Direwolf *and* the sound card — but that is a different radio setup, not a
+  QMX one.
+
+If the goal is **no radio at all** for testing, `ax25irc-kisshub` already
+replaces Direwolf completely:
+
+```sh
+ax25irc-kisshub --bind 127.0.0.1:8001
+```
 
 ax25ircd never talks to the QMX. It talks KISS to Direwolf. That split is
 deliberate: audio, PTT and the modem stay in software that already knows

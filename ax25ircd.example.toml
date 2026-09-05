@@ -104,6 +104,40 @@ tx_pacing_ms = 1500
 # persistence = 63
 # slottime = 10
 
+# ---------------------------------------------------------------------------
+# Transmitter airtime governor.
+#
+# This is not a fairness knob — [policy] below is. This one protects the
+# hardware and the band. Every frame is costed in seconds of key-down time
+# (txdelay + data + txtail) before it is transmitted, and three independent
+# limits apply: a duty cycle over a sliding window, a maximum unbroken run
+# followed by a forced cooldown, and a hard airtime ceiling per rolling hour.
+#
+# It matters most on QRP HF. A QMX-class radio has finals with no thermal
+# headroom, and at 300 baud a single 128-octet frame is roughly four seconds
+# of continuous carrier — a handful of queued messages is already a minute
+# of transmitting. The defaults below assume exactly that setup.
+#
+# For 1200 baud VHF FM with a radio that has a heatsink, `baud = 1200` and
+# something like max_duty_percent = 40 is reasonable.
+#
+# `RADIO DUTY` shows the live figures. Frames the governor has held longer
+# than max_hold_secs are dropped: a two-minute-old chat line is not worth
+# the airtime it would cost.
+[radio.duty]
+enabled = true
+baud = 300
+# Match these to the TNC's TXDELAY/TXTAIL: they are real key-down time.
+txdelay_ms = 400
+txtail_ms = 300
+window_secs = 600
+max_duty_percent = 25
+max_continuous_secs = 30
+cooldown_secs = 60
+# 0 disables the hourly ceiling.
+hourly_airtime_secs = 900
+max_hold_secs = 120
+
 [policy]
 max_rf_text_len = 160
 rf_msgs_per_min = 6

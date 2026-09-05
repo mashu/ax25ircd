@@ -32,6 +32,12 @@ struct Bucket {
     last: Instant,
 }
 
+/// Distinct keys one limiter will track. A limiter is keyed by host or
+/// callsign, so this is generous for real traffic — but it has to be bounded:
+/// without a cap, anything that can present an unbounded supply of keys turns
+/// the limiter itself into the memory leak it exists to prevent.
+const MAX_BUCKETS: usize = 4096;
+
 pub struct RateLimiter {
     per_minute: f64,
     burst: f64,
@@ -50,6 +56,19 @@ impl RateLimiter {
     pub fn check(&mut self, key: &str, now: Instant) -> bool {
         let burst = self.burst;
         let rate = self.per_minute / 60.0;
+        if !self.buckets.contains_key(key) && self.buckets.len() >= MAX_BUCKETS {
+            // Drop the least recently used key to make room. Evicting one
+            // idle bucket is a smaller mistake than growing without limit,
+            // and refusing outright would let a flood lock out real users.
+            if let Some(oldest) = self
+                .buckets
+                .iter()
+                .min_by_key(|(_, b)| b.last)
+                .map(|(k, _)| k.clone())
+            {
+                self.buckets.remove(&oldest);
+            }
+        }
         let bucket = self.buckets.entry(key.to_string()).or_insert(Bucket {
             tokens: burst,
             last: now,
@@ -68,6 +87,11 @@ impl RateLimiter {
     pub fn expire(&mut self, now: Instant, idle: Duration) {
         self.buckets
             .retain(|_, b| now.saturating_duration_since(b.last) < idle);
+    }
+
+    #[cfg(test)]
+    fn bucket_count(&self) -> usize {
+        self.buckets.len()
     }
 }
 
@@ -304,6 +328,20 @@ mod tests {
         assert!(rl.check("a", now));
         assert!(!rl.check("a", now));
         assert!(rl.check("a", now + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn bucket_table_is_bounded() {
+        let mut rl = RateLimiter::new(60, 2);
+        let now = Instant::now();
+        for i in 0..(MAX_BUCKETS * 2) {
+            rl.check(&format!("host-{i}"), now + Duration::from_millis(i as u64));
+        }
+        assert!(
+            rl.bucket_count() <= MAX_BUCKETS,
+            "{} buckets",
+            rl.bucket_count()
+        );
     }
 
     #[test]

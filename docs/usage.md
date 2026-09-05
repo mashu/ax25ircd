@@ -113,8 +113,9 @@ KILL <nick>          OPER only
 After `OPER`:
 
 ```
-RADIO STATUS              transmitter, frames, stations heard
-RADIO OFF / ON            kill switch; IRC keeps running
+RADIO STATUS              transmitter, frames, stations heard, duty cycle
+RADIO DUTY                airtime spent, limits in force, PA cooldown
+RADIO OFF / ON            kill switch; purges the transmit queue
 RADIO ID                  identify now
 RADIO HEARD               stations, last heard, queue depth
 RADIO MAIL                held private messages (in memory, expires)

@@ -29,7 +29,7 @@ pub enum Event {
     Connected {
         id: ClientId,
         host: String,
-        out: mpsc::UnboundedSender<String>,
+        out: mpsc::Sender<String>,
         /// Fired by the server when it drops the user (QUIT/KILL/timeout)
         /// so the connection task actually closes the socket.
         hangup: Option<oneshot::Sender<()>>,
@@ -65,7 +65,7 @@ pub enum AuthKind {
 }
 
 struct IpLink {
-    out: mpsc::UnboundedSender<String>,
+    out: mpsc::Sender<String>,
     hangup: Option<oneshot::Sender<()>>,
 }
 
@@ -227,7 +227,7 @@ impl Server {
             } => {
                 let cap = self.config.listen.max_conns_per_host;
                 if cap > 0 && self.state.ip_count_from_host(&host) >= cap as usize {
-                    let _ = out.send(format!(
+                    let _ = out.try_send(format!(
                         "ERROR :Too many connections from {host} (max {cap})"
                     ));
                     if let Some(h) = hangup {
@@ -379,9 +379,7 @@ impl Server {
     fn shutdown(&mut self) {
         // Identify at the end of a transmission series, as required of an
         // automatically controlled station.
-        if self.transmitted_since_id {
-            self.send_id();
-        }
+        self.id_if_needed();
         for id in self.outputs.keys().copied().collect::<Vec<_>>() {
             self.send_raw(id, format!("ERROR :Server shutting down"));
         }
@@ -389,12 +387,35 @@ impl Server {
 
     // ------------------------------------------------------------- IP output
 
+    /// Write one line to an IP client.
+    ///
+    /// The per-client queue is bounded. It has to be: the server task cannot
+    /// block on a socket, so a client that stops reading — a laptop that slept,
+    /// a deliberately silent connection joined to a busy channel — would
+    /// otherwise grow its queue until the process runs out of memory. When the
+    /// queue is full the client is disconnected. Losing one slow reader is the
+    /// correct trade against losing the server.
     pub fn send_raw(&mut self, id: ClientId, line: String) {
-        if let Some(link) = self.outputs.get(&id) {
-            if link.out.send(line).is_err() {
-                self.drop_ip_link(id);
-            }
+        let full = match self.outputs.get(&id) {
+            Some(link) => match link.out.try_send(line) {
+                Ok(()) => return,
+                Err(mpsc::error::TrySendError::Full(_)) => true,
+                Err(mpsc::error::TrySendError::Closed(_)) => false,
+            },
+            None => return,
+        };
+        if full {
+            let id_s = id.to_string();
+            self.audit
+                .event("output_overflow", &[("id", &id_s)]);
+            warn!(client = id, "output queue full; dropping the connection");
         }
+        // Only drop the link here. Firing `hangup` makes the connection task
+        // emit `Disconnected`, which runs `quit_user` from the top of the
+        // event loop. Calling it inline instead would re-enter `send_raw` for
+        // every other member of every shared channel — recursion through the
+        // whole userbase, from inside a send.
+        self.drop_ip_link(id);
     }
 
     /// Close the TCP connection. Dropping the output channel stops the writer;
@@ -560,6 +581,20 @@ impl Server {
         self.rf_enabled && self.tnc.is_some()
     }
 
+    /// Live airtime counters from the TNC task, if there is one.
+    pub fn airtime(&self) -> Option<&std::sync::Arc<crate::ax25::AirtimeShared>> {
+        self.tnc.as_ref().map(|t| t.airtime())
+    }
+
+    /// The hard transmit inhibit that the TNC task honours. Unlike
+    /// `rf_enabled` (which only stops us *queueing* new frames) this also
+    /// discards whatever is already queued.
+    pub fn set_tx_inhibit(&self, inhibit: bool) {
+        if let Some(tnc) = self.tnc.as_ref() {
+            tnc.set_inhibit(inhibit);
+        }
+    }
+
     /// Unreliable one-to-many transmission addressed to the protocol's
     /// destination address. Every station in range hears it once.
     pub fn broadcast(&mut self, kind: Kind, payload: Vec<u8>) {
@@ -671,6 +706,16 @@ impl Server {
         self.last_id = now;
     }
 
+    /// Identify now if we have transmitted since the last ID. Called before
+    /// the transmitter is taken off the air (shutdown, `RADIO OFF`): an
+    /// automatically controlled station must identify at the end of a series
+    /// of transmissions, not only every ten minutes.
+    pub(crate) fn id_if_needed(&mut self) {
+        if self.transmitted_since_id && self.rf_available() {
+            self.send_id();
+        }
+    }
+
     fn send_id(&mut self) {
         let text = format!(
             "{} {}",
@@ -680,10 +725,35 @@ impl Server {
         let dest: Callsign = "ID".parse().unwrap();
         let seq = self.sessions.next_seq();
         let frame = AircFrame::new(Kind::Id, seq, payload);
-        self.transmit_direct(&dest, frame);
+        self.transmit_id(&dest, frame);
         self.transmitted_since_id = false;
         self.last_id = Instant::now();
         debug!("station identification transmitted");
+    }
+
+    /// Identification goes out on the TNC's priority path, so it is not held
+    /// behind a backlog and is not discarded by the transmit inhibit. This is
+    /// the one frame the station is obliged to send.
+    fn transmit_id(&mut self, dest: &Callsign, frame: AircFrame) {
+        let (Some(tnc), Some(source)) = (self.tnc.as_ref(), self.config.gateway_callsign()) else {
+            return;
+        };
+        let ax = match Ax25Frame::ui(source, dest.clone(), &self.config.rf_path(), frame.encode()) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("cannot build station ID frame: {e}");
+                return;
+            }
+        };
+        let len = ax.encode().len();
+        if tnc.try_send_id(ax) {
+            self.stats.rf_frames_tx += 1;
+            self.stats.rf_bytes_tx += len as u64;
+            let n = len.to_string();
+            self.audit.event("rf_id", &[("bytes", &n)]);
+        } else {
+            self.stats.rf_frames_dropped += 1;
+        }
     }
 
     // --------------------------------------------------------------- helpers
@@ -814,8 +884,21 @@ impl Server {
         if !self.tnc.is_some() {
             return format!("Radio gateway: no TNC. Station {call}. Nothing is being radiated.");
         }
+        let duty = self
+            .airtime()
+            .map(|a| format!(" {:.0}% duty.", a.duty_percent()))
+            .unwrap_or_default();
+        let cooling = self
+            .airtime()
+            .map(|a| a.cooling_ms.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        let cooling = if cooling > 0 {
+            format!(" PA cooling for {}s.", cooling / 1000)
+        } else {
+            String::new()
+        };
         format!(
-            "Radio gateway: transmitter ON, station {call}, {} RF station(s) heard, {} frames TX / {} RX ({} bytes on air).",
+            "Radio gateway: transmitter ON, station {call}, {} RF station(s) heard, {} frames TX / {} RX ({} bytes on air).{duty}{cooling}",
             self.sessions.peers().count(),
             self.stats.rf_frames_tx,
             self.stats.rf_frames_rx,

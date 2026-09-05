@@ -8,6 +8,7 @@
 //!   * `loopback` - an in-process fake radio for development and tests.
 
 use std::io;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
+use super::airtime::{AirtimeConfig, AirtimeShared, Governor, TxDecision};
 use super::frame::Ax25Frame;
 use super::kiss::{self, KissDecoder};
 
@@ -50,6 +52,9 @@ pub struct TncConfig {
     /// KISS persistence and slot time, if we should set them.
     pub persistence: Option<u8>,
     pub slottime: Option<u8>,
+    /// Duty-cycle and airtime limits. This is what keeps a QRP transmitter
+    /// alive and the channel usable; see [`super::airtime`].
+    pub airtime: AirtimeConfig,
 }
 
 impl Default for TncConfig {
@@ -66,6 +71,7 @@ impl Default for TncConfig {
             txdelay: None,
             persistence: None,
             slottime: None,
+            airtime: AirtimeConfig::default(),
         }
     }
 }
@@ -79,6 +85,10 @@ impl TncConfig {
         let cfg = Self {
             link: TncLink::Loopback(Arc::new(Mutex::new(Some(near)))),
             tx_pacing: Duration::from_millis(0),
+            airtime: AirtimeConfig {
+                enabled: false,
+                ..AirtimeConfig::default()
+            },
             ..Default::default()
         };
         (cfg, far)
@@ -89,9 +99,46 @@ impl TncConfig {
 #[derive(Clone)]
 pub struct TncHandle {
     tx: mpsc::Sender<Ax25Frame>,
+    /// Station identification only. Kept separate from `tx` because an ID is
+    /// not ordinary traffic: it is the one transmission a station is
+    /// *required* to make, so it must not sit behind a backlog, and it must
+    /// still go out when the operator has inhibited everything else — a
+    /// station signing off owes the band its callsign.
+    priority: mpsc::Sender<Ax25Frame>,
+    airtime: Arc<AirtimeShared>,
 }
 
 impl TncHandle {
+    /// Live airtime counters and the hard transmit inhibit. Shared with the
+    /// TNC task; see [`AirtimeShared`].
+    pub fn airtime(&self) -> &Arc<AirtimeShared> {
+        &self.airtime
+    }
+
+    /// Stop transmitting *now*. Frames already queued are discarded rather
+    /// than radiated later: an operator who says "off" means off, not
+    /// "off once the backlog has drained".
+    pub fn set_inhibit(&self, inhibit: bool) {
+        self.airtime.inhibit.store(inhibit, Ordering::Relaxed);
+    }
+
+    pub fn inhibited(&self) -> bool {
+        self.airtime.inhibit.load(Ordering::Relaxed)
+    }
+
+    /// Queue a station identification. Jumps the transmit queue and is not
+    /// subject to the inhibit or the duty governor: identifying is a legal
+    /// obligation, and it is one short frame.
+    pub fn try_send_id(&self, frame: Ax25Frame) -> bool {
+        match self.priority.try_send(frame) {
+            Ok(()) => true,
+            Err(e) => {
+                warn!("station ID could not be queued: {e}");
+                false
+            }
+        }
+    }
+
     /// Queue a frame for transmission. Returns false if the transmit queue is
     /// full, which is a normal condition on a congested channel and must be
     /// handled by the caller (usually: drop, count, and tell the user).
@@ -109,9 +156,18 @@ impl TncHandle {
 /// Start the TNC task. Received frames are delivered on the returned channel.
 pub fn spawn(config: TncConfig) -> (TncHandle, mpsc::Receiver<Ax25Frame>) {
     let (tx_out, rx_out) = mpsc::channel::<Ax25Frame>(config.tx_queue_depth);
+    let (tx_id, rx_id) = mpsc::channel::<Ax25Frame>(4);
     let (tx_in, rx_in) = mpsc::channel::<Ax25Frame>(256);
-    tokio::spawn(run(config, rx_out, tx_in));
-    (TncHandle { tx: tx_out }, rx_in)
+    let airtime = Arc::new(AirtimeShared::default());
+    tokio::spawn(run(config, rx_out, rx_id, tx_in, airtime.clone()));
+    (
+        TncHandle {
+            tx: tx_out,
+            priority: tx_id,
+            airtime,
+        },
+        rx_in,
+    )
 }
 
 async fn connect(link: &TncLink) -> io::Result<Box<dyn ReadWrite>> {
@@ -139,15 +195,30 @@ async fn connect(link: &TncLink) -> io::Result<Box<dyn ReadWrite>> {
 async fn run(
     config: TncConfig,
     mut tx_queue: mpsc::Receiver<Ax25Frame>,
+    mut id_queue: mpsc::Receiver<Ax25Frame>,
     rx_sink: mpsc::Sender<Ax25Frame>,
+    shared: Arc<AirtimeShared>,
 ) {
+    // The governor outlives individual TNC connections on purpose: airtime
+    // already radiated does not stop counting because Direwolf restarted.
+    let mut governor = Governor::new(config.airtime.clone());
     let mut backoff = Duration::from_secs(1);
     loop {
         match connect(&config.link).await {
             Ok(link) => {
                 info!(?config.link, "TNC connected");
                 backoff = Duration::from_secs(1);
-                if let Err(e) = pump(&config, link, &mut tx_queue, &rx_sink).await {
+                if let Err(e) = pump(
+                    &config,
+                    link,
+                    &mut tx_queue,
+                    &mut id_queue,
+                    &rx_sink,
+                    &mut governor,
+                    &shared,
+                )
+                .await
+                {
                     warn!("TNC link closed: {e}");
                 }
             }
@@ -166,7 +237,10 @@ async fn pump(
     config: &TncConfig,
     mut link: Box<dyn ReadWrite>,
     tx_queue: &mut mpsc::Receiver<Ax25Frame>,
+    id_queue: &mut mpsc::Receiver<Ax25Frame>,
     rx_sink: &mpsc::Sender<Ax25Frame>,
+    governor: &mut Governor,
+    shared: &AirtimeShared,
 ) -> io::Result<()> {
     // Push KISS parameters, if configured.
     for (cmd, value) in [
@@ -181,10 +255,27 @@ async fn pump(
 
     let mut decoder = KissDecoder::new(config.max_frame);
     let mut buf = vec![0u8; 4096];
+    // Earliest the pacing gate lets us key up again.
     let mut next_tx = tokio::time::Instant::now();
-    let mut pending_tx: Option<Ax25Frame> = None;
+    // A frame that is waiting for pacing, the duty governor, or the inhibit.
+    let mut pending: Option<(Ax25Frame, tokio::time::Instant)> = None;
 
     loop {
+        // Discard anything queued while the transmitter is inhibited. This is
+        // the operator's kill switch: it must take effect on the frames that
+        // are already in flight, not just on the next one.
+        if shared.inhibit.load(Ordering::Relaxed) {
+            if pending.take().is_some() {
+                shared.dropped_inhibited.fetch_add(1, Ordering::Relaxed);
+            }
+            while tx_queue.try_recv().is_ok() {
+                shared.dropped_inhibited.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let far_future = tokio::time::Instant::now() + Duration::from_secs(3600);
+        let wake = if pending.is_some() { next_tx } else { far_future };
+
         tokio::select! {
             read = link.read(&mut buf) => {
                 let n = read?;
@@ -193,6 +284,10 @@ async fn pump(
                 }
                 for kf in decoder.push(&buf[..n]) {
                     if kf.command != kiss::CMD_DATA {
+                        continue;
+                    }
+                    if kf.port != config.kiss_port {
+                        // Another radio port on the same TNC. Not ours.
                         continue;
                     }
                     match Ax25Frame::decode(&kf.payload) {
@@ -206,19 +301,62 @@ async fn pump(
                     }
                 }
             }
-            Some(frame) = tx_queue.recv(), if pending_tx.is_none() => {
-                let now = tokio::time::Instant::now();
-                if now >= next_tx {
-                    write_kiss_frame(&mut link, config, &frame).await?;
-                    next_tx = tokio::time::Instant::now() + config.tx_pacing;
-                } else {
-                    pending_tx = Some(frame);
+            Some(frame) = id_queue.recv() => {
+                // Identification bypasses the inhibit, the pacing gate and the
+                // governor. It is one short frame and it is not optional.
+                let bytes = frame.encode();
+                if bytes.len() <= config.max_frame {
+                    write_kiss_bytes(&mut link, config, &frame, &bytes).await?;
+                    let keyed = governor.record(bytes.len(), std::time::Instant::now());
+                    governor.publish(shared, std::time::Instant::now());
+                    next_tx = next_tx.max(tokio::time::Instant::now() + config.tx_pacing.max(keyed));
                 }
             }
-            _ = tokio::time::sleep_until(next_tx), if pending_tx.is_some() => {
-                if let Some(frame) = pending_tx.take() {
-                    write_kiss_frame(&mut link, config, &frame).await?;
-                    next_tx = tokio::time::Instant::now() + config.tx_pacing;
+            Some(frame) = tx_queue.recv(), if pending.is_none() => {
+                pending = Some((frame, tokio::time::Instant::now()));
+            }
+            _ = tokio::time::sleep_until(wake), if pending.is_some() => {
+                let Some((frame, queued_at)) = pending.take() else {
+                    continue;
+                };
+                if shared.inhibit.load(Ordering::Relaxed) {
+                    shared.dropped_inhibited.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                let bytes = frame.encode();
+                if bytes.len() > config.max_frame {
+                    warn!("refusing to transmit oversized frame ({} bytes)", bytes.len());
+                    continue;
+                }
+                let now = std::time::Instant::now();
+                match governor.check(bytes.len(), now) {
+                    TxDecision::Send => {
+                        write_kiss_bytes(&mut link, config, &frame, &bytes).await?;
+                        let keyed = governor.record(bytes.len(), now);
+                        governor.publish(shared, now);
+                        // Pace on whichever is longer: the operator's minimum
+                        // gap, or the time this transmission actually occupies
+                        // the channel. Without the latter the "gap" would
+                        // start while we were still keyed.
+                        next_tx = tokio::time::Instant::now() + config.tx_pacing.max(keyed);
+                    }
+                    TxDecision::Defer(delay, reason) => {
+                        governor.publish(shared, now);
+                        let waited = queued_at.elapsed();
+                        if waited + delay > config.airtime.max_hold {
+                            shared.dropped_stale.fetch_add(1, Ordering::Relaxed);
+                            warn!(
+                                "dropping a frame held {:?} by {} — stale traffic is worse than no traffic",
+                                waited,
+                                reason.as_str()
+                            );
+                            continue;
+                        }
+                        shared.deferred.fetch_add(1, Ordering::Relaxed);
+                        debug!("holding a frame for {:?} ({})", delay, reason.as_str());
+                        next_tx = tokio::time::Instant::now() + delay;
+                        pending = Some((frame, queued_at));
+                    }
                 }
             }
             else => return Ok(()),
@@ -226,18 +364,14 @@ async fn pump(
     }
 }
 
-async fn write_kiss_frame(
+async fn write_kiss_bytes(
     link: &mut Box<dyn ReadWrite>,
     config: &TncConfig,
     frame: &Ax25Frame,
+    bytes: &[u8],
 ) -> io::Result<()> {
-    let bytes = frame.encode();
-    if bytes.len() > config.max_frame {
-        warn!("refusing to transmit oversized frame ({} bytes)", bytes.len());
-        return Ok(());
-    }
     debug!(target: "rf::tx", "{}", frame.to_monitor_line());
-    link.write_all(&kiss::encode(config.kiss_port, kiss::CMD_DATA, &bytes))
+    link.write_all(&kiss::encode(config.kiss_port, kiss::CMD_DATA, bytes))
         .await?;
     link.flush().await
 }

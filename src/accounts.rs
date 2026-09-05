@@ -11,10 +11,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::irc::message::lower;
 
-/// Modest Argon2id parameters: strong enough to store IRC nick passwords,
-/// cheap enough that REGISTER/IDENTIFY does not stall the event loop.
+/// Argon2id at the OWASP baseline: 19 MiB, two passes, one lane.
+///
+/// The old 4 MiB setting was well under that, and memory is the parameter
+/// that actually costs an offline attacker anything. Hashing happens on a
+/// blocking thread pool (see `run_argon2`), never on the event loop, so the
+/// cost is paid by the one connection doing REGISTER or IDENTIFY.
+///
+/// Raising this is backward compatible: a PHC hash string carries the
+/// parameters it was made with, and verification uses those, so existing
+/// entries in the nick file keep working and are re-hashed at the new cost
+/// whenever the password is next set.
 fn hasher() -> Argon2<'static> {
-    let params = Params::new(4096, 2, 1, None).expect("static Argon2 params");
+    let params = Params::new(19 * 1024, 2, 1, None).expect("static Argon2 params");
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
 

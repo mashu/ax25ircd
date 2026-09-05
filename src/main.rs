@@ -109,12 +109,16 @@ QMX on Debian: https://mashu.github.io/ax25ircd/
         let cfg = TncConfig {
             link,
             kiss_port: section.kiss_port,
-            max_frame: config.radio.paclen + 32,
+            // paclen is the *information* field. A full AX.25 header with
+            // eight digipeaters is 58 octets on top of it; +32 silently
+            // discarded long-path frames we were perfectly able to decode.
+            max_frame: config.radio.paclen + 64,
             tx_pacing: Duration::from_millis(section.tx_pacing_ms),
             tx_queue_depth: 64,
             txdelay: section.txdelay,
             persistence: section.persistence,
             slottime: section.slottime,
+            airtime: config.radio.duty.to_airtime(),
         };
         let (handle, rx) = tnc::spawn(cfg);
         info!(

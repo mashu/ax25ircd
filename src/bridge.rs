@@ -35,6 +35,28 @@ impl Server {
             return;
         }
 
+        // PROTOCOL.md §3.1: a receiver must check the AX.25 destination before
+        // processing a frame. We only act on traffic addressed to this
+        // gateway's callsign.
+        //
+        // This is not politeness. Downlink MSG carries [target, from, text]
+        // and uplink MSG carries [target, text] — the same `kind`, different
+        // shape. Without this check, two gateways sharing a frequency read
+        // each other's downlink broadcasts as uplink traffic from a station,
+        // relay them, and transmit again: a feedback loop between two
+        // automatically controlled stations, bounded only by the rate limiter,
+        // that neither operator is watching. The same check also stops us
+        // consuming another station's unicast sequence numbers, which would
+        // make traffic genuinely meant for us look like duplicates.
+        if !self.frame_is_for_us(&frame) {
+            debug!(
+                target: "rf::monitor",
+                "not addressed to us: {}",
+                frame.to_monitor_line()
+            );
+            return;
+        }
+
         let airc = match AircFrame::decode(&frame.info) {
             Ok(f) => f,
             Err(_) => {
@@ -61,6 +83,18 @@ impl Server {
         if let Some(msg) = outcome.deliver {
             self.handle_airc_message(&src, msg, now);
         }
+    }
+
+    /// True when an AX.25 frame is addressed to this gateway.
+    ///
+    /// Stations always unicast to the gateway callsign (see
+    /// `ax25irc-station`), so that is the only address we act on. Frames
+    /// addressed to a protocol address such as `AIRC` or `ID` are broadcasts
+    /// — ours to *hear*, never ours to answer.
+    fn frame_is_for_us(&self, frame: &Ax25Frame) -> bool {
+        self.config
+            .gateway_callsign()
+            .is_some_and(|call| call == frame.destination.call)
     }
 
     fn handle_airc_message(&mut self, src: &Callsign, msg: AircFrame, now: Instant) {
@@ -151,7 +185,7 @@ impl Server {
                     return;
                 };
                 let display = self.channel_display_name(&channel);
-                let names = self.state.names_of(&display).join(",");
+                let names = self.names_for_air(&display);
                 self.unicast(
                     src,
                     Kind::NamesReply,
@@ -279,7 +313,7 @@ impl Server {
             );
         }
 
-        let names = self.state.names_of(&display).join(",");
+        let names = self.names_for_air(&display);
         let topic = self
             .state
             .channel(&display)
@@ -291,6 +325,32 @@ impl Server {
             encode_fields(&[&display, &names, &topic]),
             true,
         );
+    }
+
+    /// Member list trimmed to something a 300 baud channel can afford.
+    ///
+    /// `names_of` is unbounded: a hundred IRC users in a bridged channel is
+    /// over a kilobyte, which fragments into a long reliable exchange with
+    /// retries — minutes of airtime for one JOIN.
+    fn names_for_air(&self, channel: &str) -> String {
+        const BUDGET: usize = 200;
+        let all = self.state.names_of(channel);
+        let mut out = String::new();
+        let mut shown = 0usize;
+        for n in &all {
+            if out.len() + n.len() + 1 > BUDGET {
+                break;
+            }
+            if !out.is_empty() {
+                out.push(',');
+            }
+            out.push_str(n);
+            shown += 1;
+        }
+        if shown < all.len() {
+            out.push_str(&format!(",+{} more", all.len() - shown));
+        }
+        out
     }
 
     fn rf_part(&mut self, uid: &UserId, channel: &str, reason: String) {
