@@ -1260,8 +1260,7 @@
 <p>An IRC server that is simultaneously an AX.25 packet radio gateway. Two
 populations share the same channels:</p>
 <ul>
-<li><strong>IP users</strong> with an ordinary IRC client (irssi, WeeChat, HexChat, Textual)
-  over TCP.</li>
+<li><strong>IP users</strong> with an ordinary IRC client (irssi) over TCP or TLS.</li>
 <li><strong>RF stations</strong> with a radio and a TNC, speaking a compact protocol (AIRC/1)
   carried in AX.25 UI frames.</li>
 </ul>
@@ -1285,8 +1284,9 @@ message, every message. Multiply by a channel with ten users and it is the
 difference between a usable QSO and an unusable one.</p>
 <p>Consequences that appear throughout the code:</p>
 <ul>
-<li>The RF side never sees numerics, MOTDs, WHOIS replies, nick changes or (by
-  default) join/part notices.</li>
+<li>The RF side is an allowlist: PRIVMSG chat (<code>/me</code> included), TOPIC, and
+  optionally join/part presence. Numerics, MODE, NOTICE, other CTCP, nick
+  changes and (by default) JOIN/PART are not on that list, so they stay on IRC.</li>
 <li>Channel traffic is transmitted <strong>once</strong>, as a broadcast, not once per
   listening station.</li>
 <li>Messages that arrive from the air are <strong>not</strong> re-transmitted: every station
@@ -1402,7 +1402,7 @@ clients is per-client:</p>
 </tr>
 </tbody>
 </table>
-<p>So parsing, TLS-free socket I/O, line framing, password hashing and log writing
+<p>So parsing, socket I/O (including TLS), line framing, password hashing and log writing
 all run on the thread pool in parallel; only the state transitions are
 serialised, and those are microseconds of <code>HashMap</code> work. The actor is a
 correctness decision — one ordering of events, no interleaving between the
@@ -1449,9 +1449,11 @@ separate:</p>
   on the internet until the next point.</li>
 <li><strong>RF-TX is a persisted grant on a registered nick.</strong> The user <code>REGISTER</code>s,
   a control operator <code>RADIO GRANT</code>s that nick (stored in <code>nicks.json</code>), and
-  the user <code>IDENTIFY</code>s on later connects. <code>CALLSIGN</code> is still required, and
-  is restored from the nick file after IDENTIFY. <code>OPER</code> has RF-TX for that
-  session without a grant.</li>
+the user <code>IDENTIFY</code>s on later connects. <code>CALLSIGN</code> is still required. IDENTIFY
+binds a callsign claimed this session, or restores the stored one. <code>OPER</code> has
+RF-TX for that session without a grant. Internet clients that will do any of
+this must connect with TLS (<code>[listen.tls]</code>). A plaintext connection from off
+the machine is listen-only.</li>
 <li>RF stations are not IRC accounts. Their identity is the AX.25 source
   address; <code>allow_callsigns</code> / <code>deny_callsigns</code> are the gate.</li>
 </ul>
@@ -1459,8 +1461,12 @@ separate:</p>
 <p>A typical club setup: internet users join <code>#rf</code> to follow the QSO; only the
 control operator and nicks they have granted can key the transmitter.
 <code>ax25irc-station</code> is not an IRC client — it speaks AIRC over KISS.</p>
-<p>If you need TLS, put it in front of the IP listener. It protects the hop to
-the gateway and stops there. Everything that reaches the antenna is in the
+<p>If you need people on the internet to speak or control the transmitter,
+configure <code>[listen.tls]</code> (implicit TLS, typically port 6697). A plaintext
+socket from off this machine is listen-only: they can watch <code>#rf</code>, they
+cannot IDENTIFY, REGISTER, OPER, or transmit. A connection <code>PASS</code> is still
+accepted so a passworded server remains watchable. TLS protects the hop to the
+gateway and stops there. Everything that reaches the antenna is in the
 clear, by law and by design.</p>
 <h2 id="5-channel-model">5. Channel model<a class="headerlink" href="#5-channel-model" title="Permanent link">&para;</a></h2>
 <p>Channels carry one extra mode: <code>+r</code>, "bridged to RF".</p>
@@ -1612,11 +1618,12 @@ can be smuggled onto the air by waiting.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>[direwolf]  ADEVICE plughw:1,0 / MODEM 1200 / KISSPORT 8001
 <a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>     │  KISS over TCP :8001
 <a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>[ax25ircd]  radio.tnc.kind = "tcp", port 8001
-<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>     │  TCP :6667 on localhost
-<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>[stunnel or ssh -L]  ── the Internet
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>     │  TCP :6667 on localhost (operator console)
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>     │  TLS :6697 for internet clients
 </code></pre></div>
-<p>The IP side should be behind TLS or a tunnel. Note the asymmetry: TLS protects
-the hop between the user and the gateway, and stops there. Everything that
+<p>Internet clients that speak or OPER use implicit TLS (<code>[listen.tls]</code>). A
+plaintext connection from off the machine is listen-only. TLS protects the
+hop between the user and the gateway, and stops there. Everything that
 reaches the antenna is in the clear, by law and by design. The server says this
 to every user at registration.</p>
 <p>Control operator console (requires <code>OPER</code>):</p>

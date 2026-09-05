@@ -436,10 +436,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#irc-client-cheat-sheet" class="md-nav__link">
+  <a href="#irc-client-irssi" class="md-nav__link">
     <span class="md-ellipsis">
       
-        IRC client cheat sheet
+        IRC client (irssi)
       
     </span>
   </a>
@@ -959,10 +959,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#irc-client-cheat-sheet" class="md-nav__link">
+  <a href="#irc-client-irssi" class="md-nav__link">
     <span class="md-ellipsis">
       
-        IRC client cheat sheet
+        IRC client (irssi)
       
     </span>
   </a>
@@ -1031,8 +1031,10 @@ requires a registered nick that a control operator has <code>RADIO GRANT</code>e
 <a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>./target/release/ax25ircd<span class="w"> </span>-c<span class="w"> </span>ax25ircd.toml
 <a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>./target/release/ax25irc-station<span class="w"> </span>--call<span class="w"> </span>SM0ABC-7<span class="w"> </span>--gateway<span class="w"> </span>SK0MT-1<span class="w"> </span>--channel<span class="w"> </span><span class="s1">'#rf'</span>
 </code></pre></div>
-<p>Connect an IRC client to <code>127.0.0.1:6667</code>, <code>/quote CALLSIGN SM0XYZ</code>, join
-<code>#rf</code>. The station nick appears as <code>SM0ABC|7</code>. Your IRC chat stays on the
+<p>Connect an IRC client to <code>127.0.0.1:6667</code> <strong>only this server</strong> (irssi:
+<code>irssi -! -c 127.0.0.1 -p 6667 -n alice</code>), <code>/quote CALLSIGN SM0XYZ</code>, join
+<code>#rf</code>. The station nick appears as <code>SM0ABC|7</code>. Type a line in the station
+client; it shows in irssi as ordinary channel text. Your IRC chat stays on the
 internet until a control operator <code>RADIO GRANT</code>s your registered nick (or
 you <code>OPER</code>). The hub prints frames in <code>axlisten</code> format.</p>
 <h2 id="3-real-rf-via-direwolf">3. Real RF via Direwolf<a class="headerlink" href="#3-real-rf-via-direwolf" title="Permanent link">&para;</a></h2>
@@ -1056,45 +1058,15 @@ first, then ax25ircd.</p>
 <h2 id="4-qrp-labs-qmx-or-qmx">4. QRP Labs QMX (or QMX+)<a class="headerlink" href="#4-qrp-labs-qmx-or-qmx" title="Permanent link">&para;</a></h2>
 <p>Debian packages, groups, hamlib, 300 baud Direwolf, and first QSO:
 <strong><a href="../qmx/">QMX on Debian</a></strong>. Do not use Digi mode.</p>
-<h2 id="irc-client-cheat-sheet">IRC client cheat sheet<a class="headerlink" href="#irc-client-cheat-sheet" title="Permanent link">&para;</a></h2>
-<table>
-<thead>
-<tr>
-<th></th>
-<th></th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Host</td>
-<td><code>127.0.0.1</code></td>
-</tr>
-<tr>
-<td>Port</td>
-<td><code>6667</code></td>
-</tr>
-<tr>
-<td>Speak on <code>#rf</code> (IRC)</td>
-<td><code>/quote CALLSIGN YOURCALL</code> first</td>
-</tr>
-<tr>
-<td>Radiate from IRC</td>
-<td>registered nick + <code>RADIO GRANT</code> (or <code>OPER</code>) + CALLSIGN</td>
-</tr>
-<tr>
-<td>On-air status</td>
-<td><code>/quote RADIO</code></td>
-</tr>
-<tr>
-<td>Keep a nick</td>
-<td><code>/quote REGISTER &lt;password&gt;</code> then <code>/quote IDENTIFY &lt;password&gt;</code></td>
-</tr>
-<tr>
-<td>Control operator</td>
-<td><code>/oper sm0abc change-me</code> then <code>RADIO GRANT</code> / <code>RADIO OFF</code></td>
-</tr>
-</tbody>
-</table>
+<h2 id="irc-client-irssi">IRC client (irssi)<a class="headerlink" href="#irc-client-irssi" title="Permanent link">&para;</a></h2>
+<p>Do not use a default irssi config that autoconnects to Libera or similar.
+This server only:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>irssi -! -c 127.0.0.1 -p 6667 -n alice
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>/quote CALLSIGN YOURCALL
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>/join #rf
+</code></pre></div>
+<p>Nick and callsign are <strong>not</strong> the same string: a callsign-shaped nick is
+reserved for RF stations. Dedicated config, TLS, REGISTER: <a href="../usage/">usage.md</a>.</p>
 
 
 

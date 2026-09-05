@@ -972,10 +972,11 @@ licence.</p>
 <a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>ax25ircd<span class="w"> </span>-c<span class="w"> </span>ax25ircd.toml<span class="w"> </span><span class="p">&amp;</span><span class="w">                 </span><span class="c1"># radio.tnc.port = 8001</span>
 <a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>ax25irc-station<span class="w"> </span>--call<span class="w"> </span>SM0ABC-7<span class="w"> </span>--gateway<span class="w"> </span>SK0MT-1<span class="w"> </span>--channel<span class="w"> </span><span class="s1">'#rf'</span>
 </code></pre></div>
-<p>Then connect an IRC client to <code>127.0.0.1:6667</code>, <code>/quote CALLSIGN SM0XYZ</code>, join
-<code>#rf</code>. That lets you speak on IRC. To key the virtual transmitter from IRC,
-register the nick and have a control operator <code>RADIO GRANT</code> it — see
-<a href="../usage/">usage.md</a>.</p>
+<p>Then connect irssi to <strong>only</strong> this server (<code>irssi -! -c 127.0.0.1 -p 6667 -n alice</code>),
+<code>/quote CALLSIGN SM0XYZ</code>, join <code>#rf</code>. That lets you speak on IRC. Type in the
+station client to see <code>SM0ABC|7</code> talk in the channel. To key the virtual
+transmitter from IRC, register the nick and have a control operator
+<code>RADIO GRANT</code> it — see <a href="../usage/">usage.md</a>.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>#rf &lt;alice&gt; hello over the air
 <a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>*alice* direct to you
 <a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>-- #rf members: SM0ABC|7,alice

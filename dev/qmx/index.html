@@ -1115,8 +1115,8 @@ is an operator's checklist, not legal advice.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>sudo<span class="w"> </span>apt-get<span class="w"> </span>update
 <a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>direwolf<span class="w"> </span>libhamlib-utils<span class="w"> </span>alsa-utils<span class="w"> </span>irssi<span class="w"> </span>curl
 </code></pre></div>
-<p><code>libhamlib-utils</code> provides <code>rigctl</code> (PTT). <code>irssi</code> is one client; WeeChat
-(<code>weechat</code>) is fine too.</p>
+<p><code>libhamlib-utils</code> provides <code>rigctl</code> (PTT). <code>irssi</code> is the IRC client used in
+the examples below.</p>
 <h2 id="2-plug-the-qmx-in-join-the-right-groups">2. Plug the QMX in, join the right groups<a class="headerlink" href="#2-plug-the-qmx-in-join-the-right-groups" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>sudo<span class="w"> </span>usermod<span class="w"> </span>-aG<span class="w"> </span>audio,dialout<span class="w"> </span><span class="s2">"</span><span class="nv">$USER</span><span class="s2">"</span>
 <a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="c1"># log out and back in (or reboot) so the groups take effect</span>
@@ -1194,14 +1194,17 @@ single-tone FSK (FT8-style) and will not work.</p>
 <a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>MODEM    300
 <a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>PTT      RIG 2057 /dev/serial/by-id/usb-QRP_Labs_QMX_Transceiver-if00
 <a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>KISSPORT 8001
-<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>TXDELAY  40
-<a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>TXTAIL   30
+<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>AGWPORT  0
+<a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>TXDELAY  40
+<a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>TXTAIL   30
 </code></pre></div>
 <p>Hamlib model <strong>2057</strong> is QMX. Older hamlib: Kenwood TS-480, model <strong>2028</strong>, same
 serial device.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>direwolf<span class="w"> </span>-c<span class="w"> </span>direwolf-qmx.conf
 </code></pre></div>
-<p>Leave this terminal running. It should listen on KISS TCP port 8001.</p>
+<p>Leave this terminal running. It should listen on KISS TCP port 8001.
+<code>AGWPORT 0</code> turns off Direwolf's AGW server (port 8000). ax25ircd speaks KISS,
+not AGW, and 8000 is often already taken.</p>
 <h2 id="5-install-ax25ircd">5. Install ax25ircd<a class="headerlink" href="#5-install-ax25ircd" title="Permanent link">&para;</a></h2>
 <p>See <a href="../install/">Install</a>. Short version:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>curl<span class="w"> </span>-fsSL<span class="w"> </span>-o<span class="w"> </span>ax25ircd.run<span class="w"> </span><span class="se">\</span>
@@ -1227,22 +1230,40 @@ Direwolf is already listening.</p>
 <a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="n">host</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"127.0.0.1"</span>
 <a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="n">port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8001</span>
 <a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="n">tx_pacing_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2500</span>
-<a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a>
-<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="c1"># Keep the QMX alive. At 300 baud a full frame is about four seconds of</span>
-<a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="c1"># unbroken carrier, and the QMX has no thermal headroom to speak of. These</span>
-<a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a><span class="c1"># numbers must match the TXDELAY/TXTAIL in direwolf-qmx.conf.</span>
-<a id="__codelineno-7-16" name="__codelineno-7-16" href="#__codelineno-7-16"></a><span class="k">[radio.duty]</span>
-<a id="__codelineno-7-17" name="__codelineno-7-17" href="#__codelineno-7-17"></a><span class="n">enabled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
-<a id="__codelineno-7-18" name="__codelineno-7-18" href="#__codelineno-7-18"></a><span class="n">baud</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">300</span>
-<a id="__codelineno-7-19" name="__codelineno-7-19" href="#__codelineno-7-19"></a><span class="n">txdelay_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">400</span>
-<a id="__codelineno-7-20" name="__codelineno-7-20" href="#__codelineno-7-20"></a><span class="n">txtail_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">300</span>
-<a id="__codelineno-7-21" name="__codelineno-7-21" href="#__codelineno-7-21"></a><span class="n">window_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">600</span>
-<a id="__codelineno-7-22" name="__codelineno-7-22" href="#__codelineno-7-22"></a><span class="n">max_duty_percent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">25</span>
-<a id="__codelineno-7-23" name="__codelineno-7-23" href="#__codelineno-7-23"></a><span class="n">max_continuous_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">30</span>
-<a id="__codelineno-7-24" name="__codelineno-7-24" href="#__codelineno-7-24"></a><span class="n">cooldown_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">60</span>
-<a id="__codelineno-7-25" name="__codelineno-7-25" href="#__codelineno-7-25"></a><span class="n">hourly_airtime_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">900</span>
-<a id="__codelineno-7-26" name="__codelineno-7-26" href="#__codelineno-7-26"></a><span class="n">max_hold_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">120</span>
+<a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a><span class="c1"># Cross-check MODEM / TXDELAY / TXTAIL against the governor.</span>
+<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="n">direwolf_conf</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/home/YOU/direwolf-qmx.conf"</span>
+<a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a>
+<a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a><span class="c1"># Keep the QMX alive. At 300 baud a full frame is about four seconds of</span>
+<a id="__codelineno-7-16" name="__codelineno-7-16" href="#__codelineno-7-16"></a><span class="c1"># unbroken carrier, and the QMX has no thermal headroom to speak of. These</span>
+<a id="__codelineno-7-17" name="__codelineno-7-17" href="#__codelineno-7-17"></a><span class="c1"># numbers must match the TXDELAY/TXTAIL in direwolf-qmx.conf.</span>
+<a id="__codelineno-7-18" name="__codelineno-7-18" href="#__codelineno-7-18"></a><span class="k">[radio.duty]</span>
+<a id="__codelineno-7-19" name="__codelineno-7-19" href="#__codelineno-7-19"></a><span class="n">enabled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+<a id="__codelineno-7-20" name="__codelineno-7-20" href="#__codelineno-7-20"></a><span class="n">baud</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">300</span>
+<a id="__codelineno-7-21" name="__codelineno-7-21" href="#__codelineno-7-21"></a><span class="n">txdelay_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">400</span>
+<a id="__codelineno-7-22" name="__codelineno-7-22" href="#__codelineno-7-22"></a><span class="n">txtail_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">300</span>
+<a id="__codelineno-7-23" name="__codelineno-7-23" href="#__codelineno-7-23"></a><span class="n">window_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">600</span>
+<a id="__codelineno-7-24" name="__codelineno-7-24" href="#__codelineno-7-24"></a><span class="n">max_duty_percent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">25</span>
+<a id="__codelineno-7-25" name="__codelineno-7-25" href="#__codelineno-7-25"></a><span class="n">max_continuous_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">30</span>
+<a id="__codelineno-7-26" name="__codelineno-7-26" href="#__codelineno-7-26"></a><span class="n">cooldown_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">60</span>
+<a id="__codelineno-7-27" name="__codelineno-7-27" href="#__codelineno-7-27"></a><span class="n">hourly_airtime_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">900</span>
+<a id="__codelineno-7-28" name="__codelineno-7-28" href="#__codelineno-7-28"></a><span class="n">max_hold_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">120</span>
+<a id="__codelineno-7-29" name="__codelineno-7-29" href="#__codelineno-7-29"></a>
+<a id="__codelineno-7-30" name="__codelineno-7-30" href="#__codelineno-7-30"></a><span class="c1"># Required if you will leave the transmitter unattended. ax25ircd cannot see</span>
+<a id="__codelineno-7-31" name="__codelineno-7-31" href="#__codelineno-7-31"></a><span class="c1"># SWR or PA temperature — Direwolf already holds the CAT port for PTT.</span>
+<a id="__codelineno-7-32" name="__codelineno-7-32" href="#__codelineno-7-32"></a><span class="c1"># The command fails closed: until it exits 0, nothing is keyed, IDs included.</span>
+<a id="__codelineno-7-33" name="__codelineno-7-33" href="#__codelineno-7-33"></a><span class="k">[radio.interlock]</span>
+<a id="__codelineno-7-34" name="__codelineno-7-34" href="#__codelineno-7-34"></a><span class="n">command</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/usr/local/bin/check-qmx"</span>
+<a id="__codelineno-7-35" name="__codelineno-7-35" href="#__codelineno-7-35"></a><span class="n">args</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">"--max-swr"</span><span class="p">,</span><span class="w"> </span><span class="s2">"2.5"</span><span class="p">]</span>
+<a id="__codelineno-7-36" name="__codelineno-7-36" href="#__codelineno-7-36"></a><span class="n">interval_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">30</span>
+<a id="__codelineno-7-37" name="__codelineno-7-37" href="#__codelineno-7-37"></a><span class="n">timeout_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span>
 </code></pre></div>
+<div class="admonition danger">
+<p class="admonition-title">Do not leave a QMX unattended without an interlock</p>
+<p>The duty-cycle governor is a <em>model</em> of key-down time. It cannot see a
+high SWR or a hot PA. Configure <code>[radio.interlock]</code> so a failing check
+inhibits <strong>everything</strong>, identification included. Sit with the radio
+until that command is proven.</p>
+</div>
 <div class="admonition danger">
 <p class="admonition-title">Do not raise these without reading <a href="../airtime/">Airtime</a></p>
 <p><code>[policy]</code> limits messages; <code>[radio.duty]</code> limits seconds of key-down.
@@ -1263,13 +1284,16 @@ with a loopback TNC. <code>--check</code> catches all three before you key up.</
 <a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="c1"># another terminal:</span>
 <a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>irssi
 <a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="c1">#  /connect 127.0.0.1 6667</span>
-<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="c1">#  /quote CALLSIGN YOURCALL</span>
-<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="c1">#  /join #rf</span>
-<a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="c1">#  /quote RADIO</span>
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="c1">#  /nick YOURNICK</span>
+<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="c1">#  /quote CALLSIGN YOURCALL</span>
+<a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="c1">#  /quote REGISTER a-secret-password</span>
+<a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a><span class="c1">#  /join #rf</span>
+<a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a><span class="c1">#  /quote RADIO</span>
 </code></pre></div>
 <p><code>RADIO</code> should show the transmitter <strong>ON</strong>. <code>#rf</code> is <code>+rm</code>: without a callsign
 you can listen, you cannot speak. Without RF-TX your speech stays on IRC.
-Change the example OPER password before you bind to a public address.</p>
+Change the example OPER password, and hash it (<code>ax25ircd --hash-password</code>),
+before you bind to a public address.</p>
 <h2 id="8-first-message-that-actually-keys-the-radio">8. First message that actually keys the radio<a class="headerlink" href="#8-first-message-that-actually-keys-the-radio" title="Permanent link">&para;</a></h2>
 <p><code>CALLSIGN</code> lets you speak on IRC. Radiation needs RF-TX: <code>OPER</code>, or a
 registered nick that a control operator has <code>RADIO GRANT</code>ed. Then send a short
@@ -1296,7 +1320,7 @@ line in <code>#rf</code>. If <code>notice_air_relay</code> is on, the server not
 <td><code>/quote RADIO</code></td>
 </tr>
 <tr>
-<td>Keep a nick</td>
+<td>Keep nick and callsign</td>
 <td><code>/quote REGISTER &lt;password&gt;</code> then <code>IDENTIFY</code></td>
 </tr>
 <tr>
@@ -1315,6 +1339,7 @@ callsign with <code>-</code> turned into <code>|</code> (<code>YOURCALL|7</code>
 <h2 id="10-if-nothing-comes-back">10. If nothing comes back<a class="headerlink" href="#10-if-nothing-comes-back" title="Permanent link">&para;</a></h2>
 <ul>
 <li>Direwolf not running, or not on <code>127.0.0.1:8001</code> — ax25ircd reconnects, but nothing radiates.</li>
+<li><code>Bind failed … Address already in use</code> on port 8000 — AGW, unused here. Set <code>AGWPORT 0</code>. The line that matters is <code>Ready to accept KISS TCP … on port 8001</code>.</li>
 <li><code>Could not open audio device … No such file or directory</code> — card index moved
   (HDMI often occupies <code>plughw:1,0</code>). Use <code>plughw:CARD=Transceiver,DEV=0</code>.</li>
 <li><code>Device or resource busy</code> on transmit — PipeWire grabbed the QMX; see step 2.</li>

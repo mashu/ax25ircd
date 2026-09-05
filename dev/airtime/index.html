@@ -1290,11 +1290,29 @@ of it is deliberately not bridged:</p>
 </thead>
 <tbody>
 <tr>
-<td>Channel message</td>
+<td>What the gateway will transmit is an <strong>allowlist</strong> (see <code>Delivery::rf_emission</code>).</td>
+<td></td>
+</tr>
+<tr>
+<td>Anything not named there stays on IRC.</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>On the list</th>
+<th>On the air?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Channel PRIVMSG (including <code>/me</code>)</td>
 <td><strong>Yes</strong> — queued, class <code>chat</code></td>
 </tr>
 <tr>
-<td>Private message to a station</td>
+<td>Private PRIVMSG to a station</td>
 <td><strong>Yes</strong> — queued, class <code>direct</code>, acknowledged</td>
 </tr>
 <tr>
@@ -1302,23 +1320,23 @@ of it is deliberately not bridged:</p>
 <td><strong>Yes</strong> — <code>mailbox_flush_batch</code> per exchange, default one</td>
 </tr>
 <tr>
+<td>TOPIC</td>
+<td>Only if it actually changed, and through the full chat gate</td>
+</tr>
+<tr>
+<td>JOIN/PART presence</td>
+<td>Only if <code>presence_notices = true</code>. Off by default</td>
+</tr>
+<tr>
 <td>JOIN by a station</td>
 <td>Confirmation with a member <strong>count</strong>, never the list</td>
 </tr>
 <tr>
-<td><code>NAMES</code></td>
+<td><code>NAMES</code> (from a station)</td>
 <td>Only when explicitly asked; capped at <code>radio.rf_names_max</code> and 160 octets</td>
 </tr>
 <tr>
-<td>Topic change</td>
-<td>Only if it actually changed, and through the full chat gate</td>
-</tr>
-<tr>
-<td>Join/part presence</td>
-<td>Only if <code>presence_notices = true</code>. Off by default</td>
-</tr>
-<tr>
-<td>Errors (<code>no such channel</code>)</td>
+<td>Errors to a station</td>
 <td>One frame, <strong>not</strong> acknowledged or retried</td>
 </tr>
 <tr>
@@ -1326,8 +1344,8 @@ of it is deliberately not bridged:</p>
 <td>One frame, capped at 80 characters, not retried</td>
 </tr>
 <tr>
-<td>QUIT, nick changes, MODE, numerics, WHO, LIST, MOTD, AWAY</td>
-<td><strong>Never</strong></td>
+<td>NOTICE, other CTCP, QUIT, NICK, MODE, KICK, INVITE, numerics, RADIO</td>
+<td><strong>Not on the list</strong></td>
 </tr>
 </tbody>
 </table>
@@ -1387,9 +1405,12 @@ when enough old airtime falls out of the window. A frame held longer than
 <code>max_hold_secs</code> <strong>is</strong> dropped and counted: on a 1 kbit/s channel a two-minute-
 old chat line costs the same airtime as a fresh one and carries less
 information.</p>
-<p>Station identification bypasses all of this. It is one short frame, it is a
-legal obligation, and it goes out on a separate priority path that neither the
-duty limits nor the operator's inhibit can hold back.</p>
+<p>Station identification <strong>jumps the data queue</strong> so <code>RADIO OFF</code> can sign off
+without waiting for chat to drain, but it uses the <strong>same airtime clock</strong> as
+every other frame: it waits for the previous transmission to finish, asks the
+governor, and counts toward the continuous run and cooldown. <code>RADIO ID</code> is
+limited to once per <code>id_interval_secs</code> unless the station currently owes an
+identification. The safety interlock still holds it, including at sign-off.</p>
 <h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">[radio.duty]</span>
 <a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="n">enabled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
@@ -1425,7 +1446,11 @@ most likely to be damaged by getting it wrong.</p>
 </div>
 <p><code>ax25ircd --check</code> refuses a configuration where a full-length frame is longer
 than the whole duty allowance — otherwise nothing would ever be transmitted and
-you would be left guessing why.</p>
+you would be left guessing why. It also refuses a <code>baud</code> that is not 300, 1200
+or 9600 unless <code>allow_nonstandard_baud = true</code>: a 1200-baud governor in front
+of Direwolf <code>MODEM 300</code> under-counts key-down by a factor of four. Set
+<code>radio.tnc.direwolf_conf</code> so <code>--check</code> compares MODEM, TXDELAY and TXTAIL to
+this block.</p>
 <h2 id="the-order-things-are-refused-in">The order things are refused in<a class="headerlink" href="#the-order-things-are-refused-in" title="Permanent link">&para;</a></h2>
 <p>Four independent mechanisms can stop a message reaching the air, and they fire
 in this order. When something does not go out, this is the list to walk:</p>
@@ -1483,8 +1508,10 @@ it:</p>
 <p>Both are audited, both take effect on the next frame, and neither is written
 back to the configuration file — a restart returns to what is on disk. The
 duty override is clamped to the same 50 % ceiling as everything else: asking
-for 90 gets you 50 and a notice saying so. Pacing can only ever slow the
-station down; it cannot buy airtime the duty limit has not released.</p>
+for 90 gets you 50 and a notice saying so. Pacing can only ever <em>slow</em> the
+station: a <code>RADIO LIMIT PACING</code> below <code>tx_pacing_ms</code> is raised to that floor
+and the operator is told. It cannot buy airtime the duty limit has not
+released.</p>
 <h2 id="when-it-is-not-safe-to-transmit-at-all">When it is not safe to transmit at all<a class="headerlink" href="#when-it-is-not-safe-to-transmit-at-all" title="Permanent link">&para;</a></h2>
 <p>ax25ircd cannot see your radio. It speaks KISS to a modem, and KISS carries
 frames, not telemetry — there is no SWR reading, no PA temperature and no power
@@ -1508,10 +1535,10 @@ void until it gives a station up for lost.</p>
 <li><strong>It fails closed.</strong> A command that cannot be run, times out, or has not run
   yet counts as a failure. The failure mode of an unreadable SWR meter is not
   "assume it is fine".</li>
-<li><strong>It blocks station identification too.</strong> Identification otherwise bypasses
-  the inhibit, the pacing gate and the governor — but if it is not safe to key
-  up, it is not safe to key up for an ID either. A licence requires you to
-  identify the transmissions you make, not to make one.</li>
+<li><strong>It blocks station identification too.</strong> Identification jumps the data
+  queue, not the airtime clock — but if it is not safe to key up, it is not
+  safe to key up for an ID either. A licence requires you to identify the
+  transmissions you make, not to make one.</li>
 </ul>
 <p><code>RADIO STATUS</code> says so plainly when it is the interlock holding the station
 down, so it is never confused with <code>RADIO OFF</code>.</p>
