@@ -1070,3 +1070,35 @@ fn a_manual_mode_grant_survives_an_unrelated_privilege_refresh() {
     );
     assert!(f.op, "and the +o with it");
 }
+
+#[test]
+fn a_configuration_with_two_channels_of_the_same_name_is_refused() {
+    // Channel names are compared case-insensitively, so `#rf` and `#RF` are
+    // one channel. Silently keeping the first and discarding the second means
+    // an operator's `rf = true` or topic can vanish without a word.
+    let text = CONFIG.replace(
+        "[[opers]]",
+        "[[channels]]\nname = \"#LOBBY\"\ntopic = \"the same channel, shouted\"\n\n[[opers]]",
+    );
+    let err = Config::from_toml(&text).unwrap_err().to_string();
+    assert!(
+        err.contains("#LOBBY") && err.contains("#lobby"),
+        "the operator needs to be told which two collided: {err}"
+    );
+}
+
+#[test]
+fn a_released_nick_never_exceeds_the_configured_length() {
+    // The server picks the replacement name itself, so it has to obey its own
+    // rules — a `Guest_…` longer than `max_nick_len` is a nick the server
+    // would refuse if a client asked for it.
+    use ax25ircd::irc::message::is_valid_nick;
+    let max = 12usize;
+    for id in [0u64, 9, 99, 999_999, u64::MAX] {
+        let guest = ax25ircd::server::guest_nick(id, max);
+        assert!(
+            is_valid_nick(&guest, max),
+            "{guest} is not a nickname this server would accept at max_nick_len={max}"
+        );
+    }
+}

@@ -279,9 +279,16 @@ impl Radio {
         let batch = self.config.radio.mailbox_flush_batch.max(1);
         let now = Instant::now();
         let nick = call.to_nick();
-        let messages = self.mailbox.take_some(call, batch);
-        let sent = messages.len();
-        for m in messages {
+        let mut sent = 0;
+        for _ in 0..batch {
+            // Look before taking. A held message is the only copy there is —
+            // it may have been waiting hours — so it must not leave the
+            // mailbox unless there is somewhere for it to go. Taking it first
+            // and letting admission control refuse it afterwards destroys it:
+            // neither transmitted nor held, and nobody told.
+            let Some(m) = self.mailbox.peek(call) else {
+                break;
+            };
             let age = m.age(now).as_secs().to_string();
             let payload = encode_fields(&[&nick, &m.from, &m.text, &age]);
             let flags = if m.truncated {
@@ -289,7 +296,13 @@ impl Radio {
             } else {
                 0
             };
+            if !self.backlog_has_room(self.wire_octets(payload.len()), TxClass::Direct) {
+                debug!(%call, "holding mail back: the transmit backlog is full");
+                break;
+            }
+            self.mailbox.drop_front(call);
             self.unicast_flagged(call, Kind::Stored, payload, true, TxClass::Direct, flags);
+            sent += 1;
         }
         let remaining = depth.saturating_sub(sent);
         if remaining > 0 {

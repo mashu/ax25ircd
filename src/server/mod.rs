@@ -354,15 +354,13 @@ impl Server {
                 .user(&uid)
                 .map(|u| u.nick.clone())
                 .unwrap_or_default();
-            // `Guest_1`, not `Guest1`: the latter parses as a plausible
-            // callsign (letters and a digit), so it sits in the namespace
-            // reserved for RF stations — the server would be handing out a
-            // nick it refuses when a client asks for it. The underscore is a
-            // legal nick character and is never legal in a callsign.
-            let guest = format!("Guest_{}", match uid {
-                UserId::Ip(id) => id,
-                UserId::Rf(_) => 0,
-            });
+            let guest = guest_nick(
+                match uid {
+                    UserId::Ip(id) => id,
+                    UserId::Rf(_) => 0,
+                },
+                self.config.server.max_nick_len,
+            );
             if let Some(u) = self.state.user_mut(&uid) {
                 u.identify_by = None;
             }
@@ -802,6 +800,29 @@ impl Server {
             }
         }
     }
+}
+
+/// The replacement name for a client that has to give up a registered nick.
+///
+/// `Guest_1`, not `Guest1`: the latter parses as a plausible callsign (letters
+/// and a digit), so it would sit in the namespace reserved for RF stations —
+/// the server would be handing out a nick it refuses when a client asks for
+/// one. The underscore is a legal nickname character and is never legal in a
+/// callsign.
+///
+/// It is also kept within `max_nick_len`, for the same reason: a name the
+/// server assigns must be a name the server would accept.
+pub fn guest_nick(id: u64, max_nick_len: usize) -> String {
+    let full = format!("Guest_{id}");
+    if full.len() <= max_nick_len {
+        return full;
+    }
+    // Keep the tail of the number: the low digits are what differ between
+    // nearby connection ids, so they are what keeps the name unique.
+    let room = max_nick_len.saturating_sub("Guest_".len());
+    let digits = id.to_string();
+    let tail = &digits[digits.len().saturating_sub(room)..];
+    format!("Guest_{tail}")
 }
 
 /// Render a delivery as an IRC protocol line.

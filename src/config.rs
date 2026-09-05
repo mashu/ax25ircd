@@ -512,9 +512,20 @@ impl Config {
         if self.listen.registration_timeout_secs == 0 {
             anyhow::bail!("listen.registration_timeout_secs must be at least 1");
         }
+        let mut seen: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
         for ch in &self.channels {
             if !crate::irc::message::is_channel_name(&ch.name) {
                 anyhow::bail!("invalid channel name: {}", ch.name);
+            }
+            // Channel names are compared case-insensitively, so two entries
+            // that differ only in case are one channel — and the second one's
+            // settings would be silently discarded, `rf = true` included.
+            if let Some(first) = seen.insert(crate::irc::message::lower(&ch.name), &ch.name) {
+                anyhow::bail!(
+                    "channels {first} and {} are the same channel: names are compared \
+                     case-insensitively, so only one of them would exist",
+                    ch.name
+                );
             }
         }
         if !self.radio.enabled {

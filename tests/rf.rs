@@ -718,3 +718,48 @@ async fn the_last_station_leaving_is_announced_to_the_irc_side() {
         "and when it stops: {lines:?}"
     );
 }
+
+#[tokio::test]
+async fn held_mail_is_not_destroyed_when_the_transmit_queue_is_full() {
+    // A message held for hours must not be lost because the backlog happened
+    // to be full at the moment the station reappeared. The mailbox is the
+    // store-and-forward of last resort; if it silently drops, there is no
+    // other copy anywhere.
+    let text = CONFIG
+        .replace("id_interval_secs = 60", "id_interval_secs = 60\nmax_queued_airtime_secs = 1")
+        .replace("baud = 9600", "baud = 300");
+    let mut rf = Rf::with(&text);
+    let a = rf.client(1, "alice");
+    rf.send(a, "OPER root operpass1");
+    rf.send(a, "CALLSIGN SM0XYZ");
+    rf.drain(a);
+
+    rf.send(a, "PRIVMSG SM0ABC|7 :something worth keeping");
+    rf.drain(a);
+    assert_eq!(rf.server.radio.mailbox.len(), 1, "test setup: the message was held");
+
+    // Fill the transmit backlog so nothing more can be admitted, then let the
+    // station appear.
+    for i in 0..40 {
+        rf.server.radio.transmit_direct(
+            &"SK0AA-1".parse().unwrap(),
+            AircFrame::new(Kind::Msg, 900 + i, vec![0x41; 120]),
+            ax25ircd::server::TxClass::Chat,
+        );
+    }
+    assert!(
+        !rf.server
+            .radio
+            .backlog_has_room(200, ax25ircd::server::TxClass::Direct),
+        "test setup: the backlog should be full"
+    );
+
+    rf.heard("SM0ABC-7", Kind::Hello, &[]);
+
+    assert_eq!(
+        rf.server.radio.mailbox.len(),
+        1,
+        "the held message was taken out of the mailbox and then refused by \
+         admission control, so it is gone: neither transmitted nor held"
+    );
+}

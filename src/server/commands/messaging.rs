@@ -18,6 +18,19 @@ use super::super::state::UserId;
 use super::super::{Delivery, Server, TxClass};
 use super::Screened;
 
+/// When a screened message would actually reach the air.
+///
+/// The difference matters for exactly one check. Everything else — privilege,
+/// callsign, rate limit, content — applies the same either way.
+#[derive(Copy, Clone, Debug)]
+enum AirTiming {
+    /// Queued for transmission now, so the airtime backlog applies.
+    Now,
+    /// Held for a station that is not on frequency. It will be transmitted
+    /// whenever that station is next heard.
+    Held,
+}
+
 impl Server {
     pub(super) fn cmd_privmsg(&mut self, uid: &UserId, msg: &Message, notice: bool) {
         let Some(target) = msg.param(0).map(|s| s.to_string()) else {
@@ -166,7 +179,7 @@ impl Server {
             self.numeric(uid, num::ERR_NOSUCHNICK, &[target, "No such nick/channel"]);
             return;
         }
-        let Some(screened) = self.screen_for_air(uid, text) else {
+        let Some(screened) = self.screen_for_mailbox(uid, text) else {
             return;
         };
         let message = crate::server::mailbox::StoredMessage {
@@ -212,6 +225,16 @@ impl Server {
     /// minutes later — is the worst of both worlds: the sender believes it
     /// went out, and the airtime was reserved for nothing.
     pub(super) fn screen_for_air(&mut self, uid: &UserId, text: &str) -> Option<Screened> {
+        self.screen(uid, text, AirTiming::Now)
+    }
+
+    /// As [`Server::screen_for_air`], for a message that will be held until
+    /// the station is next heard.
+    pub(super) fn screen_for_mailbox(&mut self, uid: &UserId, text: &str) -> Option<Screened> {
+        self.screen(uid, text, AirTiming::Held)
+    }
+
+    fn screen(&mut self, uid: &UserId, text: &str, timing: AirTiming) -> Option<Screened> {
         if !self.radio.available() {
             self.notice_user(uid, "The transmitter is off; your message stayed on the wire.");
             return None;
@@ -279,6 +302,18 @@ impl Server {
         // in the airtime backlog? Checked here rather than at the transmitter
         // because from here we can still tell the sender. The payload also
         // carries the channel name and the sender's nick, so allow for those.
+        //
+        // It does not apply to a message being held: that will be transmitted
+        // whenever the station next appears, which may be hours away, so the
+        // backlog as it stands this instant says nothing about it. Refusing on
+        // those grounds would mean a momentarily busy channel silently turned
+        // off store-and-forward — exactly when it is most wanted.
+        if matches!(timing, AirTiming::Held) {
+            return Some(Screened {
+                text: screened,
+                truncated,
+            });
+        }
         let octets = self.radio.wire_octets(screened.len() + 40);
         if !self.radio.backlog_has_room(octets, TxClass::Chat) {
             let queued = self.radio.eta().as_secs();

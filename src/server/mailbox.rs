@@ -77,23 +77,26 @@ impl Mailbox {
     }
 
 
-    /// Remove and return at most `n` messages, oldest first.
+    /// The oldest message waiting for a station, without removing it.
     ///
-    /// Held mail is delivered a little at a time rather than all at once. Ten
-    /// messages released the instant a station is heard is a minute of
-    /// near-continuous transmitting triggered by one short frame — and the
-    /// station may be a handheld that has come into range for thirty seconds.
-    /// Draining one per exchange lets the station's own activity set the pace.
-    pub fn take_some(&mut self, call: &Callsign, n: usize) -> Vec<StoredMessage> {
-        let Some(queue) = self.boxes.get_mut(call) else {
-            return Vec::new();
-        };
-        let out: Vec<StoredMessage> = queue.drain(..n.min(queue.len())).collect();
+    /// Delivery is peek-then-drop rather than take-then-send, because a held
+    /// message is the only copy there is: taking it out and then failing to
+    /// transmit it would destroy it.
+    pub fn peek(&self, call: &Callsign) -> Option<&StoredMessage> {
+        self.boxes.get(call).and_then(|q| q.front())
+    }
+
+    /// Discard the oldest message for a station, once it has been handed to
+    /// the transmitter.
+    pub fn drop_front(&mut self, call: &Callsign) -> Option<StoredMessage> {
+        let queue = self.boxes.get_mut(call)?;
+        let msg = queue.pop_front();
         if queue.is_empty() {
             self.boxes.remove(call);
         }
-        out
+        msg
     }
+
 
     pub fn depth(&self, call: &Callsign) -> usize {
         self.boxes.get(call).map(|q| q.len()).unwrap_or(0)
@@ -156,27 +159,29 @@ mod tests {
         let mut mb = Mailbox::new(true, 4, 100, Duration::from_secs(3600));
         assert_eq!(mb.store(&call(), msg("one")).unwrap(), 1);
         assert_eq!(mb.store(&call(), msg("two")).unwrap(), 2);
-        let taken = mb.take_some(&call(), usize::MAX);
-        assert_eq!(
-            taken.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
-            vec!["one", "two"]
-        );
+        let mut taken = Vec::new();
+        while let Some(m) = mb.drop_front(&call()) {
+            taken.push(m.text);
+        }
+        assert_eq!(taken, vec!["one", "two"]);
         assert!(mb.is_empty());
     }
 
     #[test]
-    fn take_some_drains_a_little_at_a_time() {
-        let mut mb = Mailbox::new(true, 8, 100, Duration::from_secs(3600));
-        for t in ["a", "b", "c"] {
-            mb.store(&call(), msg(t)).unwrap();
-        }
-        let first = mb.take_some(&call(), 1);
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].text, "a");
-        assert_eq!(mb.depth(&call()), 2);
-        assert_eq!(mb.take_some(&call(), 10).len(), 2);
+    fn peek_does_not_remove_and_drop_front_does() {
+        let mut mb = Mailbox::new(true, 4, 100, Duration::from_secs(3600));
+        mb.store(&call(), msg("first")).unwrap();
+        mb.store(&call(), msg("second")).unwrap();
+
+        assert_eq!(mb.peek(&call()).map(|m| m.text.as_str()), Some("first"));
+        assert_eq!(mb.depth(&call()), 2, "peeking must not consume");
+
+        assert_eq!(mb.drop_front(&call()).map(|m| m.text), Some("first".into()));
+        assert_eq!(mb.peek(&call()).map(|m| m.text.as_str()), Some("second"));
+        mb.drop_front(&call());
         assert!(mb.is_empty());
-        assert!(mb.take_some(&call(), 1).is_empty());
+        assert!(mb.peek(&call()).is_none());
+        assert!(mb.drop_front(&call()).is_none());
     }
 
     #[test]
@@ -197,7 +202,7 @@ mod tests {
         mb.store(&call(), msg("old")).unwrap();
         let later = Instant::now() + Duration::from_secs(120);
         assert_eq!(mb.expire(later), 1);
-        assert!(mb.take_some(&call(), 10).is_empty());
+        assert!(mb.peek(&call()).is_none());
     }
 
     #[test]
