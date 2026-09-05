@@ -309,9 +309,10 @@ mod tests {
 
     #[test]
     fn truncation_and_rejection() {
-        let mut cfg = PolicyConfig::default();
-        cfg.max_rf_text_len = 10;
-        let p = Policy::new(cfg);
+        let p = Policy::new(PolicyConfig {
+            max_rf_text_len: 10,
+            ..Default::default()
+        });
         assert_eq!(p.screen_outbound("short"), Verdict::Allow("short".into()));
         assert!(matches!(
             p.screen_outbound("this one is definitely too long"),
@@ -346,9 +347,10 @@ mod tests {
 
     #[test]
     fn allow_and_deny_lists() {
-        let mut cfg = PolicyConfig::default();
-        cfg.deny_callsigns = vec!["SM0BAD".into()];
-        let p = Policy::new(cfg);
+        let p = Policy::new(PolicyConfig {
+            deny_callsigns: vec!["SM0BAD".into()],
+            ..Default::default()
+        });
         // SSID 0 in the deny list bans the whole station.
         assert!(!p.station_allowed(&"SM0BAD-7".parse().unwrap()));
         assert!(p.station_allowed(&"SM0ABC".parse().unwrap()));

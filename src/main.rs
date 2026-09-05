@@ -115,12 +115,14 @@ QMX on Debian: https://mashu.github.io/ax25ircd/
             max_frame: config.radio.paclen + 64,
             tx_pacing: Duration::from_millis(section.tx_pacing_ms),
             tx_queue_depth: 64,
-            txdelay: section.txdelay,
             persistence: section.persistence,
             slottime: section.slottime,
             airtime: config.radio.duty.to_airtime(),
         };
         let (handle, rx) = tnc::spawn(cfg);
+        if let Some(interlock) = config.radio.interlock.clone() {
+            ax25ircd::interlock::spawn(interlock, handle.airtime().clone());
+        }
         info!(
             callsign = %config.radio.callsign,
             "radio gateway enabled; identifying every {} s",

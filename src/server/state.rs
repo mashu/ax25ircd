@@ -115,6 +115,9 @@ impl MemberFlags {
 #[derive(Clone, Debug)]
 pub struct Channel {
     pub name: String,
+    /// Declared in the configuration file. Configured channels persist while
+    /// empty; channels users create are reaped when the last member leaves.
+    pub configured: bool,
     pub topic: Option<String>,
     pub topic_setter: String,
     pub topic_time: u64,
@@ -133,6 +136,7 @@ impl Channel {
     pub fn new(name: &str, rf: bool) -> Self {
         Self {
             name: name.to_string(),
+            configured: false,
             topic: None,
             topic_setter: String::new(),
             topic_time: 0,
@@ -298,6 +302,11 @@ impl State {
         Some((old, new))
     }
 
+    /// Connected IP clients, registered or not.
+    pub fn ip_users(&self) -> usize {
+        self.users.values().filter(|u| !u.is_rf()).count()
+    }
+
     pub fn ip_count_from_host(&self, host: &str) -> usize {
         self.users
             .values()
@@ -314,7 +323,27 @@ impl State {
         if let Some(user) = self.users.get_mut(id) {
             user.channels.remove(&key);
         }
+        self.reap_channel(&key);
         was_member
+    }
+
+    /// Forget a user-created channel once it is empty.
+    ///
+    /// Channels created with `JOIN` used to live forever. Each user may hold
+    /// `max_channels_per_user` of them, so a client that joined twenty
+    /// channels, disconnected and reconnected could grow the channel table
+    /// without limit — cheap for the attacker, permanent for the server.
+    /// Configured channels are exempt: an empty `#rf` still has to exist for
+    /// a station to join it.
+    fn reap_channel(&mut self, key: &str) {
+        let gone = self
+            .channels
+            .get(key)
+            .map(|c| !c.configured && c.members.is_empty())
+            .unwrap_or(false);
+        if gone {
+            self.channels.remove(key);
+        }
     }
 
     /// Remove a user entirely. Returns the channels they were in.
@@ -329,6 +358,7 @@ impl State {
                 chan.members.remove(id);
                 names.push(chan.name.clone());
             }
+            self.reap_channel(&key);
         }
         names
     }
@@ -420,10 +450,32 @@ mod tests {
         let mut s = State::default();
         s.insert_user(user(UserId::Ip(1), "alice"));
         s.set_nick(&UserId::Ip(1), "alice");
-        s.ensure_channel("#a", false);
+        s.ensure_channel("#a", false).configured = true;
         assert!(s.join(&UserId::Ip(1), "#a").is_some());
         assert_eq!(s.remove_user(&UserId::Ip(1)), vec!["#a"]);
         assert!(s.channel("#a").unwrap().members.is_empty());
         assert!(!s.nick_taken("alice"));
+    }
+
+    #[test]
+    fn user_created_channels_are_reaped_but_configured_ones_are_not() {
+        let mut s = State::default();
+        s.ensure_channel("#rf", true).configured = true;
+        s.insert_user(user(UserId::Ip(1), "alice"));
+        s.ensure_channel("#throwaway", false);
+        s.join(&UserId::Ip(1), "#throwaway");
+        s.join(&UserId::Ip(1), "#rf");
+
+        s.part(&UserId::Ip(1), "#throwaway");
+        assert!(
+            s.channel("#throwaway").is_none(),
+            "an empty user-created channel must not outlive its last member"
+        );
+
+        s.remove_user(&UserId::Ip(1));
+        assert!(
+            s.channel("#rf").is_some(),
+            "a configured channel has to exist for a station to join it"
+        );
     }
 }

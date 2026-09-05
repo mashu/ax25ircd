@@ -47,8 +47,6 @@ pub struct TncConfig {
     pub tx_pacing: Duration,
     /// Frames queued for transmission before we start dropping.
     pub tx_queue_depth: usize,
-    /// KISS TXDELAY parameter, in 10 ms units. `None` leaves the TNC alone.
-    pub txdelay: Option<u8>,
     /// KISS persistence and slot time, if we should set them.
     pub persistence: Option<u8>,
     pub slottime: Option<u8>,
@@ -68,7 +66,6 @@ impl Default for TncConfig {
             max_frame: 512,
             tx_pacing: Duration::from_millis(1500),
             tx_queue_depth: 64,
-            txdelay: None,
             persistence: None,
             slottime: None,
             airtime: AirtimeConfig::default(),
@@ -170,6 +167,7 @@ impl TncHandle {
         match self.tx.try_send(frame) {
             Ok(()) => {
                 self.airtime.queued_ms.fetch_add(cost, Ordering::Relaxed);
+                self.airtime.queued_frames.fetch_add(1, Ordering::Relaxed);
                 true
             }
             Err(e) => {
@@ -189,6 +187,11 @@ fn release_queued(shared: &AirtimeShared, governor: &Governor, octets: usize) {
         .queued_ms
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |q| {
             Some(q.saturating_sub(cost))
+        });
+    let _ = shared
+        .queued_frames
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            Some(n.saturating_sub(1))
         });
 }
 
@@ -283,15 +286,30 @@ async fn pump(
     governor: &mut Governor,
     shared: &AirtimeShared,
 ) -> io::Result<()> {
-    // Push KISS parameters, if configured.
+    // Push KISS parameters at connect.
+    //
+    // TXDELAY and TXTAIL come from the airtime config rather than a separate
+    // TNC setting: the governor prices every frame with those numbers, so the
+    // TNC had better be using the same ones. In 10 ms units, hence the /10.
+    let ms_to_kiss = |ms: u128| -> u8 { (ms / 10).min(255) as u8 };
+    let mut params: Vec<(u8, u8)> = vec![
+        (kiss::CMD_TXDELAY, ms_to_kiss(config.airtime.txdelay.as_millis())),
+        (kiss::CMD_TXTAIL, ms_to_kiss(config.airtime.txtail.as_millis())),
+        // Half duplex, always. A TNC in full-duplex mode transmits without
+        // listening first, which on a shared channel is precisely the
+        // behaviour this whole module exists to prevent.
+        (kiss::CMD_FULLDUPLEX, 0),
+    ];
     for (cmd, value) in [
-        (kiss::CMD_TXDELAY, config.txdelay),
         (kiss::CMD_PERSISTENCE, config.persistence),
         (kiss::CMD_SLOTTIME, config.slottime),
     ] {
         if let Some(v) = value {
-            link.write_all(&kiss::encode(config.kiss_port, cmd, &[v])).await?;
+            params.push((cmd, v));
         }
+    }
+    for (cmd, v) in params {
+        link.write_all(&kiss::encode(config.kiss_port, cmd, &[v])).await?;
     }
 
     let mut decoder = KissDecoder::new(config.max_frame);
@@ -305,7 +323,7 @@ async fn pump(
         // Discard anything queued while the transmitter is inhibited. This is
         // the operator's kill switch: it must take effect on the frames that
         // are already in flight, not just on the next one.
-        if shared.inhibit.load(Ordering::Relaxed) {
+        if shared.tx_blocked() {
             if let Some((frame, _)) = pending.take() {
                 release_queued(shared, governor, frame.encode().len());
                 shared.dropped_inhibited.fetch_add(1, Ordering::Relaxed);
@@ -315,6 +333,12 @@ async fn pump(
                 shared.dropped_inhibited.fetch_add(1, Ordering::Relaxed);
             }
         }
+
+        // Pick up any live override a control operator has set. Cheap enough
+        // to do every time round, and it means `RADIO LIMIT` takes effect on
+        // the next frame rather than the next restart.
+        governor.set_duty(shared.duty_limit(config.airtime.max_duty));
+        let pacing = shared.pacing(config.tx_pacing);
 
         let far_future = tokio::time::Instant::now() + Duration::from_secs(3600);
         let wake = if pending.is_some() { next_tx } else { far_future };
@@ -345,15 +369,26 @@ async fn pump(
                 }
             }
             Some(frame) = id_queue.recv() => {
-                // Identification bypasses the inhibit, the pacing gate and the
-                // governor. It is one short frame and it is not optional.
+                // Identification bypasses the pacing gate, the governor and
+                // the operator's inhibit: `RADIO OFF` queues a sign-off ID
+                // precisely so the station can put its callsign to the
+                // transmissions it has already made, and dropping that would
+                // defeat the purpose.
+                //
+                // It does not bypass the safety interlock. If it is not safe
+                // to key up — high SWR, a hot PA, someone on the tower — then
+                // it is not safe to key up for an ID either. A licence
+                // requires you to identify the transmissions you make, not to
+                // make one.
                 let bytes = frame.encode();
-                if bytes.len() <= config.max_frame {
+                if shared.interlock_failed() {
+                    warn!("station ID suppressed: the safety interlock is not satisfied");
+                } else if bytes.len() <= config.max_frame {
                     write_kiss_bytes(&mut link, config, &frame, &bytes).await?;
                     let now = std::time::Instant::now();
                     let keyed = governor.record(bytes.len(), now);
                     governor.publish_with(shared, now, config.max_frame);
-                    next_tx = next_tx.max(tokio::time::Instant::now() + config.tx_pacing.max(keyed));
+                    next_tx = next_tx.max(tokio::time::Instant::now() + pacing.max(keyed));
                 }
             }
             Some(frame) = tx_queue.recv(), if pending.is_none() => {
@@ -363,7 +398,7 @@ async fn pump(
                 let Some((frame, queued_at)) = pending.take() else {
                     continue;
                 };
-                if shared.inhibit.load(Ordering::Relaxed) {
+                if shared.tx_blocked() {
                     release_queued(shared, governor, frame.encode().len());
                     shared.dropped_inhibited.fetch_add(1, Ordering::Relaxed);
                     continue;
@@ -385,7 +420,7 @@ async fn pump(
                         // gap, or the time this transmission actually occupies
                         // the channel. Without the latter the "gap" would
                         // start while we were still keyed.
-                        next_tx = tokio::time::Instant::now() + config.tx_pacing.max(keyed);
+                        next_tx = tokio::time::Instant::now() + pacing.max(keyed);
                     }
                     TxDecision::Defer(delay, reason) => {
                         governor.publish_with(shared, now, config.max_frame);

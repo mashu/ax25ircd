@@ -19,6 +19,9 @@ pub struct StoredMessage {
     pub from: String,
     pub text: String,
     pub notice: bool,
+    /// A policy limit shortened this before it was held, so the station is
+    /// told the same thing a live recipient would have been.
+    pub truncated: bool,
     pub stored_at: Instant,
 }
 
@@ -73,13 +76,6 @@ impl Mailbox {
         Ok(queue.len())
     }
 
-    /// Remove and return everything waiting for a station.
-    pub fn take(&mut self, call: &Callsign) -> Vec<StoredMessage> {
-        self.boxes
-            .remove(call)
-            .map(|q| q.into_iter().collect())
-            .unwrap_or_default()
-    }
 
     /// Remove and return at most `n` messages, oldest first.
     ///
@@ -146,6 +142,7 @@ mod tests {
             from: "alice".into(),
             text: text.into(),
             notice: false,
+            truncated: false,
             stored_at: Instant::now(),
         }
     }
@@ -159,7 +156,7 @@ mod tests {
         let mut mb = Mailbox::new(true, 4, 100, Duration::from_secs(3600));
         assert_eq!(mb.store(&call(), msg("one")).unwrap(), 1);
         assert_eq!(mb.store(&call(), msg("two")).unwrap(), 2);
-        let taken = mb.take(&call());
+        let taken = mb.take_some(&call(), usize::MAX);
         assert_eq!(
             taken.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
             vec!["one", "two"]
@@ -200,7 +197,7 @@ mod tests {
         mb.store(&call(), msg("old")).unwrap();
         let later = Instant::now() + Duration::from_secs(120);
         assert_eq!(mb.expire(later), 1);
-        assert!(mb.take(&call()).is_empty());
+        assert!(mb.take_some(&call(), 10).is_empty());
     }
 
     #[test]

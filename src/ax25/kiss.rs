@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn oversized_frames_are_dropped() {
-        let wire = encode(0, CMD_DATA, &vec![0x41; 100]);
+        let wire = encode(0, CMD_DATA, &[0x41; 100]);
         let mut dec = KissDecoder::new(16);
         assert!(dec.push(&wire).is_empty());
         // Decoder resynchronises on the next good frame.

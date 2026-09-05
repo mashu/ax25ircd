@@ -21,6 +21,13 @@ use crate::irc::numerics as num;
 use crate::policy::Verdict;
 
 use super::state::{ClientId, UserId};
+
+/// Text that has passed every gate between an IRC user and the transmitter,
+/// and whether a policy limit shortened it on the way.
+pub(crate) struct Screened {
+    pub text: String,
+    pub truncated: bool,
+}
 use super::{AuthKind, Delivery, Event, Server, TxClass};
 
 impl Server {
@@ -572,7 +579,7 @@ impl Server {
             && self.rf_available();
         let air_topic = if allow_rf {
             match self.screen_for_air(uid, &topic) {
-                Some(t) => t,
+                Some(t) => t.text,
                 None => {
                     allow_rf = false;
                     topic.clone()
@@ -926,9 +933,13 @@ impl Server {
 
             let mut allow_rf = chan.rf && chan.has_rf_members() && self.rf_available();
             let mut text = text;
+            let mut truncated = false;
             if allow_rf {
                 match self.screen_for_air(uid, &text) {
-                    Some(screened) => text = screened,
+                    Some(s) => {
+                        text = s.text;
+                        truncated = s.truncated;
+                    }
                     None => allow_rf = false,
                 }
             } else if chan.rf {
@@ -943,6 +954,7 @@ impl Server {
                 target: chan.name.clone(),
                 text,
                 notice,
+                truncated,
             };
             self.broadcast_channel_ex(&chan.name, &d, Some(uid), allow_rf);
             if allow_rf && self.config.radio.notice_air_relay && !notice {
@@ -973,9 +985,13 @@ impl Server {
             return;
         };
         let mut text = text;
+        let mut truncated = false;
         if target_id.is_rf() {
             match self.screen_for_air(uid, &text) {
-                Some(screened) => text = screened,
+                Some(s) => {
+                    text = s.text;
+                    truncated = s.truncated;
+                }
                 None => return,
             }
         }
@@ -988,6 +1004,7 @@ impl Server {
             target: target.clone(),
             text,
             notice,
+            truncated,
         };
         self.deliver(&target_id, &d);
     }
@@ -1014,12 +1031,13 @@ impl Server {
             self.numeric(uid, num::ERR_NOSUCHNICK, &[target, "No such nick/channel"]);
             return;
         }
-        let Some(text) = self.screen_for_air(uid, text) else {
+        let Some(screened) = self.screen_for_air(uid, text) else {
             return;
         };
         let message = crate::server::mailbox::StoredMessage {
             from: from.to_string(),
-            text,
+            text: screened.text,
+            truncated: screened.truncated,
             notice,
             stored_at: Instant::now(),
         };
@@ -1058,7 +1076,7 @@ impl Server {
     /// alternative — accept it, queue it, and let the transmitter drop it two
     /// minutes later — is the worst of both worlds: the sender believes it
     /// went out, and the airtime was reserved for nothing.
-    fn screen_for_air(&mut self, uid: &UserId, text: &str) -> Option<String> {
+    fn screen_for_air(&mut self, uid: &UserId, text: &str) -> Option<Screened> {
         if !self.rf_available() {
             self.notice_user(uid, "The transmitter is off; your message stayed on the wire.");
             return None;
@@ -1096,9 +1114,11 @@ impl Server {
             );
             return None;
         }
+        let mut truncated = false;
         let screened = match self.policy.screen_outbound(text) {
             Verdict::Allow(t) => t,
             Verdict::Truncated(t) => {
+                truncated = true;
                 self.notice_user(
                     uid,
                     &format!(
@@ -1134,7 +1154,10 @@ impl Server {
             self.audit.event("rf_backlog_refused", &[("octets", &octets.to_string())]);
             return None;
         }
-        Some(screened)
+        Some(Screened {
+            text: screened,
+            truncated,
+        })
     }
 
     // ------------------------------------------------------------ extensions
@@ -1197,12 +1220,17 @@ impl Server {
             self.notice_user(uid, &status);
             if oper {
                 let s = self.stats.clone();
+                let up = self.uptime().as_secs();
                 self.notice_user(
                     uid,
                     &format!(
-                        "frames rx {} tx {} dropped {} ({} bytes); stations {}; mail {}",
+                        "up {}h{:02}m; frames rx {} tx {} refused {} dropped {} ({} bytes); \
+                         stations {}; mail {}",
+                        up / 3600,
+                        (up % 3600) / 60,
                         s.rf_frames_rx,
                         s.rf_frames_tx,
+                        s.rf_frames_refused,
                         s.rf_frames_dropped,
                         s.rf_bytes_tx,
                         self.sessions.peers().count(),
@@ -1330,6 +1358,133 @@ impl Server {
                     None => self.notice_user(uid, "No TNC; there is no airtime to report."),
                 }
             }
+            "QUEUE" => {
+                // Everything that has been accepted but not yet radiated, in
+                // the three places it can be waiting.
+                match self.airtime() {
+                    Some(a) => {
+                        self.notice_user(
+                            uid,
+                            &format!(
+                                "transmit queue: {} frame(s), {:.1}s of airtime, \
+                                 next slot in {:.1}s (budget {}s)",
+                                a.queued_frame_count(),
+                                a.queued().as_secs_f64(),
+                                Duration::from_millis(
+                                    a.next_slot_ms.load(std::sync::atomic::Ordering::Relaxed)
+                                )
+                                .as_secs_f64(),
+                                self.rf_backlog_budget().as_secs(),
+                            ),
+                        );
+                    }
+                    None => self.notice_user(uid, "No TNC; nothing can be queued."),
+                }
+                let mut waiting: Vec<String> = self
+                    .sessions
+                    .peers()
+                    .filter(|p| p.queue_depth() > 0)
+                    .map(|p| {
+                        format!(
+                            "  {}: {} message(s) awaiting acknowledgement, {} dropped",
+                            p.call,
+                            p.queue_depth(),
+                            p.dropped
+                        )
+                    })
+                    .collect();
+                waiting.sort();
+                if waiting.is_empty() {
+                    self.notice_user(uid, "No per-station messages in flight.");
+                } else {
+                    self.notice_user(uid, "Per-station (reliable, awaiting ACK):");
+                    for w in waiting {
+                        self.notice_user(uid, &w);
+                    }
+                }
+                let held = self.mailbox.len();
+                self.notice_user(
+                    uid,
+                    &format!(
+                        "Held for stations out of range: {held} message(s). \
+                         Refused for backlog since start: {}. Dropped at the transmitter: {}.",
+                        self.stats.rf_frames_refused, self.stats.rf_frames_dropped
+                    ),
+                );
+            }
+            "LIMIT" => {
+                let what = msg.param(1).unwrap_or("").to_ascii_uppercase();
+                let value = msg.param(2);
+                let Some(a) = self.airtime().cloned() else {
+                    self.notice_user(uid, "No TNC; there is nothing to limit.");
+                    return;
+                };
+                match (what.as_str(), value) {
+                    ("DUTY", Some(v)) => {
+                        let asked: Option<u32> = if v.eq_ignore_ascii_case("off") {
+                            None
+                        } else {
+                            match v.parse() {
+                                Ok(p) => Some(p),
+                                Err(_) => {
+                                    self.notice_user(uid, "Usage: RADIO LIMIT DUTY <1-50|off>");
+                                    return;
+                                }
+                            }
+                        };
+                        let applied = a.set_duty_override(asked);
+                        let text = match applied {
+                            Some(p) if Some(p) != asked => format!(
+                                "Duty cycle limited to {p}% — the ceiling is {p}%, \
+                                 whatever was asked for.",
+                            ),
+                            Some(p) => format!("Duty cycle limited to {p}% until further notice."),
+                            None => "Duty override cleared; the configured limit applies.".into(),
+                        };
+                        self.notice_user(uid, &text);
+                        self.audit.event(
+                            "radio_limit_duty",
+                            &[("percent", &applied.map(|p| p.to_string()).unwrap_or("off".into()))],
+                        );
+                    }
+                    ("PACING", Some(v)) => {
+                        let ms: Option<u64> = if v.eq_ignore_ascii_case("off") {
+                            None
+                        } else {
+                            match v.parse() {
+                                Ok(m) => Some(m),
+                                Err(_) => {
+                                    self.notice_user(
+                                        uid,
+                                        "Usage: RADIO LIMIT PACING <milliseconds|off>",
+                                    );
+                                    return;
+                                }
+                            }
+                        };
+                        a.set_pacing_override(ms);
+                        let text = match ms {
+                            Some(m) => format!(
+                                "Minimum gap between transmissions set to {m}ms. \
+                                 This slows the station down; it cannot speed it past the \
+                                 duty-cycle limit."
+                            ),
+                            None => "Pacing override cleared; the configured gap applies.".into(),
+                        };
+                        self.notice_user(uid, &text);
+                        self.audit.event(
+                            "radio_limit_pacing",
+                            &[("ms", &ms.map(|m| m.to_string()).unwrap_or("off".into()))],
+                        );
+                    }
+                    _ => self.notice_user(
+                        uid,
+                        "RADIO LIMIT DUTY <1-50|off> | RADIO LIMIT PACING <ms|off>. \
+                         Both take effect on the next frame and are not saved to the \
+                         configuration file.",
+                    ),
+                }
+            }
             "MAIL" => {
                 let rows = self.mailbox.summary();
                 if rows.is_empty() {
@@ -1364,7 +1519,8 @@ impl Server {
             }
             _ => self.notice_user(
                 uid,
-                "RADIO STATUS | DUTY | ON | OFF | ID | HEARD | MAIL | KICK <callsign> | GRANT <nick> | REVOKE <nick>",
+                "RADIO STATUS | DUTY | QUEUE | LIMIT | ON | OFF | ID | HEARD | MAIL | \
+                 KICK <callsign> | GRANT <nick> | REVOKE <nick>",
             ),
         }
     }

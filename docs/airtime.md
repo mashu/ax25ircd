@@ -243,6 +243,72 @@ governor's next free slot.
 `RADIO STATUS` shows the duty percentage and any active cooldown to everyone;
 the full breakdown is control-operator only.
 
+## What the operator can do while it is running
+
+`RADIO QUEUE` answers "what has been accepted but not yet transmitted?", in
+the three places something can be waiting:
+
+```
+-!- transmit queue: 4 frame(s), 18.2s of airtime, next slot in 0.0s (budget 60s)
+-!- Per-station (reliable, awaiting ACK):
+-!-   SM0ABC-7: 2 message(s) awaiting acknowledgement, 0 dropped
+-!- Held for stations out of range: 3 message(s). Refused for backlog since
+    start: 11. Dropped at the transmitter: 0.
+```
+
+`RADIO LIMIT` retunes the station without a restart, because the situations
+that call for it are live ones — the band opened, the finals are hot, somebody
+else needs the frequency — and restarting the gateway drops every station on
+it:
+
+```
+/quote RADIO LIMIT DUTY 10          # down to 10% until further notice
+/quote RADIO LIMIT DUTY off         # back to the configured limit
+/quote RADIO LIMIT PACING 4000      # at least 4s between transmissions
+/quote RADIO LIMIT PACING off
+```
+
+Both are audited, both take effect on the next frame, and neither is written
+back to the configuration file — a restart returns to what is on disk. The
+duty override is clamped to the same 50 % ceiling as everything else: asking
+for 90 gets you 50 and a notice saying so. Pacing can only ever slow the
+station down; it cannot buy airtime the duty limit has not released.
+
+## When it is not safe to transmit at all
+
+ax25ircd cannot see your radio. It speaks KISS to a modem, and KISS carries
+frames, not telemetry — there is no SWR reading, no PA temperature and no power
+meter anywhere in that path. On a QMX the one port that could answer (CAT) is
+already held by Direwolf for PTT, and two processes cannot share a serial port.
+
+So the check is yours to supply:
+
+```toml
+[radio.interlock]
+command = "/usr/local/bin/check-swr"
+args = ["--max", "2.5"]
+interval_secs = 30
+timeout_secs = 5
+```
+
+The command runs on a timer. While it fails, **nothing is transmitted**. What
+it measures is your business: SWR from a separate meter, a temperature probe on
+the finals, a GPIO from a hardware interlock, "is the antenna switch on the
+dummy load", or a file somebody touches before climbing the tower.
+
+Two properties make this a safety feature rather than a status light:
+
+* **It fails closed.** A command that cannot be run, times out, or has not run
+  yet counts as a failure. The failure mode of an unreadable SWR meter is not
+  "assume it is fine".
+* **It blocks station identification too.** Identification otherwise bypasses
+  the inhibit, the pacing gate and the governor — but if it is not safe to key
+  up, it is not safe to key up for an ID either. A licence requires you to
+  identify the transmissions you make, not to make one.
+
+`RADIO STATUS` says so plainly when it is the interlock holding the station
+down, so it is never confused with `RADIO OFF`.
+
 ## Stopping it
 
 ```
@@ -260,6 +326,12 @@ This is the kill switch, and it is a real one:
 
 `RADIO ON` re-enables it. The airtime already spent is still counted — the
 window does not reset because you toggled the switch.
+
+The operator's switch and the safety interlock are deliberately separate flags
+and cannot undo each other: an interlock recovering does not cancel a
+`RADIO OFF`, and `RADIO ON` does not override a failing interlock. The one
+difference between them is the sign-off ID. `RADIO OFF` lets it through —
+that is the point of it — and a failing interlock does not.
 
 If you need something more forceful than that, stop the process: with
 `panic = "abort"` and no PTT of its own, ax25ircd cannot leave the radio keyed.

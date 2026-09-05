@@ -463,10 +463,15 @@ impl Server {
                 self.rf_join(src, &display);
             }
             let mut text = text;
+            let mut truncated = false;
             let mut repeat = self.config.radio.repeat_rf_traffic;
             if repeat {
                 match self.policy.screen_outbound(&text) {
-                    Verdict::Allow(t) | Verdict::Truncated(t) => text = t,
+                    Verdict::Allow(t) => text = t,
+                    Verdict::Truncated(t) => {
+                        text = t;
+                        truncated = true;
+                    }
                     Verdict::Deny(_) => repeat = false,
                 }
             }
@@ -476,6 +481,7 @@ impl Server {
                 target: display.clone(),
                 text,
                 notice,
+                truncated,
             };
             // Every station in range already heard this transmission. We only
             // repeat it if the operator has enabled store-and-forward for
@@ -490,8 +496,13 @@ impl Server {
             self.rf_error(src, "401", "no such nick");
             return;
         };
+        let mut truncated = false;
         let text = match self.policy.screen_outbound(&text) {
-            Verdict::Allow(t) | Verdict::Truncated(t) => t,
+            Verdict::Allow(t) => t,
+            Verdict::Truncated(t) => {
+                truncated = true;
+                t
+            }
             Verdict::Deny(_) => {
                 if target_id.is_rf() {
                     return;
@@ -505,6 +516,7 @@ impl Server {
             target: target.to_string(),
             text,
             notice,
+            truncated,
         };
         self.deliver(&target_id, &d);
     }

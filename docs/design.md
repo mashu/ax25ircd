@@ -108,8 +108,41 @@ path and no `Arc<Mutex<State>>`.
 This matters more than usual here, because the two sides have wildly different
 latencies (microseconds on TCP, seconds on RF) and a lock-based design would
 let a slow radio write block an IRC client. Instead the radio has a bounded
-transmit queue: when it fills, frames are dropped and counted, and the IRC side
-never notices.
+transmit queue: when it fills, frames are refused at admission and the sender
+is told, and the IRC side never waits.
+
+**"One task owns the state" is not "the server is single threaded."** The
+runtime is `rt-multi-thread`, and the work that scales with the number of
+clients is per-client:
+
+| Task | How many | What it does |
+|---|---|---|
+| Listener | one per `bind` address | accept, spawn |
+| Connection reader | one per client | socket → `Event` |
+| Connection writer | one per client | bounded queue → socket |
+| Server actor | exactly one | all state mutation |
+| TNC link | one | KISS framing, pacing, the airtime governor |
+| Argon2 | one per `REGISTER`/`IDENTIFY` | `spawn_blocking` |
+| Audit writer | one | `spawn_blocking`, batched appends |
+| Interlock | one, if configured | polls the safety command |
+
+So parsing, TLS-free socket I/O, line framing, password hashing and log writing
+all run on the thread pool in parallel; only the state transitions are
+serialised, and those are microseconds of `HashMap` work. The actor is a
+correctness decision — one ordering of events, no interleaving between the
+radio and the wire — not a throughput compromise.
+
+The rule that keeps it true: **nothing that can block goes in the actor.**
+Password hashing was moved to `spawn_blocking` and the audit log to its own
+writer task for exactly this reason. The one blocking call left is the nick
+database write on `REGISTER`, `RADIO GRANT` and `CALLSIGN` — a small file,
+written only on account changes, and rate-limited to six attempts a minute per
+host.
+
+`tests/concurrency.rs` checks the claim against real sockets rather than
+asserting it: a hundred clients registering and talking simultaneously, a
+client that stops reading, silent sockets that never register, and a
+connection flood from one address.
 
 ### 3.2 The `Delivery` type
 
@@ -228,7 +261,10 @@ can be smuggled onto the air by waiting.
 | Failure | Behaviour |
 |---|---|
 | TNC socket dies | reconnect with capped exponential backoff; IRC side unaffected |
-| Transmit queue full | frames dropped and counted; visible in `RADIO STATUS` |
+| Transmit queue full | new traffic refused at admission and the sender told why; visible in `RADIO QUEUE` |
+| Duty cycle or PA cooldown reached | frames deferred until airtime frees up, then dropped after `max_hold_secs` rather than transmitted stale |
+| Safety interlock fails or cannot be run | everything inhibited, station identification included; fails closed |
+| Audit writer falls behind | lines dropped and counted, never buffered without limit and never blocking the server |
 | Station stops answering | 3 retries, then the station is declared lost and its IRC presence quits with "Signal lost" |
 | Station goes quiet | removed after `peer_idle_timeout_secs` |
 | Corrupt frame from the air | logged in monitor format, ignored; never fatal |
@@ -236,8 +272,12 @@ can be smuggled onto the air by waiting.
 | Frame from an implausible callsign | ignored |
 | Someone floods from RF | token bucket drops the traffic; no reply is transmitted, because answering a flood with transmissions is how you jam your own channel |
 | Client never registers | dropped after `registration_timeout_secs` |
+| Client stops reading its socket | bounded output queue; the connection is dropped rather than buffered without limit |
+| Connection flood | capped per host and in total (`max_conns_per_host`, `max_clients`) |
+| Channels created and abandoned | user-created channels are reaped when the last member leaves; configured ones persist |
 | Message for a station that is out of range | held, bounded and expiring; delivered as `STORED` on next contact |
-| Control operator needs the transmitter off *now* | `RADIO OFF` — IRC keeps running |
+| Control operator needs the transmitter off *now* | `RADIO OFF` — signs off with an ID, purges the queue, IRC keeps running |
+| Control operator needs it slower, not off | `RADIO LIMIT DUTY` / `RADIO LIMIT PACING`, effective on the next frame |
 
 ## 8. Operating it
 

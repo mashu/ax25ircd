@@ -27,7 +27,11 @@ max_channels_per_user = 20
 bind = ["127.0.0.1:6667"]
 ping_interval_secs = 120
 registration_timeout_secs = 60
+# Simultaneous connections from one address, and in total. Both matter: the
+# per-host cap alone bounds nothing, because an attacker with a hundred source
+# addresses is under it on every one of them. 0 disables either cap.
 max_conns_per_host = 8
+max_clients = 256
 
 [logging]
 # Extra copy of tracing output. stderr/journald still get the same lines.
@@ -102,6 +106,23 @@ mailbox_flush_batch = 1
 # are never sent unasked — joining a channel does not read out the roll.
 rf_names_max = 8
 
+# External transmit interlock: a command that decides whether it is safe to
+# key up at all. ax25ircd cannot see the radio — it speaks KISS to a modem,
+# and KISS carries frames, not SWR readings — so this check is yours to
+# supply. Point it at an SWR meter, a temperature probe on the finals, a GPIO
+# from a hardware interlock, or a file somebody touches before climbing the
+# tower.
+#
+# While it fails, NOTHING is transmitted, station identification included.
+# It fails closed: a command that cannot be run, times out, or has not run
+# yet counts as a failure.
+#
+# [radio.interlock]
+# command = "/usr/local/bin/check-swr"
+# args = ["--max", "2.5"]
+# interval_secs = 30
+# timeout_secs = 5
+
 [radio.tnc]
 # "tcp" (Direwolf, ax25-tools KISS-over-TCP), "serial" (needs --features
 # serial), or "loopback" for a dry run that transmits nothing.
@@ -116,8 +137,13 @@ kiss_port = 0
 # one second of airtime, so leave room for everyone else.
 tx_pacing_ms = 1500
 
-# Optional KISS parameters pushed to the TNC at connect.
-# txdelay = 30
+# Channel-access parameters pushed to the TNC at connect. TXDELAY and TXTAIL
+# are NOT here: they are key-down time, the airtime governor has to know them
+# to price a frame, and two places to write the same physical quantity is two
+# places to get it wrong. They live in [radio.duty] below and are pushed from
+# there, so the model and the hardware cannot disagree. Full duplex is always
+# forced off — a TNC that transmits without listening first is the one thing
+# none of this can protect you from.
 # persistence = 63
 # slottime = 10
 
@@ -147,7 +173,11 @@ tx_pacing_ms = 1500
 [radio.duty]
 enabled = true
 baud = 300
-# Match these to the TNC's TXDELAY/TXTAIL: they are real key-down time.
+# Real key-down time either side of the data, and the single source of truth
+# for it: these are pushed to the TNC as the KISS TXDELAY and TXTAIL
+# parameters at connect, so what the governor prices and what the modem does
+# are the same numbers. KISS carries them in 10 ms units, so 2550 ms is the
+# ceiling.
 txdelay_ms = 400
 txtail_ms = 300
 window_secs = 600

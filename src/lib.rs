@@ -23,6 +23,7 @@ pub mod audit;
 pub mod bridge;
 pub mod callsign;
 pub mod config;
+pub mod interlock;
 pub mod irc;
 pub mod policy;
 pub mod server;

@@ -176,6 +176,12 @@ impl Harness {
                 Ok(Ok(0)) | Err(_) => break,
                 Ok(Ok(n)) => {
                     for kf in self.decoder.push(&buf[..n]) {
+                        // The gateway also pushes KISS parameter frames
+                        // (TXDELAY, TXTAIL, full-duplex off) at connect. Only
+                        // data frames carry AX.25.
+                        if kf.command != kiss::CMD_DATA {
+                            continue;
+                        }
                         let ax = Ax25Frame::decode(&kf.payload).unwrap();
                         if let Ok(airc) = AircFrame::decode(&ax.info) {
                             out.push((ax, airc));
@@ -919,5 +925,148 @@ async fn a_full_backlog_is_refused_out_loud_not_dropped_silently() {
             .iter()
             .any(|l| l.contains("transmit queue") || l.contains("Queued for RF")),
         "the sender was told nothing about what happened to their message: {lines:?}"
+    );
+}
+
+
+#[tokio::test]
+async fn the_safety_interlock_stops_everything_including_identification() {
+    let mut h = Harness::new().await;
+    h.oper_and_callsign();
+    h.send("JOIN #rf");
+    h.station_transmits("SM0ABC-7", AircFrame::new(Kind::Hello, 1, Vec::new()))
+        .await;
+    h.drain_client();
+    let _ = h.transmitted().await;
+
+    // An SWR check (or a temperature probe, or a tower interlock) has failed.
+    h.server
+        .airtime()
+        .unwrap()
+        .interlock_ok
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    h.send("PRIVMSG #rf :is anyone there");
+    h.send("RADIO ID");
+    assert!(
+        h.transmitted().await.is_empty(),
+        "the interlock must stop identification too: if it is not safe to key up,          it is not safe to key up for an ID"
+    );
+    h.drain_client();
+    h.send("RADIO STATUS");
+    let lines = h.drain_client();
+    assert!(
+        lines.iter().any(|l| l.contains("interlock")),
+        "the operator should be told why nothing is going out: {lines:?}"
+    );
+
+    // Interlock recovers; the station transmits again.
+    h.server
+        .airtime()
+        .unwrap()
+        .interlock_ok
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    h.send("RADIO ID");
+    assert!(
+        h.transmitted()
+            .await
+            .iter()
+            .any(|(_, f)| f.kind == Kind::Id),
+        "transmitting should resume once the interlock passes"
+    );
+}
+
+#[tokio::test]
+async fn opers_can_see_the_unsent_queue_and_retune_the_limits() {
+    let mut h = Harness::new().await;
+    h.oper_and_callsign();
+    h.drain_client();
+
+    h.send("RADIO QUEUE");
+    let lines = h.drain_client();
+    assert!(
+        lines.iter().any(|l| l.contains("transmit queue")),
+        "RADIO QUEUE should report the transmit backlog: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("Held for stations out of range")),
+        "RADIO QUEUE should account for held mail too: {lines:?}"
+    );
+
+    // Turn the duty cycle down mid-session.
+    h.send("RADIO LIMIT DUTY 10");
+    let lines = h.drain_client();
+    assert!(lines.iter().any(|l| l.contains("10%")), "{lines:?}");
+    assert_eq!(
+        h.server.airtime().unwrap().duty_limit(0.25),
+        0.10,
+        "the override should be in force"
+    );
+
+    // Asking for more than the ceiling gets the ceiling.
+    h.send("RADIO LIMIT DUTY 90");
+    h.drain_client();
+    assert_eq!(h.server.airtime().unwrap().duty_limit(0.25), 0.5);
+
+    h.send("RADIO LIMIT DUTY off");
+    h.drain_client();
+    assert_eq!(h.server.airtime().unwrap().duty_limit(0.25), 0.25);
+}
+
+#[tokio::test]
+async fn a_non_oper_cannot_retune_the_transmitter() {
+    let mut h = Harness::new().await;
+    h.send("CALLSIGN SM0XYZ");
+    h.drain_client();
+    h.send("RADIO LIMIT DUTY 50");
+    h.send("RADIO QUEUE");
+    let lines = h.drain_client();
+    assert!(
+        lines.iter().filter(|l| l.contains(" 481 ")).count() >= 2,
+        "both should need control-operator privilege: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn user_created_channels_do_not_accumulate() {
+    let mut h = Harness::new().await;
+    h.drain_client();
+    let before = h.server.state.channels.len();
+    for i in 0..15 {
+        h.send(&format!("JOIN #scratch{i}"));
+    }
+    assert!(h.server.state.channels.len() > before);
+    h.server.handle(Event::Disconnected {
+        id: 1,
+        reason: "gone".into(),
+    });
+    assert_eq!(
+        h.server.state.channels.len(),
+        before,
+        "channels created with JOIN must not outlive their last member"
+    );
+    assert!(
+        h.server.state.channel("#rf").is_some() && h.server.state.channel("#local").is_some(),
+        "configured channels must survive being empty"
+    );
+}
+
+#[tokio::test]
+async fn the_server_is_capped_in_total_not_just_per_host() {
+    let toml = CONFIG.replace("bind = []", "bind = []\nmax_clients = 4");
+    let mut h = Harness::from_toml(&toml).await;
+    h.drain_client();
+    // Each from a different host, so only the global cap can stop them.
+    let mut accepted = 0;
+    for i in 0..10u64 {
+        let mut rx = h.connect_extra(50 + i, &format!("guest_{i}"));
+        let lines = drain_rx(&mut rx);
+        if !lines.iter().any(|l| l.contains("Server is full")) {
+            accepted += 1;
+        }
+    }
+    assert!(
+        accepted < 10,
+        "a distributed connection flood is under the per-host limit on every host"
     );
 }

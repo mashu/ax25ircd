@@ -59,6 +59,13 @@ pub struct ListenConfig {
     /// Simultaneous IP connections from one host. 0 disables the cap.
     #[serde(default = "default_max_conns_per_host")]
     pub max_conns_per_host: u32,
+    /// Simultaneous IP connections in total. 0 disables the cap.
+    ///
+    /// `max_conns_per_host` alone does not bound anything: an attacker with a
+    /// hundred source addresses is under the per-host limit on every one of
+    /// them. This is the limit that actually caps memory.
+    #[serde(default = "default_max_clients")]
+    pub max_clients: usize,
 }
 
 impl Default for ListenConfig {
@@ -68,6 +75,7 @@ impl Default for ListenConfig {
             ping_interval_secs: default_ping_interval(),
             registration_timeout_secs: default_registration_timeout(),
             max_conns_per_host: default_max_conns_per_host(),
+            max_clients: default_max_clients(),
         }
     }
 }
@@ -148,11 +156,45 @@ pub struct RadioConfig {
     /// Member lists are never sent unasked.
     #[serde(default = "default_rf_names_max")]
     pub rf_names_max: usize,
+    /// External transmit interlock: a command that decides whether it is safe
+    /// to key up at all. See [`InterlockConfig`].
+    #[serde(default)]
+    pub interlock: Option<InterlockConfig>,
     /// Airtime and duty-cycle limits. These protect the transmitter's finals
     /// and the shared channel; they are not the same thing as the per-user
     /// rate limits in `[policy]`.
     #[serde(default)]
     pub duty: DutyConfig,
+}
+
+/// A command that says whether it is safe to transmit.
+///
+/// ax25ircd cannot see the radio — it speaks KISS to a modem, and KISS carries
+/// frames, not SWR readings — so the check is the operator's to supply. While
+/// it fails, nothing is transmitted, station identification included.
+///
+/// The check fails closed: a command that cannot be run, times out, or has
+/// not run yet counts as a failure.
+///
+/// ```toml
+/// [radio.interlock]
+/// command = "/usr/local/bin/check-swr"
+/// args = ["--max", "2.5"]
+/// interval_secs = 30
+/// timeout_secs = 5
+/// ```
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InterlockConfig {
+    /// Executable to run. Not a shell line: use `sh -c "..."` in `args` if
+    /// you want shell syntax.
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default = "default_interlock_interval")]
+    pub interval_secs: u64,
+    #[serde(default = "default_interlock_timeout")]
+    pub timeout_secs: u64,
 }
 
 /// Transmitter airtime limits. Defaults are sized for a QRP HF station
@@ -167,9 +209,14 @@ pub struct DutyConfig {
     /// On-air symbol rate. 300 for HF SSB packet, 1200 for VHF FM.
     #[serde(default = "default_duty_baud")]
     pub baud: u32,
-    /// Keyed-but-idle time either side of the data, in milliseconds. These
-    /// should match the TNC's TXDELAY/TXTAIL: they are real key-down time and
-    /// at 300 baud they are a significant fraction of a short frame.
+    /// Keyed-but-idle time either side of the data, in milliseconds.
+    ///
+    /// This is the single source of truth for the station's key-up timing: the
+    /// governor prices every frame with it, *and* it is pushed to the TNC as
+    /// the KISS TXDELAY and TXTAIL parameters at connect, so the model and the
+    /// hardware cannot disagree. At 300 baud these are a significant fraction
+    /// of a short frame. KISS carries them in 10 ms units, so the ceiling is
+    /// 2550 ms.
     #[serde(default = "default_txdelay_ms")]
     pub txdelay_ms: u64,
     #[serde(default = "default_txtail_ms")]
@@ -254,8 +301,12 @@ pub struct TncSection {
     pub kiss_port: u8,
     #[serde(default = "default_tx_pacing")]
     pub tx_pacing_ms: u64,
-    #[serde(default)]
-    pub txdelay: Option<u8>,
+    /// KISS channel-access parameters, pushed to the TNC at connect.
+    ///
+    /// TXDELAY and TXTAIL are deliberately *not* here: they are key-down time,
+    /// the governor has to know them to price a frame, and two places to write
+    /// the same physical quantity is two places to get it wrong. They live in
+    /// `[radio.duty]` and are pushed from there.
     #[serde(default)]
     pub persistence: Option<u8>,
     #[serde(default)]
@@ -272,7 +323,6 @@ impl Default for TncSection {
             baud: default_baud(),
             kiss_port: 0,
             tx_pacing_ms: default_tx_pacing(),
-            txdelay: None,
             persistence: None,
             slottime: None,
         }
@@ -473,6 +523,22 @@ impl Config {
         if self.radio.max_queued_airtime_secs == 0 {
             anyhow::bail!("radio.max_queued_airtime_secs must be at least 1");
         }
+        if let Some(i) = &self.radio.interlock {
+            if i.command.trim().is_empty() {
+                anyhow::bail!("radio.interlock.command must be set");
+            }
+            if i.interval_secs == 0 || i.timeout_secs == 0 {
+                anyhow::bail!("radio.interlock interval_secs and timeout_secs must be at least 1");
+            }
+            if i.timeout_secs >= i.interval_secs {
+                anyhow::bail!(
+                    "radio.interlock.timeout_secs ({}) must be less than interval_secs ({}), \
+                     or checks would overlap",
+                    i.timeout_secs,
+                    i.interval_secs
+                );
+            }
+        }
         if self.channels.iter().all(|c| !c.rf) {
             anyhow::bail!("radio.enabled is true but no channel has rf = true");
         }
@@ -502,6 +568,19 @@ impl Config {
             }
             if duty.baud == 0 {
                 anyhow::bail!("radio.duty.baud must be at least 1");
+            }
+            // These are pushed to the TNC as KISS parameters, which carry them
+            // in 10 ms units in a single octet.
+            for (name, v) in [
+                ("txdelay_ms", duty.txdelay_ms),
+                ("txtail_ms", duty.txtail_ms),
+            ] {
+                if v > 2550 {
+                    anyhow::bail!(
+                        "radio.duty.{name} is {v} ms; KISS carries it in 10 ms units in one \
+                         octet, so the maximum is 2550"
+                    );
+                }
             }
             let air = duty.to_airtime();
             // The window average is only half the story: the run and cooldown
@@ -634,6 +713,9 @@ fn default_true() -> bool {
 fn default_max_conns_per_host() -> u32 {
     8
 }
+fn default_max_clients() -> usize {
+    256
+}
 fn default_rf_channel_msgs() -> u32 {
     10
 }
@@ -696,6 +778,12 @@ fn default_rf_names_max() -> usize {
 }
 fn default_mailbox_flush_batch() -> usize {
     1
+}
+fn default_interlock_interval() -> u64 {
+    30
+}
+fn default_interlock_timeout() -> u64 {
+    5
 }
 fn default_max_rf_fragments() -> usize {
     2

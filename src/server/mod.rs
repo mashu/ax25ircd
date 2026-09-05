@@ -81,6 +81,10 @@ pub enum Delivery {
         target: String,
         text: String,
         notice: bool,
+        /// The text was shortened by a policy limit before transmission. IRC
+        /// clients see the ellipsis; RF stations get the protocol's
+        /// `TRUNCATED` flag as well, so a station can render it distinctly.
+        truncated: bool,
     },
     Join {
         nick: String,
@@ -200,6 +204,7 @@ impl Server {
         let mut state = State::default();
         for ch in &config.channels {
             let chan = state.ensure_channel(&ch.name, ch.rf);
+            chan.configured = true;
             if !ch.topic.is_empty() {
                 chan.topic = Some(ch.topic.clone());
                 chan.topic_setter = config.server.name.clone();
@@ -291,18 +296,30 @@ impl Server {
                 out,
                 hangup,
             } => {
-                let cap = self.config.listen.max_conns_per_host;
-                if cap > 0 && self.state.ip_count_from_host(&host) >= cap as usize {
-                    let _ = out.try_send(format!(
-                        "ERROR :Too many connections from {host} (max {cap})"
-                    ));
+                // Two caps, because the per-host one bounds nothing on its
+                // own: an attacker with a hundred source addresses is under it
+                // on every one of them.
+                let total = self.config.listen.max_clients;
+                let per_host = self.config.listen.max_conns_per_host;
+                let refuse = if total > 0 && self.state.ip_users() >= total {
+                    Some(("max_clients", format!("ERROR :Server is full (max {total} clients)")))
+                } else if per_host > 0
+                    && self.state.ip_count_from_host(&host) >= per_host as usize
+                {
+                    Some((
+                        "max_conns_per_host",
+                        format!("ERROR :Too many connections from {host} (max {per_host})"),
+                    ))
+                } else {
+                    None
+                };
+                if let Some((reason, message)) = refuse {
+                    let _ = out.try_send(message);
                     if let Some(h) = hangup {
                         let _ = h.send(());
                     }
-                    self.audit.event(
-                        "connect_denied",
-                        &[("host", &host), ("reason", "max_conns_per_host")],
-                    );
+                    self.audit
+                        .event("connect_denied", &[("host", &host), ("reason", reason)]);
                     return;
                 }
                 self.outputs.insert(id, IpLink { out, hangup });
@@ -447,7 +464,7 @@ impl Server {
         // automatically controlled station.
         self.id_if_needed();
         for id in self.outputs.keys().copied().collect::<Vec<_>>() {
-            self.send_raw(id, format!("ERROR :Server shutting down"));
+            self.send_raw(id, "ERROR :Server shutting down".to_string());
         }
     }
 
@@ -495,11 +512,6 @@ impl Server {
         }
     }
 
-    pub fn send_to(&mut self, uid: &UserId, msg: Message) {
-        if let UserId::Ip(id) = uid {
-            self.send_raw(*id, msg.to_string());
-        }
-    }
 
     /// Send a numeric reply. RF users never receive numerics: they are pure
     /// airtime with no information a small screen needs.
@@ -560,16 +572,22 @@ impl Server {
                 target,
                 text,
                 notice,
+                truncated,
                 ..
             } => {
                 let kind = if *notice { Kind::Notice } else { Kind::Msg };
                 let payload = encode_fields(&[target, from_nick, text]);
+                let flags = if *truncated {
+                    crate::airc::frame::flags::TRUNCATED
+                } else {
+                    0
+                };
                 // Channel traffic goes out once as a broadcast; a private
                 // message is unicast and acknowledged.
                 if target.starts_with('#') || target.starts_with('&') {
-                    self.broadcast(kind, payload, TxClass::Chat);
+                    self.broadcast_flagged(kind, payload, TxClass::Chat, flags);
                 } else {
-                    self.unicast(call, kind, payload, true, TxClass::Direct);
+                    self.unicast_flagged(call, kind, payload, true, TxClass::Direct, flags);
                 }
             }
             // Presence is off by default and is the lowest-value traffic
@@ -671,6 +689,19 @@ impl Server {
     /// Unreliable one-to-many transmission addressed to the protocol's
     /// destination address. Every station in range hears it once.
     pub fn broadcast(&mut self, kind: Kind, payload: Vec<u8>, class: TxClass) {
+        self.broadcast_flagged(kind, payload, class, 0)
+    }
+
+    /// As [`Server::broadcast`], with AIRC frame flags — currently only
+    /// [`crate::airc::frame::flags::TRUNCATED`], so a receiving station can
+    /// show that it is not seeing the whole message.
+    pub fn broadcast_flagged(
+        &mut self,
+        kind: Kind,
+        payload: Vec<u8>,
+        class: TxClass,
+        flags: u8,
+    ) {
         if !self.rf_available() {
             return;
         }
@@ -693,7 +724,7 @@ impl Server {
             .parse()
             .unwrap_or_else(|_| "AIRC".parse().unwrap());
         for (i, chunk) in chunks.into_iter().enumerate() {
-            let mut f = AircFrame::new(kind, seq, chunk);
+            let mut f = AircFrame::new(kind, seq, chunk).with_flags(flags);
             f.frag_index = i as u8;
             f.frag_total = total;
             self.transmit_direct(&dest, f, class);
@@ -708,6 +739,19 @@ impl Server {
         payload: Vec<u8>,
         reliable: bool,
         class: TxClass,
+    ) {
+        self.unicast_flagged(dst, kind, payload, reliable, class, 0)
+    }
+
+    /// As [`Server::unicast`], with extra AIRC frame flags.
+    pub fn unicast_flagged(
+        &mut self,
+        dst: &Callsign,
+        kind: Kind,
+        payload: Vec<u8>,
+        reliable: bool,
+        class: TxClass,
+        flags: u8,
     ) {
         if !self.rf_available() {
             return;
@@ -724,7 +768,7 @@ impl Server {
         let now = Instant::now();
         let frames = self.sessions.send(dst, kind, payload, reliable, now);
         for f in frames {
-            self.transmit_direct(dst, f, class);
+            self.transmit_direct(dst, f.with_flags(flags), class);
         }
     }
 
@@ -833,7 +877,12 @@ impl Server {
         for m in messages {
             let age = m.age(now).as_secs().to_string();
             let payload = encode_fields(&[&nick, &m.from, &m.text, &age]);
-            self.unicast(call, Kind::Stored, payload, true, TxClass::Direct);
+            let flags = if m.truncated {
+                crate::airc::frame::flags::TRUNCATED
+            } else {
+                0
+            };
+            self.unicast_flagged(call, Kind::Stored, payload, true, TxClass::Direct, flags);
         }
         let remaining = depth.saturating_sub(sent);
         if remaining > 0 {
@@ -969,9 +1018,6 @@ impl Server {
         self.state.by_nick(name).map(|u| u.id.clone())
     }
 
-    pub fn is_rf_channel(&self, name: &str) -> bool {
-        self.state.channel(name).map(|c| c.rf).unwrap_or(false)
-    }
 
     /// May this IP user have a message radiated? RF stations always may:
     /// they are already on the air. An IP user needs RF-TX (OPER, or IDENTIFY
@@ -1005,9 +1051,6 @@ impl Server {
         }
     }
 
-    pub fn channel_key(&self, name: &str) -> String {
-        lower(name)
-    }
 
     pub fn is_chanop(&self, uid: &UserId, channel: &str) -> bool {
         if self.state.user(uid).map(|u| u.oper).unwrap_or(false) {
@@ -1031,7 +1074,13 @@ impl Server {
                 "Radio gateway: transmitter OFF. Station {call}. Nothing is being radiated."
             );
         }
-        if !self.tnc.is_some() {
+        if self.airtime().map(|a| a.interlock_failed()).unwrap_or(false) {
+            return format!(
+                "Radio gateway: station {call}, transmitter BLOCKED by the safety interlock. \
+                 Nothing is being radiated, including station identification."
+            );
+        }
+        if self.tnc.is_none() {
             return format!("Radio gateway: no TNC. Station {call}. Nothing is being radiated.");
         }
         let duty = self

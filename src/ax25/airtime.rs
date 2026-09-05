@@ -139,11 +139,19 @@ impl DeferReason {
 /// Plain atomics rather than a lock: the writer is one task, the readers only
 /// ever want a recent snapshot, and nothing here is worth blocking the event
 /// loop for.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AirtimeShared {
     /// Hard transmit inhibit. `RADIO OFF` sets this, and the TNC task then
     /// discards whatever is already queued instead of radiating it later.
     pub inhibit: AtomicBool,
+    /// The external safety interlock is satisfied. Separate from `inhibit` so
+    /// the two cannot undo each other: an interlock recovering must not cancel
+    /// a control operator's `RADIO OFF`, and an operator saying `RADIO ON`
+    /// must not override a failing interlock.
+    ///
+    /// Defaults to true so a gateway with no interlock configured transmits
+    /// normally; [`crate::interlock::spawn`] clears it before the first check.
+    pub interlock_ok: AtomicBool,
     /// Airtime in the sliding duty window, and the window length.
     pub window_ms: AtomicU64,
     pub window_span_ms: AtomicU64,
@@ -163,6 +171,18 @@ pub struct AirtimeShared {
     /// Incremented when a frame is queued and decremented when it leaves,
     /// so it is maintained from both sides.
     pub queued_ms: AtomicU64,
+    /// The same backlog counted in frames, which is what an operator asking
+    /// "how much is still waiting to go out?" actually wants to know.
+    pub queued_frames: AtomicU64,
+    /// Control-operator overrides, applied by the TNC task before each
+    /// decision. Zero means "use the configured value".
+    ///
+    /// Runtime knobs rather than a config reload because the situation they
+    /// answer to is a live one — the band opened, the finals are hot, someone
+    /// else needs the frequency — and restarting the gateway to turn the duty
+    /// cycle down drops every station on it.
+    pub duty_pct_override: AtomicU64,
+    pub pacing_ms_override: AtomicU64,
     /// Frames refused admission because the backlog was already too long.
     pub rejected_backlog: AtomicU64,
     /// Frames held back at least once, and frames given up on.
@@ -171,7 +191,47 @@ pub struct AirtimeShared {
     pub dropped_inhibited: AtomicU64,
 }
 
+impl Default for AirtimeShared {
+    fn default() -> Self {
+        Self {
+            // No interlock configured means nothing is holding the
+            // transmitter down; `interlock::spawn` clears this if there is.
+            interlock_ok: AtomicBool::new(true),
+            inhibit: AtomicBool::new(false),
+            window_ms: AtomicU64::new(0),
+            window_span_ms: AtomicU64::new(0),
+            hour_ms: AtomicU64::new(0),
+            hour_budget_ms: AtomicU64::new(0),
+            run_ms: AtomicU64::new(0),
+            cooling_ms: AtomicU64::new(0),
+            total_ms: AtomicU64::new(0),
+            next_slot_ms: AtomicU64::new(0),
+            queued_ms: AtomicU64::new(0),
+            queued_frames: AtomicU64::new(0),
+            duty_pct_override: AtomicU64::new(0),
+            pacing_ms_override: AtomicU64::new(0),
+            rejected_backlog: AtomicU64::new(0),
+            deferred: AtomicU64::new(0),
+            dropped_stale: AtomicU64::new(0),
+            dropped_inhibited: AtomicU64::new(0),
+        }
+    }
+}
+
 impl AirtimeShared {
+    /// Nothing may be transmitted: the operator has inhibited the station, or
+    /// the external safety interlock is not satisfied. Both block station
+    /// identification too — a station that must not transmit must not
+    /// transmit, and a licence requires you to identify the transmissions you
+    /// make, not to make one.
+    pub fn tx_blocked(&self) -> bool {
+        self.inhibit.load(Ordering::Relaxed) || !self.interlock_ok.load(Ordering::Relaxed)
+    }
+
+    pub fn interlock_failed(&self) -> bool {
+        !self.interlock_ok.load(Ordering::Relaxed)
+    }
+
     /// Estimated wait before a frame queued right now reaches the air:
     /// the governor's next free slot plus everything already in the queue.
     pub fn eta(&self) -> Duration {
@@ -182,6 +242,43 @@ impl AirtimeShared {
 
     pub fn queued(&self) -> Duration {
         Duration::from_millis(self.queued_ms.load(Ordering::Relaxed))
+    }
+
+    pub fn queued_frame_count(&self) -> u64 {
+        self.queued_frames.load(Ordering::Relaxed)
+    }
+
+    /// Duty target in force right now: the operator's override if they set
+    /// one, otherwise the configured value. Always within the hard ceiling.
+    pub fn duty_limit(&self, configured: f64) -> f64 {
+        match self.duty_pct_override.load(Ordering::Relaxed) {
+            0 => configured,
+            pct => pct as f64 / 100.0,
+        }
+        .clamp(0.0, HARD_MAX_DUTY)
+    }
+
+    /// Set or clear the duty override. Returns the value actually stored,
+    /// which may be lower than asked for: the ceiling is not negotiable.
+    pub fn set_duty_override(&self, percent: Option<u32>) -> Option<u32> {
+        let stored = match percent {
+            None | Some(0) => 0,
+            Some(p) => u64::from(p.min((HARD_MAX_DUTY * 100.0) as u32)),
+        };
+        self.duty_pct_override.store(stored, Ordering::Relaxed);
+        (stored > 0).then_some(stored as u32)
+    }
+
+    pub fn set_pacing_override(&self, ms: Option<u64>) {
+        self.pacing_ms_override
+            .store(ms.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    pub fn pacing(&self, configured: Duration) -> Duration {
+        match self.pacing_ms_override.load(Ordering::Relaxed) {
+            0 => configured,
+            ms => Duration::from_millis(ms),
+        }
     }
 
     pub fn duty_percent(&self) -> f64 {
@@ -206,9 +303,10 @@ impl AirtimeShared {
             s.push_str(&format!(" (budget {}s)", budget / 1000));
         }
         s.push_str(&format!(
-            "; {:.1}s queued ({:.1}s until the next slot); total keyed {}s; \
+            "; {} frame(s) / {:.1}s queued ({:.1}s until the next slot); total keyed {}s; \
              {} frames deferred, {} refused as backlog, {} dropped stale, \
              {} dropped while inhibited",
+            self.queued_frames.load(Ordering::Relaxed),
             self.queued_ms.load(Ordering::Relaxed) as f64 / 1000.0,
             self.next_slot_ms.load(Ordering::Relaxed) as f64 / 1000.0,
             self.total_ms.load(Ordering::Relaxed) / 1000,
@@ -220,8 +318,19 @@ impl AirtimeShared {
         if cooling > 0 {
             s.push_str(&format!("; PA cooling for another {}s", cooling / 1000));
         }
+        let over = self.duty_pct_override.load(Ordering::Relaxed);
+        if over > 0 {
+            s.push_str(&format!("; duty overridden to {over}% by a control operator"));
+        }
+        let pacing = self.pacing_ms_override.load(Ordering::Relaxed);
+        if pacing > 0 {
+            s.push_str(&format!("; pacing overridden to {pacing}ms"));
+        }
         if self.inhibit.load(Ordering::Relaxed) {
-            s.push_str("; TRANSMIT INHIBITED");
+            s.push_str("; TRANSMIT INHIBITED by a control operator");
+        }
+        if self.interlock_failed() {
+            s.push_str("; TRANSMIT BLOCKED by the safety interlock");
         }
         s
     }
@@ -262,6 +371,11 @@ impl Governor {
 
     pub fn config(&self) -> &AirtimeConfig {
         &self.cfg
+    }
+
+    /// Apply a control operator's live duty override.
+    pub fn set_duty(&mut self, duty: f64) {
+        self.cfg.max_duty = duty;
     }
 
     /// Airtime permitted inside one duty window.
@@ -722,6 +836,22 @@ mod tests {
                 "duty {duty:.3} in the window starting at {start_s}s exceeds the {HARD_MAX_DUTY} ceiling"
             );
         }
+    }
+
+    #[test]
+    fn an_override_can_lower_the_duty_but_never_raise_it_past_the_ceiling() {
+        let shared = AirtimeShared::default();
+        assert_eq!(shared.duty_limit(0.25), 0.25, "no override, configured value");
+
+        assert_eq!(shared.set_duty_override(Some(10)), Some(10));
+        assert_eq!(shared.duty_limit(0.25), 0.10);
+
+        // Asking for more than the ceiling gets the ceiling, not the ask.
+        assert_eq!(shared.set_duty_override(Some(90)), Some(50));
+        assert_eq!(shared.duty_limit(0.25), HARD_MAX_DUTY);
+
+        assert_eq!(shared.set_duty_override(None), None);
+        assert_eq!(shared.duty_limit(0.25), 0.25);
     }
 
     #[test]

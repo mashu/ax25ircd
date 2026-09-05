@@ -342,7 +342,6 @@ async fn main() -> anyhow::Result<()> {
         max_frame: args.paclen + 64,
         tx_pacing: Duration::from_millis(800),
         tx_queue_depth: 32,
-        txdelay: None,
         persistence: None,
         slottime: None,
         // A station client is a human typing, not an automatically

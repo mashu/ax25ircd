@@ -55,11 +55,6 @@ impl Ax25Frame {
         self.control & 0xEF == CONTROL_UI
     }
 
-    /// True if every digipeater in the path has already repeated the frame,
-    /// i.e. the frame has completed its path and is addressed to us directly.
-    pub fn path_exhausted(&self) -> bool {
-        self.digipeaters.iter().all(|d| d.c_bit)
-    }
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(ADDRESS_LEN * (2 + self.digipeaters.len()) + 2 + self.info.len());
