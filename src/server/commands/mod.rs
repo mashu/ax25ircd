@@ -5,7 +5,9 @@
 //! Local extensions:
 //!
 //! * `CALLSIGN <call>` — claim an amateur callsign (`+v` on `+r` channels).
-//!   Required before an IP user's traffic can be radiated; not authentication.
+//!   Required before an IP user's traffic can be radiated; not proof of
+//!   licence. `REGISTER` binds the claim to the nick so nobody else can take
+//!   it.
 //! * `RADIO <subcommand>` — transmitter status for everyone; the limits, the
 //!   grants and the kill switch for control operators.
 //!
@@ -33,6 +35,20 @@ pub(crate) struct Screened {
     pub truncated: bool,
 }
 use super::Server;
+
+/// Commands a listen-only (plaintext, off-box) connection may issue.
+///
+/// They may watch a channel. They may not send text, a password, a callsign
+/// claim, or anything that keys or retunes the transmitter.
+fn listen_only_command(cmd: &str, msg: &Message) -> bool {
+    match cmd {
+        "CAP" | "NICK" | "USER" | "QUIT" | "PING" | "PONG" | "JOIN" | "PART" | "NAMES" | "LIST"
+        | "WHO" | "WHOIS" | "MOTD" | "LUSERS" | "AWAY" | "RADIO" => true,
+        "MODE" => msg.param(1).is_none(),
+        "TOPIC" => msg.param(1).is_none(),
+        _ => false,
+    }
+}
 
 impl Server {
     pub fn handle_client_message(&mut self, id: ClientId, msg: Message) {
@@ -64,6 +80,23 @@ impl Server {
             )
         {
             self.numeric(&uid, num::ERR_NOTREGISTERED, &["You have not registered"]);
+            return;
+        }
+
+        let listen_only = self
+            .state
+            .user(&uid)
+            .map(|u| u.listen_only)
+            .unwrap_or(false);
+        if listen_only && !listen_only_command(cmd, &msg) {
+            self.numeric(
+                &uid,
+                num::ERR_RESTRICTED,
+                &[
+                    cmd,
+                    "This connection is listen-only. Connect with TLS to speak, identify, or control the radio.",
+                ],
+            );
             return;
         }
 
@@ -134,6 +167,13 @@ impl Server {
             "RADIO" => self.cmd_radio(&uid, &msg),
             "KICK" => self.cmd_kick(&uid, &msg),
             "KILL" => self.cmd_kill(&uid, &msg),
+            "ACCOUNTS" => self.cmd_accounts(&uid),
+            "DROPNICK" => self.cmd_dropnick(&uid, &msg),
+            "UNCLAIM" => self.cmd_unclaim(&uid, &msg),
+            "KLINE" => self.cmd_kline(&uid, &msg),
+            "UNKLINE" => self.cmd_unkline(&uid, &msg),
+            "KLINES" => self.cmd_klines(&uid),
+            "PASSWD" => self.cmd_passwd(&uid, &msg),
             "REGISTER" => self.cmd_register(&uid, &msg),
             "IDENTIFY" => self.cmd_identify(&uid, &msg),
             "UNREGISTER" => self.cmd_unregister(&uid, &msg),
@@ -144,8 +184,6 @@ impl Server {
     }
 
     // ------------------------------------------------------- registration
-
-    // ------------------------------------------------------------ channels
 
     /// The key an airtime rate limiter should count against.
     ///

@@ -13,7 +13,7 @@ motd = [
   "SK0MT packet gateway, 144.800 MHz, 1200 baud AFSK",
   "Channels marked +r are transmitted on the air in the clear.",
   "Identify with: /quote CALLSIGN SM0ABC",
-  "Keep a nick: /quote REGISTER <password>  then  IDENTIFY <password>",
+  "Keep nick and callsign: /quote REGISTER <password>  then  IDENTIFY <password>",
   "Air: a control operator must RADIO GRANT your registered nick. CALLSIGN is also required.",
 ]
 max_nick_len = 30
@@ -21,9 +21,10 @@ max_channels_per_user = 20
 # password = "optional connection password"
 
 [listen]
-# Bind to localhost and put a TLS terminator (or an SSH tunnel) in front of it
-# if you expose this to the Internet. TLS protects the IP hop only: everything
-# that reaches the air is, and must be, in the clear.
+# Plaintext. Connections from this machine (loopback) have full access — that
+# is the radio operator's console. Connections from anywhere else are
+# listen-only: they may join and watch, they may not speak, IDENTIFY, OPER,
+# or key the transmitter. Put internet users on [listen.tls].
 bind = ["127.0.0.1:6667"]
 ping_interval_secs = 120
 registration_timeout_secs = 60
@@ -33,6 +34,15 @@ registration_timeout_secs = 60
 max_conns_per_host = 8
 max_clients = 256
 
+# Implicit TLS (port 6697 in most clients). Required for anyone off this
+# machine who will speak, register, OPER, or control the radio. TLS protects
+# the IP hop only: everything that reaches the air is, and must be, in the
+# clear.
+# [listen.tls]
+# bind = ["0.0.0.0:6697"]
+# cert = "/etc/ax25ircd/fullchain.pem"
+# key = "/etc/ax25ircd/privkey.pem"
+
 [logging]
 # Extra copy of tracing output. stderr/journald still get the same lines.
 # file = "ax25ircd.log"
@@ -40,7 +50,8 @@ max_clients = 256
 # audit_file = "audit.log"
 
 [accounts]
-# Argon2id hashes of nick passwords. Created on first REGISTER.
+# Argon2id hashes of nick passwords, bound callsigns, RF-TX grants, and IP bans
+# (KLINE). Created on first REGISTER.
 file = "nicks.json"
 identify_timeout_secs = 60
 min_password_len = 8

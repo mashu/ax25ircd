@@ -102,14 +102,20 @@ Serial hardware TNCs: `cargo build --release --features serial` and
 Debian packages, groups, hamlib, 300 baud Direwolf, and first QSO:
 **[QMX on Debian](qmx.md)**. Do not use Digi mode.
 
-## IRC client cheat sheet
+## IRC client (irssi)
 
-| | |
-|---|---|
-| Host | `127.0.0.1` |
-| Port | `6667` |
-| Speak on `#rf` (IRC) | `/quote CALLSIGN YOURCALL` first |
-| Radiate from IRC | registered nick + `RADIO GRANT` (or `OPER`) + CALLSIGN |
-| On-air status | `/quote RADIO` |
-| Keep a nick | `/quote REGISTER <password>` then `/quote IDENTIFY <password>` |
-| Control operator | `/oper sm0abc change-me` then `RADIO GRANT` / `RADIO OFF` |
+On this machine:
+
+```
+/connect 127.0.0.1 6667
+```
+
+Over the internet, TLS (required to speak):
+
+```
+/connect -tls irc.example.net 6697
+```
+
+Then `/nick alice`, `/quote CALLSIGN YOURCALL`, `/quote REGISTER <password>`.
+That binds the nick and the callsign so nobody else can use them. Next
+session: `/quote IDENTIFY <password>`. Full walkthrough: [usage.md](usage.md).

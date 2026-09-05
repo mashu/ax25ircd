@@ -58,6 +58,8 @@ pub struct User {
     pub pass_ok: bool,
     /// May this IP user have their messages put on the air?
     pub rf_tx: bool,
+    /// Plaintext connection from off-box: watch only.
+    pub listen_only: bool,
 }
 
 impl User {
@@ -81,6 +83,7 @@ impl User {
             got_user: false,
             pass_ok: false,
             rf_tx: false,
+            listen_only: false,
         }
     }
 

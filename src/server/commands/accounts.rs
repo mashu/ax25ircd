@@ -221,7 +221,31 @@ impl Server {
                     u.identify_by = None;
                 }
                 if let Some(c) = user.callsign.as_ref() {
-                    let _ = self.accounts.set_callsign(&user.nick, &c.to_string());
+                    match self.accounts.set_callsign(&user.nick, &c.to_string()) {
+                        Ok(()) => {
+                            self.strip_callsign_claims(
+                                c,
+                                Some(&uid),
+                                &format!("Callsign {c} now belongs to another nick."),
+                            );
+                            self.notice_user(
+                                &uid,
+                                &format!(
+                                    "Callsign {c} is bound to this nick. Nobody else can claim it."
+                                ),
+                            );
+                        }
+                        Err(AccountError::CallsignTaken) => {
+                            if let Some(u) = self.state.user_mut(&uid) {
+                                u.callsign = None;
+                            }
+                            self.notice_user(
+                                &uid,
+                                "Nick registered, but that callsign already belongs to another nick. CALLSIGN something else.",
+                            );
+                        }
+                        Err(e) => self.notice_account_error(&uid, e),
+                    }
                 }
                 self.notice_user(
                     &uid,
@@ -296,6 +320,9 @@ impl Server {
             AccountError::BadPassword => "Password incorrect.".into(),
             AccountError::NotRegistered => {
                 "That nick is not registered. REGISTER <password> first.".into()
+            }
+            AccountError::CallsignTaken => {
+                "That callsign is already registered to another nick.".into()
             }
         };
         self.notice_user(uid, &text);

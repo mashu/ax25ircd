@@ -54,6 +54,7 @@ async fn start(config_text: &str) -> String {
 
     let opts = ListenerOptions {
         ping_interval: Duration::from_secs(60),
+        tls: None,
     };
     tokio::spawn(async move {
         let _ = listen(listener, events_tx, Arc::new(AtomicU64::new(1)), opts).await;

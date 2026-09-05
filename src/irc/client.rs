@@ -5,9 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
+use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 
 use crate::server::state::ClientId;
@@ -25,6 +26,9 @@ const OUTPUT_QUEUE: usize = 1024;
 #[derive(Clone)]
 pub struct ListenerOptions {
     pub ping_interval: Duration,
+    /// When set, every accepted socket is wrapped in TLS before IRC framing.
+    /// Those connections are never listen-only.
+    pub tls: Option<TlsAcceptor>,
 }
 
 /// Accept IRC clients on an already-bound listener.
@@ -42,7 +46,12 @@ pub async fn listen(
         .local_addr()
         .map(|a| a.to_string())
         .unwrap_or_else(|_| "?".into());
-    info!(%addr, "listening for IRC clients");
+    let kind = if opts.tls.is_some() {
+        "tls"
+    } else {
+        "plaintext"
+    };
+    info!(%addr, %kind, "listening for IRC clients");
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(v) => v,
@@ -51,27 +60,57 @@ pub async fn listen(
                 continue;
             }
         };
+        stream.set_nodelay(true).ok();
         let id = ids.fetch_add(1, Ordering::Relaxed);
         let events = events.clone();
         let opts = opts.clone();
         tokio::spawn(async move {
             let host = display_host(peer.ip());
-            if let Err(e) = serve(stream, id, host, events, opts).await {
+            let listen_only = opts.tls.is_none() && !peer_is_loopback(peer.ip());
+            let result = if let Some(acceptor) = opts.tls.clone() {
+                match acceptor.accept(stream).await {
+                    Ok(tls) => serve(tls, id, host, listen_only, events, opts).await,
+                    Err(e) => {
+                        debug!(client = id, "TLS handshake failed: {e}");
+                        Ok(())
+                    }
+                }
+            } else {
+                serve(stream, id, host, listen_only, events, opts).await
+            };
+            if let Err(e) = result {
                 debug!(client = id, "connection ended: {e}");
             }
         });
     }
 }
 
-async fn serve(
-    stream: TcpStream,
+/// Loopback includes IPv4-mapped `::ffff:127.0.0.1`, which Rust's
+/// `IpAddr::is_loopback` does not.
+fn peer_is_loopback(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v) => v.is_loopback(),
+        std::net::IpAddr::V6(v) => {
+            v.is_loopback()
+                || v.to_ipv4_mapped()
+                    .map(|v4| v4.is_loopback())
+                    .unwrap_or(false)
+        }
+    }
+}
+
+async fn serve<S>(
+    stream: S,
     id: ClientId,
     host: String,
+    listen_only: bool,
     events: mpsc::Sender<Event>,
     opts: ListenerOptions,
-) -> std::io::Result<()> {
-    stream.set_nodelay(true).ok();
-    let (read_half, mut write_half) = stream.into_split();
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (read_half, mut write_half) = tokio::io::split(stream);
     let (out_tx, mut out_rx) = mpsc::channel::<String>(OUTPUT_QUEUE);
     let pinger = out_tx.clone();
     let (hangup_tx, mut hangup_rx) = oneshot::channel();
@@ -80,6 +119,7 @@ async fn serve(
         .send(Event::Connected {
             id,
             host,
+            listen_only,
             out: out_tx,
             hangup: Some(hangup_tx),
         })
@@ -263,6 +303,15 @@ mod tests {
         let shown = display_host("2001:db8::42".parse::<IpAddr>().unwrap());
         assert!(!shown.starts_with(':'), "{shown}");
         assert_eq!(shown, "[2001:db8::42]");
+    }
+
+    #[test]
+    fn v4_mapped_loopback_is_still_loopback() {
+        assert!(peer_is_loopback("127.0.0.1".parse().unwrap()));
+        assert!(peer_is_loopback("::1".parse().unwrap()));
+        assert!(peer_is_loopback("::ffff:127.0.0.1".parse().unwrap()));
+        assert!(!peer_is_loopback("8.8.8.8".parse().unwrap()));
+        assert!(!peer_is_loopback("::ffff:8.8.8.8".parse().unwrap()));
     }
 
     #[test]

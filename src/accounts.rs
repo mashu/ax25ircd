@@ -48,6 +48,9 @@ pub struct NickAccount {
 #[derive(Default, Serialize, Deserialize)]
 struct Store {
     nicks: HashMap<String, NickAccount>,
+    /// Hosts refused at connect. Survives restart with the nick file.
+    #[serde(default)]
+    ip_bans: Vec<String>,
 }
 
 pub struct Accounts {
@@ -67,6 +70,7 @@ pub enum AccountError {
     Taken,
     BadPassword,
     NotRegistered,
+    CallsignTaken,
 }
 
 impl Accounts {
@@ -174,11 +178,89 @@ impl Accounts {
     }
 
     pub fn set_callsign(&mut self, nick: &str, callsign: &str) -> Result<(), AccountError> {
-        let Some(acc) = self.store.nicks.get_mut(&lower(nick)) else {
+        let key = lower(nick);
+        if !self.store.nicks.contains_key(&key) {
+            return Err(AccountError::NotRegistered);
+        }
+        if let Some(owner) = self.owner_of_callsign(callsign) {
+            if lower(&owner) != key {
+                return Err(AccountError::CallsignTaken);
+            }
+        }
+        let Some(acc) = self.store.nicks.get_mut(&key) else {
             return Err(AccountError::NotRegistered);
         };
         acc.callsign = Some(callsign.to_string());
         self.save()
+    }
+
+    /// Which registered nick owns this callsign, if any.
+    pub fn owner_of_callsign(&self, callsign: &str) -> Option<String> {
+        let want = lower(callsign);
+        self.store.nicks.values().find_map(|a| {
+            a.callsign
+                .as_ref()
+                .filter(|c| lower(c) == want)
+                .map(|_| a.nick.clone())
+        })
+    }
+
+    pub fn clear_callsign(&mut self, callsign: &str) -> Result<String, AccountError> {
+        let want = lower(callsign);
+        let key = self.store.nicks.iter().find_map(|(k, a)| {
+            a.callsign
+                .as_ref()
+                .filter(|c| lower(c) == want)
+                .map(|_| k.clone())
+        });
+        let Some(key) = key else {
+            return Err(AccountError::NotRegistered);
+        };
+        let nick = self.store.nicks[&key].nick.clone();
+        if let Some(acc) = self.store.nicks.get_mut(&key) {
+            acc.callsign = None;
+        }
+        self.save()?;
+        Ok(nick)
+    }
+
+    pub fn list(&self) -> Vec<&NickAccount> {
+        let mut v: Vec<_> = self.store.nicks.values().collect();
+        v.sort_by(|a, b| lower(&a.nick).cmp(&lower(&b.nick)));
+        v
+    }
+
+    pub fn ban_ip(&mut self, host: &str) -> Result<bool, AccountError> {
+        let key = host_ban_key(host);
+        if key.is_empty() {
+            return Ok(false);
+        }
+        if self.store.ip_bans.iter().any(|h| h == &key) {
+            return Ok(false);
+        }
+        self.store.ip_bans.push(key);
+        self.save()?;
+        Ok(true)
+    }
+
+    pub fn unban_ip(&mut self, host: &str) -> Result<bool, AccountError> {
+        let key = host_ban_key(host);
+        let before = self.store.ip_bans.len();
+        self.store.ip_bans.retain(|h| h != &key);
+        if self.store.ip_bans.len() == before {
+            return Ok(false);
+        }
+        self.save()?;
+        Ok(true)
+    }
+
+    pub fn is_ip_banned(&self, host: &str) -> bool {
+        let key = host_ban_key(host);
+        self.store.ip_bans.iter().any(|h| h == &key)
+    }
+
+    pub fn ip_bans(&self) -> &[String] {
+        &self.store.ip_bans
     }
 
     pub fn grants_rf_tx(&self, nick: &str) -> bool {
@@ -283,6 +365,11 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), AccountError> {
         std::fs::set_permissions(path, perms).map_err(|_| AccountError::Io)?;
     }
     Ok(())
+}
+
+/// Compare IRC host strings the way KLINE stores them: lowercase, no IPv6 brackets.
+pub fn host_ban_key(host: &str) -> String {
+    lower(host.trim().trim_matches(|c| c == '[' || c == ']'))
 }
 
 pub fn hash_password(password: &str) -> Result<String, AccountError> {
@@ -416,6 +503,39 @@ mod tests {
         add(&mut a, "alice", "password1").unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "nick database was {mode:o}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_callsign_belongs_to_one_nick() {
+        let path = tmp();
+        let mut a = Accounts::empty(&path);
+        add(&mut a, "alice", "password1").unwrap();
+        add(&mut a, "bob", "password2").unwrap();
+        a.set_callsign("alice", "SM0XYZ").unwrap();
+        assert_eq!(a.owner_of_callsign("sm0xyz").as_deref(), Some("alice"));
+        assert_eq!(
+            a.set_callsign("bob", "SM0XYZ"),
+            Err(AccountError::CallsignTaken)
+        );
+        a.set_callsign("alice", "SM0XYZ").unwrap();
+        let owner = a.clear_callsign("SM0XYZ").unwrap();
+        assert_eq!(owner, "alice");
+        a.set_callsign("bob", "SM0XYZ").unwrap();
+        assert_eq!(a.owner_of_callsign("SM0XYZ").as_deref(), Some("bob"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ip_bans_persist() {
+        let path = tmp();
+        let mut a = Accounts::empty(&path);
+        assert!(a.ban_ip("203.0.113.9").unwrap());
+        assert!(!a.ban_ip("203.0.113.9").unwrap());
+        assert!(a.is_ip_banned("[203.0.113.9]"));
+        let b = Accounts::load(&path).unwrap();
+        assert!(b.is_ip_banned("203.0.113.9"));
+        assert_eq!(b.ip_bans(), &["203.0.113.9".to_string()]);
         let _ = std::fs::remove_file(path);
     }
 }

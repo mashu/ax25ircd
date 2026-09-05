@@ -32,6 +32,9 @@ pub enum Event {
     Connected {
         id: ClientId,
         host: String,
+        /// Plaintext from a non-loopback address: the client may watch, not
+        /// speak, identify, or control the transmitter.
+        listen_only: bool,
         out: mpsc::Sender<String>,
         /// Fired by the server when it drops the user (QUIT/KILL/timeout)
         /// so the connection task actually closes the socket.
@@ -138,6 +141,9 @@ pub struct Server {
     /// Used to run Argon2 off this task. Tests leave it unset and hash inline.
     events: Option<mpsc::Sender<Event>>,
     started: SystemTime,
+    /// IRC connection password (`PASS`). Starts as `server.password`; OPER
+    /// `PASSWD` changes it for this process. A restart reloads the file.
+    connection_password: Option<String>,
 }
 
 impl Server {
@@ -179,6 +185,7 @@ impl Server {
         }
 
         let accounts = Accounts::load(&config.accounts.file)?;
+        let connection_password = config.server.password.clone();
 
         Ok(Self {
             config,
@@ -190,6 +197,7 @@ impl Server {
             audit,
             events: None,
             started: SystemTime::now(),
+            connection_password,
         })
     }
 
@@ -214,6 +222,7 @@ impl Server {
             Event::Connected {
                 id,
                 host,
+                listen_only,
                 out,
                 hangup,
             } => {
@@ -222,7 +231,9 @@ impl Server {
                 // on every one of them.
                 let total = self.config.listen.max_clients;
                 let per_host = self.config.listen.max_conns_per_host;
-                let refuse = if total > 0 && self.state.ip_users() >= total {
+                let refuse = if self.accounts.is_ip_banned(&host) {
+                    Some(("kline", "ERROR :Banned from this server".to_string()))
+                } else if total > 0 && self.state.ip_users() >= total {
                     Some((
                         "max_clients",
                         format!("ERROR :Server is full (max {total} clients)"),
@@ -248,9 +259,16 @@ impl Server {
                 self.clients.insert(id, out, hangup);
                 self.radio.stats.ip_connections += 1;
                 let id_s = id.to_string();
-                self.audit
-                    .event("connect", &[("id", &id_s), ("host", &host)]);
-                let user = User::new(UserId::Ip(id), host, now);
+                self.audit.event(
+                    "connect",
+                    &[
+                        ("id", &id_s),
+                        ("host", &host),
+                        ("access", if listen_only { "listen-only" } else { "full" }),
+                    ],
+                );
+                let mut user = User::new(UserId::Ip(id), host, now);
+                user.listen_only = listen_only;
                 self.state.insert_user(user);
             }
             Event::Line { id, line } => {
@@ -669,13 +687,25 @@ impl Server {
                     .and_then(|a| a.callsign.clone())
             })
             .flatten();
+        let mut restored = None;
         if let Some(u) = self.state.user_mut(uid) {
             u.rf_tx = u.oper || granted;
             if u.callsign.is_none() {
-                if let Some(c) = stored_call.as_deref().and_then(|s| s.parse().ok()) {
-                    u.callsign = Some(c);
+                if let Some(c) = stored_call
+                    .as_deref()
+                    .and_then(|s| s.parse::<Callsign>().ok())
+                {
+                    u.callsign = Some(c.clone());
+                    restored = Some(c);
                 }
             }
+        }
+        if let Some(c) = restored {
+            self.strip_callsign_claims(
+                &c,
+                Some(uid),
+                &format!("Callsign {c} now belongs to another nick."),
+            );
         }
     }
 

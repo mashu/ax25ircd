@@ -27,9 +27,9 @@ What the software does:
   PGP block or a long high-entropy base64 token. It is a conservative
   heuristic, not a guarantee: it catches the obvious cases and leaves judgement
   to you.
-* TLS, if you put it in front of the IP side, protects the hop between the user
-  and the gateway and stops there. This asymmetry is stated to every user at
-  registration.
+* TLS on `[listen.tls]` protects the hop between the user and the gateway
+  and stops there. A plaintext connection from off the machine is listen-only.
+  This asymmetry is stated to every user at registration.
 
 Note the grey area the software does *not* enter: authentication (as opposed to
 concealment) is treated differently in different jurisdictions, and some

@@ -116,6 +116,7 @@ impl Rf {
         self.server.handle(Event::Connected {
             id,
             host: format!("10.1.{}.{}", id / 256, id % 256),
+            listen_only: false,
             out,
             hangup: None,
         });

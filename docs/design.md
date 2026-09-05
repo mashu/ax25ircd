@@ -5,8 +5,7 @@
 An IRC server that is simultaneously an AX.25 packet radio gateway. Two
 populations share the same channels:
 
-* **IP users** with an ordinary IRC client (irssi, WeeChat, HexChat, Textual)
-  over TCP.
+* **IP users** with an ordinary IRC client (irssi) over TCP or TLS.
 * **RF stations** with a radio and a TNC, speaking a compact protocol (AIRC/1)
   carried in AX.25 UI frames.
 
@@ -126,7 +125,7 @@ clients is per-client:
 | Audit writer | one | `spawn_blocking`, batched appends |
 | Interlock | one, if configured | polls the safety command |
 
-So parsing, TLS-free socket I/O, line framing, password hashing and log writing
+So parsing, socket I/O (including TLS), line framing, password hashing and log writing
 all run on the thread pool in parallel; only the state transitions are
 serialised, and those are microseconds of `HashMap` work. The actor is a
 correctness decision — one ordering of events, no interleaving between the
@@ -184,9 +183,11 @@ separate:
   on the internet until the next point.
 * **RF-TX is a persisted grant on a registered nick.** The user `REGISTER`s,
   a control operator `RADIO GRANT`s that nick (stored in `nicks.json`), and
-  the user `IDENTIFY`s on later connects. `CALLSIGN` is still required, and
-  is restored from the nick file after IDENTIFY. `OPER` has RF-TX for that
-  session without a grant.
+the user `IDENTIFY`s on later connects. `CALLSIGN` is still required, and
+is restored from the nick file after IDENTIFY. `OPER` has RF-TX for that
+session without a grant. Internet clients that will do any of this must
+connect with TLS (`[listen.tls]`). A plaintext connection from off the
+machine is listen-only.
 * RF stations are not IRC accounts. Their identity is the AX.25 source
   address; `allow_callsigns` / `deny_callsigns` are the gate.
 
@@ -196,8 +197,11 @@ A typical club setup: internet users join `#rf` to follow the QSO; only the
 control operator and nicks they have granted can key the transmitter.
 `ax25irc-station` is not an IRC client — it speaks AIRC over KISS.
 
-If you need TLS, put it in front of the IP listener. It protects the hop to
-the gateway and stops there. Everything that reaches the antenna is in the
+If you need people on the internet to speak or control the transmitter,
+configure `[listen.tls]` (implicit TLS, typically port 6697). A plaintext
+socket from off this machine is listen-only: they can watch `#rf`, they
+cannot send a password or a transmission. TLS protects the hop to the
+gateway and stops there. Everything that reaches the antenna is in the
 clear, by law and by design.
 
 ## 5. Channel model
@@ -288,12 +292,13 @@ Typical deployment with Direwolf (step-by-step, including QMX:
 [direwolf]  ADEVICE plughw:1,0 / MODEM 1200 / KISSPORT 8001
      │  KISS over TCP :8001
 [ax25ircd]  radio.tnc.kind = "tcp", port 8001
-     │  TCP :6667 on localhost
-[stunnel or ssh -L]  ── the Internet
+     │  TCP :6667 on localhost (operator console)
+     │  TLS :6697 for internet clients
 ```
 
-The IP side should be behind TLS or a tunnel. Note the asymmetry: TLS protects
-the hop between the user and the gateway, and stops there. Everything that
+Internet clients that speak or OPER use implicit TLS (`[listen.tls]`). A
+plaintext connection from off the machine is listen-only. TLS protects the
+hop between the user and the gateway, and stops there. Everything that
 reaches the antenna is in the clear, by law and by design. The server says this
 to every user at registration.
 

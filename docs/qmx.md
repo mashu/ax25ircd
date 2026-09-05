@@ -20,8 +20,8 @@ sudo apt-get update
 sudo apt-get install -y direwolf libhamlib-utils alsa-utils irssi curl
 ```
 
-`libhamlib-utils` provides `rigctl` (PTT). `irssi` is one client; WeeChat
-(`weechat`) is fine too.
+`libhamlib-utils` provides `rigctl` (PTT). `irssi` is the IRC client used in
+the examples below.
 
 ## 2. Plug the QMX in, join the right groups
 
@@ -205,7 +205,9 @@ ax25ircd -c ~/.config/ax25ircd/ax25ircd.toml
 # another terminal:
 irssi
 #  /connect 127.0.0.1 6667
+#  /nick YOURNICK
 #  /quote CALLSIGN YOURCALL
+#  /quote REGISTER a-secret-password
 #  /join #rf
 #  /quote RADIO
 ```
@@ -227,7 +229,7 @@ line in `#rf`. If `notice_air_relay` is on, the server notices
 | Speak on `#rf` (IRC) | `/quote CALLSIGN YOURCALL` then `/join #rf` |
 | Radiate from IRC | registered nick + `RADIO GRANT` (or `OPER`) — [usage.md](usage.md) |
 | Transmitter status | `/quote RADIO` |
-| Keep a nick | `/quote REGISTER <password>` then `IDENTIFY` |
+| Keep nick and callsign | `/quote REGISTER <password>` then `IDENTIFY` |
 | Control operator | `/oper …` then `RADIO OFF` / `RADIO GRANT` / `RADIO HEARD` |
 
 ## 9. Optional: a second QMX as the operator radio

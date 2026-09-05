@@ -53,3 +53,4 @@ pub const ERR_CHANNELISFULL: &str = "471";
 pub const ERR_BADCHANNELKEY: &str = "475";
 pub const ERR_NOPRIVILEGES: &str = "481";
 pub const ERR_CHANOPRIVSNEEDED: &str = "482";
+pub const ERR_RESTRICTED: &str = "484";

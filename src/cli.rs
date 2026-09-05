@@ -197,24 +197,43 @@ pub async fn spawn_listeners(
     events: mpsc::Sender<Event>,
 ) -> std::io::Result<Vec<String>> {
     let ids = Arc::new(AtomicU64::new(1));
-    let opts = ListenerOptions {
+    let opts_plain = ListenerOptions {
         ping_interval: Duration::from_secs(config.listen.ping_interval_secs),
+        tls: None,
     };
     let mut bound = Vec::new();
     for addr in &config.listen.bind {
-        // Bind here rather than inside the task so a bad address is an error
-        // at startup rather than a line in the log nobody reads.
         let listener = tokio::net::TcpListener::bind(addr).await?;
         bound.push(listener.local_addr()?.to_string());
         let tx = events.clone();
         let ids = ids.clone();
-        let opts = opts.clone();
+        let opts = opts_plain.clone();
         let name = addr.clone();
         tokio::spawn(async move {
             if let Err(e) = listen(listener, tx, ids, opts).await {
                 error!(addr = %name, "listener failed: {e}");
             }
         });
+    }
+    if let Some(tls) = &config.listen.tls {
+        let acceptor = crate::irc::tls::acceptor(&tls.cert, &tls.key)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        for addr in &tls.bind {
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            bound.push(format!("tls:{}", listener.local_addr()?));
+            let tx = events.clone();
+            let ids = ids.clone();
+            let opts = ListenerOptions {
+                ping_interval: Duration::from_secs(config.listen.ping_interval_secs),
+                tls: Some(acceptor.clone()),
+            };
+            let name = addr.clone();
+            tokio::spawn(async move {
+                if let Err(e) = listen(listener, tx, ids, opts).await {
+                    error!(addr = %name, "TLS listener failed: {e}");
+                }
+            });
+        }
     }
     Ok(bound)
 }

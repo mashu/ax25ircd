@@ -26,9 +26,7 @@ impl Server {
             return;
         };
         let ok = self
-            .config
-            .server
-            .password
+            .connection_password
             .as_ref()
             .map(|p| constant_time_eq(p, given))
             .unwrap_or(true);
@@ -150,7 +148,7 @@ impl Server {
         if user.registered || !user.got_nick || !user.got_user {
             return;
         }
-        if self.config.server.password.is_some() && !user.pass_ok {
+        if self.connection_password.is_some() && !user.pass_ok {
             self.numeric(uid, num::ERR_PASSWDMISMATCH, &["Password incorrect"]);
             if let UserId::Ip(id) = uid {
                 self.send_raw(*id, "ERROR :Closing link (bad password)".into());
@@ -216,6 +214,15 @@ impl Server {
 
         self.send_lusers(uid);
         self.send_motd(uid);
+
+        if user.listen_only {
+            self.notice_user(
+                uid,
+                "This connection is listen-only (plaintext from off the machine). \
+                 Connect with TLS to speak, identify, OPER, or control the radio. \
+                 Everything that reaches the air is still in the clear.",
+            );
+        }
 
         let status = self.radio.status_line();
         self.notice_user(uid, &status);

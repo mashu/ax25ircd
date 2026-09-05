@@ -4,7 +4,7 @@
 //! ask for and what it gets back. Every test asserts on the numeric or the
 //! message the client actually receives, because that is the contract — a
 //! command that "works" but replies with the wrong numeric is broken for
-//! irssi and WeeChat.
+//! irssi.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -93,10 +93,27 @@ impl Net {
         self.server.handle(Event::Connected {
             id,
             host: format!("10.9.{}.{}", id / 256, id % 256),
+            listen_only: false,
             out,
             hangup: None,
         });
         self.rx.push((id, rx));
+        id
+    }
+
+    fn listen_only_client(&mut self, id: ClientId, nick: &str) -> ClientId {
+        let (out, rx) = mpsc::channel(4096);
+        self.server.handle(Event::Connected {
+            id,
+            host: format!("203.0.113.{}", id % 256),
+            listen_only: true,
+            out,
+            hangup: None,
+        });
+        self.rx.push((id, rx));
+        self.send(id, &format!("NICK {nick}"));
+        self.send(id, &format!("USER {nick} 0 * :{nick}"));
+        self.drain(id);
         id
     }
 
@@ -183,6 +200,54 @@ fn commands_before_registration_are_refused() {
     assert!(n.drain(a).iter().any(|l| l.contains("PONG")));
     n.send(a, "CAP LS 302");
     assert!(n.drain(a).iter().any(|l| l.contains("CAP")));
+}
+
+#[test]
+fn a_listen_only_connection_can_watch_but_not_speak() {
+    let mut n = Net::new();
+    let speaker = n.client(1, "alice");
+    let watcher = n.listen_only_client(2, "eve");
+    n.send(speaker, "JOIN #lobby");
+    n.drain(speaker);
+    n.send(watcher, "JOIN #lobby");
+    let joined = n.drain(watcher);
+    assert!(
+        joined
+            .iter()
+            .any(|l| l.contains("JOIN") || l.contains(" 366 ")),
+        "a spectator may join: {joined:?}"
+    );
+    assert!(
+        n.ask(watcher, "PRIVMSG #lobby :inject")
+            .iter()
+            .any(|l| l.contains(" 484 ")),
+        "plaintext off-box must not send"
+    );
+    assert!(
+        n.ask(watcher, "OPER root operpass1")
+            .iter()
+            .any(|l| l.contains(" 484 ")),
+        "plaintext off-box must not OPER"
+    );
+    assert!(
+        n.ask(watcher, "REGISTER hunter22")
+            .iter()
+            .any(|l| l.contains(" 484 ")),
+        "a password must not be accepted on a listen-only socket"
+    );
+    assert!(
+        n.ask(watcher, "KLINE 203.0.113.1")
+            .iter()
+            .any(|l| l.contains(" 484 ")),
+        "plaintext off-box must not ban hosts"
+    );
+    n.send(speaker, "PRIVMSG #lobby :hello from tls");
+    n.drain(speaker);
+    let seen = n.drain(watcher);
+    assert!(
+        seen.iter().any(|l| l.contains("hello from tls")),
+        "listen-only means receive, not silence: {seen:?}"
+    );
 }
 
 #[test]
@@ -777,6 +842,144 @@ fn callsign_is_recorded_as_an_unverified_claim() {
         Some("SM0XYZ".into())
     );
     assert!(n.ask(a, "CALLSIGN").iter().any(|l| l.contains("SM0XYZ")));
+}
+
+#[test]
+fn a_registered_callsign_cannot_be_taken_by_another_nick() {
+    let mut n = Net::new();
+    let a = n.client(1, "alice");
+    n.send(a, "CALLSIGN SM0XYZ");
+    n.send(a, "REGISTER goodpassword");
+    n.drain(a);
+    assert_eq!(
+        n.server.accounts.owner_of_callsign("SM0XYZ").as_deref(),
+        Some("alice")
+    );
+
+    let b = n.client(2, "bob");
+    let lines = n.ask(b, "CALLSIGN SM0XYZ");
+    assert!(
+        lines.iter().any(|l| l.contains("registered to alice")),
+        "{lines:?}"
+    );
+    assert!(n.server.state.user(&user_id(b)).unwrap().callsign.is_none());
+}
+
+#[test]
+fn oper_can_drop_a_nick_and_unclaim_a_callsign() {
+    let mut n = Net::new();
+    let a = n.client(1, "alice");
+    n.send(a, "CALLSIGN SM0XYZ");
+    n.send(a, "REGISTER goodpassword");
+    n.drain(a);
+
+    let op = n.client(2, "root");
+    n.send(op, "OPER root operpass1");
+    n.drain(op);
+
+    assert!(has_numeric(&n.ask(a, "ACCOUNTS"), "481"));
+    let listed = n.ask(op, "ACCOUNTS");
+    assert!(
+        listed
+            .iter()
+            .any(|l| l.contains("alice") && l.contains("SM0XYZ")),
+        "{listed:?}"
+    );
+
+    let lines = n.ask(op, "UNCLAIM SM0XYZ");
+    assert!(
+        lines.iter().any(|l| l.contains("no longer bound")),
+        "{lines:?}"
+    );
+    assert!(n.server.accounts.owner_of_callsign("SM0XYZ").is_none());
+    assert!(n.server.state.user(&user_id(a)).unwrap().callsign.is_none());
+
+    n.send(a, "CALLSIGN SM0XYZ");
+    n.drain(a);
+    n.send(op, "DROPNICK alice");
+    n.drain(op);
+    assert!(!n.server.accounts.is_registered("alice"));
+    assert!(!n.server.state.user(&user_id(a)).unwrap().nick_identified);
+}
+
+#[test]
+fn oper_kline_refuses_that_host() {
+    let mut n = Net::new();
+    let op = n.client(1, "root");
+    n.send(op, "OPER root operpass1");
+    n.drain(op);
+
+    let v = n.client(5, "mallory");
+    let host = n.server.state.user(&user_id(v)).unwrap().host.clone();
+    n.send(op, &format!("KLINE {host} :abuse"));
+    n.drain(op);
+    let dropped = n.drain(v);
+    assert!(dropped.iter().any(|l| l.contains("Banned")), "{dropped:?}");
+    assert!(n.server.state.by_nick("mallory").is_none());
+
+    let (out, rx) = mpsc::channel(64);
+    n.server.handle(Event::Connected {
+        id: 5,
+        host: host.clone(),
+        listen_only: false,
+        out,
+        hangup: None,
+    });
+    n.rx.push((5, rx));
+    let refused = n.drain(5);
+    assert!(
+        refused
+            .iter()
+            .any(|l| l.contains("Banned from this server")),
+        "{refused:?}"
+    );
+    assert!(n.server.state.user(&user_id(5)).is_none());
+
+    n.send(op, &format!("UNKLINE {host}"));
+    n.drain(op);
+    let (out, rx) = mpsc::channel(64);
+    n.server.handle(Event::Connected {
+        id: 7,
+        host,
+        listen_only: false,
+        out,
+        hangup: None,
+    });
+    n.rx.push((7, rx));
+    n.send(7, "NICK mallory");
+    n.send(7, "USER mallory 0 * :Mallory");
+    assert!(has_numeric(&n.drain(7), "001"));
+}
+
+#[test]
+fn oper_passwd_changes_the_connection_password() {
+    let mut n = Net::new();
+    let op = n.client(1, "root");
+    n.send(op, "OPER root operpass1");
+    n.drain(op);
+    assert!(n
+        .ask(op, "PASSWD secret99")
+        .iter()
+        .any(|l| l.contains("now required")));
+
+    let bad = n.raw_client(2);
+    n.send(bad, "NICK bob");
+    n.send(bad, "USER bob 0 * :Bob");
+    let lines = n.drain(bad);
+    assert!(has_numeric(&lines, "464"), "{lines:?}");
+
+    let good = n.raw_client(3);
+    n.send(good, "PASS secret99");
+    n.send(good, "NICK carol");
+    n.send(good, "USER carol 0 * :Carol");
+    assert!(has_numeric(&n.drain(good), "001"));
+
+    n.send(op, "PASSWD off");
+    n.drain(op);
+    let open = n.raw_client(4);
+    n.send(open, "NICK dave");
+    n.send(open, "USER dave 0 * :Dave");
+    assert!(has_numeric(&n.drain(open), "001"));
 }
 
 #[test]

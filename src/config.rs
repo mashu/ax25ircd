@@ -52,6 +52,10 @@ pub struct ServerConfig {
 pub struct ListenConfig {
     #[serde(default = "default_bind")]
     pub bind: Vec<String>,
+    /// Implicit TLS listeners (usually port 6697). Required for anyone who
+    /// will speak, identify, OPER, or control the transmitter from off-box.
+    #[serde(default)]
+    pub tls: Option<TlsListenConfig>,
     #[serde(default = "default_ping_interval")]
     pub ping_interval_secs: u64,
     #[serde(default = "default_registration_timeout")]
@@ -72,12 +76,25 @@ impl Default for ListenConfig {
     fn default() -> Self {
         Self {
             bind: default_bind(),
+            tls: None,
             ping_interval_secs: default_ping_interval(),
             registration_timeout_secs: default_registration_timeout(),
             max_conns_per_host: default_max_conns_per_host(),
             max_clients: default_max_clients(),
         }
     }
+}
+
+/// Implicit TLS for internet IRC clients. Plaintext sockets from off-box are
+/// listen-only; this is how they speak.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsListenConfig {
+    pub bind: Vec<String>,
+    /// PEM certificate chain (leaf first).
+    pub cert: String,
+    /// PEM private key.
+    pub key: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -548,7 +565,16 @@ impl Config {
                  truncated to nothing"
             );
         }
-        check_oper_passwords(&self.opers, &self.listen.bind)?;
+        check_oper_passwords(&self.opers, &self.listen_addresses())?;
+        if let Some(tls) = &self.listen.tls {
+            if tls.bind.is_empty() {
+                anyhow::bail!("listen.tls.bind must list at least one address");
+            }
+            if tls.cert.trim().is_empty() || tls.key.trim().is_empty() {
+                anyhow::bail!("listen.tls needs cert and key PEM paths");
+            }
+            crate::irc::tls::server_config(&tls.cert, &tls.key)?;
+        }
         let mut seen: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
         for ch in &self.channels {
             if !crate::irc::message::is_channel_name(&ch.name) {
@@ -734,6 +760,15 @@ impl Config {
 
     pub fn id_interval(&self) -> Duration {
         Duration::from_secs(self.radio.id_interval_secs)
+    }
+
+    /// Every IRC bind, plaintext and TLS, used for OPER-password rules.
+    pub fn listen_addresses(&self) -> Vec<String> {
+        let mut addrs = self.listen.bind.clone();
+        if let Some(tls) = &self.listen.tls {
+            addrs.extend(tls.bind.iter().cloned());
+        }
+        addrs
     }
 }
 
@@ -1086,6 +1121,44 @@ name = "root"
 password = "operpass1"
 "##;
         Config::from_toml(text).unwrap();
+    }
+
+    #[test]
+    fn tls_without_cert_files_is_refused() {
+        let text = r##"
+[server]
+name = "test.example"
+[listen]
+bind = ["127.0.0.1:6667"]
+[listen.tls]
+bind = ["0.0.0.0:6697"]
+cert = "/no/such/fullchain.pem"
+key = "/no/such/privkey.pem"
+"##;
+        let err = Config::from_toml(text).unwrap_err().to_string();
+        assert!(err.contains("listen.tls"), "{err}");
+    }
+
+    #[test]
+    fn plaintext_oper_is_refused_when_tls_is_public() {
+        let text = r##"
+[server]
+name = "test.example"
+[listen]
+bind = ["127.0.0.1:6667"]
+[listen.tls]
+bind = ["0.0.0.0:6697"]
+cert = "/no/such/fullchain.pem"
+key = "/no/such/privkey.pem"
+[[opers]]
+name = "root"
+password = "operpass1"
+"##;
+        let err = Config::from_toml(text).unwrap_err().to_string();
+        assert!(
+            err.contains("plaintext") || err.contains("listen.tls"),
+            "{err}"
+        );
     }
 
     const RADIO: &str = r##"

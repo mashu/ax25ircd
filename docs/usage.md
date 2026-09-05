@@ -1,7 +1,92 @@
 # IRC
 
-Connect any RFC 1459 client to `127.0.0.1:6667`. Two kinds of people share a
-bridged channel. They are not the same account.
+The client in these examples is **irssi**. Any RFC 1459 client works; the
+commands after connect are the same (`/quote` sends a raw IRC command).
+
+TLS protects the hop to the gateway only. Everything that reaches the air is
+in the clear.
+
+## Connect
+
+* **On this machine** — plaintext `127.0.0.1:6667`. Full access (speak,
+  `REGISTER` / `IDENTIFY`, `OPER`, radio control). This is the operator sitting
+  next to the radio.
+* **From the internet** — implicit TLS on `[listen.tls]` (usually port 6697).
+  Required to speak, register, identify, `OPER`, or control the transmitter.
+* **Plaintext from off-box** is listen-only: join and watch. No passwords, no
+  `PRIVMSG`, no `RADIO GRANT`.
+
+### irssi, on the radio machine
+
+```
+/connect 127.0.0.1 6667
+```
+
+### irssi, over TLS
+
+```
+/connect -tls irc.example.net 6697
+```
+
+Older irssi uses `-ssl` instead of `-tls`. Accept or pin the certificate the
+same way you would for any other TLS IRC network. There is no STARTTLS: the
+TLS port is TLS from the first byte.
+
+If the server has a connection password (`server.password`, or an oper has
+set one with `PASSWD`):
+
+```
+/connect -tls irc.example.net 6697
+/quote PASS the-server-password
+```
+
+(Or put the password in irssi's `/connect` password field.) Then `NICK` /
+`USER` as usual — irssi does those for you when you `/connect`.
+
+## Nick, callsign, and registration
+
+Two things can be reserved so nobody else can use them: the **nick** and the
+**callsign**. Both are bound by `REGISTER` on that nick.
+
+```
+/nick alice
+/quote CALLSIGN SM0XYZ
+/quote REGISTER your-secret-password
+```
+
+`REGISTER` writes an Argon2id hash of the password to `accounts.file`
+(`nicks.json` by default). If you already claimed a callsign this session, that
+callsign is bound to this nick too. After that:
+
+* Nobody else can keep the nick `alice` without `IDENTIFY` (an unidentified
+  taker is renamed to a guest after `identify_timeout_secs`).
+* Nobody else can `CALLSIGN SM0XYZ`. A control operator can release either
+  with `DROPNICK` / `UNCLAIM`.
+
+`CALLSIGN` without `REGISTER` lasts for this session only. It is a logged
+claim, not proof of licence.
+
+On the next connect:
+
+```
+/nick alice
+/quote IDENTIFY your-secret-password
+```
+
+That restores RF-TX (if an oper granted it) and the stored callsign.
+
+`UNREGISTER <password>` deletes the account, including the grant and the
+stored callsign.
+
+Changing nick drops `IDENTIFY`. Identify again on the nick that owns the
+grant.
+
+Callsign-shaped nicks (`SM0ABC|7`, `SM0ABC-7`, `SM0ABC\7`) are reserved for
+stations heard on the air. An internet user cannot take them.
+
+## Two populations
+
+They are not the same account.
 
 * **Internet user** — ordinary nick (`alice`). Registers, may be granted RF-TX,
   claims a callsign with `CALLSIGN`. The nick itself is not a callsign.
@@ -10,9 +95,6 @@ bridged channel. They are not the same account.
   `SM0ABC|7`). No `REGISTER`, no `RADIO GRANT`. Restrict with
   `policy.allow_callsigns` / `deny_callsigns`.
 
-Callsign-shaped nicks (`SM0ABC|7`, `SM0ABC-7`, `SM0ABC\7`) are reserved for
-stations heard on the air. An internet user cannot take them.
-
 Speaking on IRC and radiating are separate. Without RF-TX your messages stay
 on the internet even in `#rf`.
 
@@ -20,16 +102,13 @@ on the internet even in `#rf`.
 
 Three things. The nick does **not** have to look like a callsign.
 
-1. **Register the nick.** `/quote REGISTER <password>` then, on later
-   connects, `/quote IDENTIFY <password>`. Written to `accounts.file`
-   (`nicks.json` by default).
+1. **Register the nick** (and, if you want it kept, the callsign) as above.
 2. **A control operator grants RF-TX.** They `OPER`, then
    `/quote RADIO GRANT alice`. Refused if the nick is not registered — there
    would be nothing to persist. The flag is stored on that account and
    applied immediately if they are online.
-3. **Claim a callsign.** `/quote CALLSIGN SM0XYZ`. Required every session
-   unless the nick is identified, in which case the last claim is restored
-   from the nick file. Still a logged claim, not proof of licence.
+3. **Claim a callsign** if it was not restored by `IDENTIFY`.
+   `/quote CALLSIGN SM0XYZ`.
 
 Then join `#rf`. If an RF station is in the channel and the transmitter is on,
 `PRIVMSG #rf` is radiated. You will get a NOTICE when it actually goes out.
@@ -39,9 +118,9 @@ still need `CALLSIGN` before their text is radiated. On a public
 `listen.bind`, `[[opers]]` passwords must be Argon2id hashes from
 `ax25ircd --hash-password`; plaintext is accepted only on loopback.
 
-`UNREGISTER` deletes the account, including the grant and stored callsign.
-Changing nick drops `IDENTIFY`; RF-TX comes back only after `IDENTIFY` on a
-nick that still has the grant.
+```
+/oper root the-oper-password
+```
 
 ## Letting an RF station on the air
 
@@ -55,6 +134,26 @@ If `allow_callsigns` is empty, any plausible amateur callsign may use the RF
 side. A non-empty list is a closed system. `deny_callsigns` bans a station
 (SSID 0 bans every SSID of that call).
 
+## Control operator: accounts, bans, server password
+
+After `/oper`:
+
+```
+ACCOUNTS                 list registered nicks, bound callsigns, RF-TX
+DROPNICK <nick>          unregister a nick (no password); online user is told
+UNCLAIM <callsign>       release a bound callsign so someone else may claim it
+KLINE <host> [reason]    ban that IP; drop matching clients; stored in nicks.json
+UNKLINE <host>
+KLINES                   list IP bans
+PASSWD <password|off>    set or clear the IRC connection password for this process
+```
+
+In irssi: `/quote ACCOUNTS`, `/quote KLINE 203.0.113.9 :abuse`,
+`/quote PASSWD secret`, `/quote PASSWD off`.
+
+`KLINE` survives restart (it is written with the nick file). `PASSWD` does
+not: a restart reloads `server.password` from the config file.
+
 ## After a restart
 
 `Accounts::load` reads `nicks.json` at startup. There is no other privilege
@@ -62,8 +161,8 @@ store.
 
 | | Survives | Lost |
 |---|---|---|
-| Registered nicks, password hashes, RF-TX grants, last CALLSIGN | `nicks.json` | |
-| Channels, `+r`, channel operator lists, OPER passwords | config file | runtime `MODE` changes |
+| Registered nicks, password hashes, RF-TX grants, last CALLSIGN, IP bans | `nicks.json` | |
+| Channels, `+r`, channel operator lists, OPER passwords, `server.password` | config file | runtime `MODE` / `PASSWD` |
 | Who is connected, mailbox, RF sessions, `OPER` this session | | yes — in memory |
 
 On connect, `IDENTIFY` reloads RF-TX and the stored callsign. `OPER` is entered
@@ -104,7 +203,7 @@ usual. Local extensions:
 OPER <name> <pass>   control operator this session ([[opers]] in the config)
 CALLSIGN <call>      claim a callsign; +v on +r. Required before radiation.
 CALLSIGN             show the current claim
-REGISTER <password>  bind this nick to an Argon2id hash on disk
+REGISTER <password>  bind this nick (and current CALLSIGN) so nobody else can use them
 IDENTIFY <password>  prove you own it; reloads RF-TX and last CALLSIGN
 UNREGISTER <password>
 RADIO                transmitter status (anyone)
@@ -127,6 +226,7 @@ RADIO MAIL                held private messages (in memory, expires)
 RADIO KICK <callsign>     drop an RF station's presence
 RADIO GRANT <nick>        persist RF-TX on a registered nick
 RADIO REVOKE <nick>       take it away (also persisted)
+ACCOUNTS / DROPNICK / UNCLAIM / KLINE / UNKLINE / KLINES / PASSWD
 ```
 
 ## Held messages

@@ -3,5 +3,6 @@
 pub mod client;
 pub mod message;
 pub mod numerics;
+pub mod tls;
 
 pub use message::Message;

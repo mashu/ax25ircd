@@ -1,4 +1,5 @@
-//! Control-operator commands: `OPER`, `KILL`, `CALLSIGN` and `RADIO`.
+//! Control-operator commands: `OPER`, `KILL`, `CALLSIGN`, `RADIO`, and the
+//! account / access tools (`ACCOUNTS`, `DROPNICK`, `UNCLAIM`, `KLINE`, `PASSWD`).
 //!
 //! `RADIO` is the station's control panel. Status is public; everything that
 //! changes what the transmitter does — the kill switch, the live duty and
@@ -9,7 +10,9 @@ use std::time::Duration;
 
 use tracing::info;
 
-use crate::irc::message::Message;
+use crate::accounts::host_ban_key;
+use crate::callsign::Callsign;
+use crate::irc::message::{lower, Message};
 use crate::irc::numerics as num;
 
 use super::super::state::UserId;
@@ -84,6 +87,40 @@ impl Server {
         self.refresh_privileges(uid);
     }
 
+    fn require_oper(&mut self, uid: &UserId) -> bool {
+        if self.state.user(uid).map(|u| u.oper).unwrap_or(false) {
+            true
+        } else {
+            self.numeric(uid, num::ERR_NOPRIVILEGES, &["Permission denied"]);
+            false
+        }
+    }
+
+    /// Take this callsign off connected users. `keep` is left alone.
+    pub(crate) fn strip_callsign_claims(
+        &mut self,
+        call: &Callsign,
+        keep: Option<&UserId>,
+        notice: &str,
+    ) {
+        let victims: Vec<UserId> = self
+            .state
+            .users
+            .values()
+            .filter(|u| {
+                keep.map(|k| u.id != *k).unwrap_or(true) && u.callsign.as_ref() == Some(call)
+            })
+            .map(|u| u.id.clone())
+            .collect();
+        for v in victims {
+            if let Some(u) = self.state.user_mut(&v) {
+                u.callsign = None;
+            }
+            self.notice_user(&v, notice);
+            self.refresh_privileges(&v);
+        }
+    }
+
     pub(super) fn cmd_callsign(&mut self, uid: &UserId, msg: &Message) {
         let Some(arg) = msg.param(0) else {
             let current = self
@@ -95,7 +132,7 @@ impl Server {
             self.notice_user(uid, &format!("Your callsign is set to: {current}"));
             return;
         };
-        let Ok(call) = arg.parse::<crate::callsign::Callsign>() else {
+        let Ok(call) = arg.parse::<Callsign>() else {
             self.notice_user(uid, "That is not a valid callsign.");
             return;
         };
@@ -107,20 +144,38 @@ impl Server {
             self.notice_user(uid, "That callsign is not permitted on this gateway.");
             return;
         }
-        // Anyone can type any callsign. We record the claim, show it to
-        // everyone, and log it; we do not pretend it is authentication.
-        if let Some(u) = self.state.user_mut(uid) {
-            u.callsign = Some(call.clone());
-        }
-        if self
+        let identified = self
             .state
             .user(uid)
             .map(|u| u.nick_identified)
-            .unwrap_or(false)
-        {
-            if let Some(nick) = self.state.user(uid).map(|u| u.nick.clone()) {
-                let _ = self.accounts.set_callsign(&nick, &call.to_string());
+            .unwrap_or(false);
+        let nick = self
+            .state
+            .user(uid)
+            .map(|u| u.nick.clone())
+            .unwrap_or_default();
+        if let Some(owner) = self.accounts.owner_of_callsign(&call.to_string()) {
+            if lower(&owner) != lower(&nick) {
+                self.notice_user(
+                    uid,
+                    &format!("Callsign {call} is registered to {owner}. Choose another, or ask a control operator."),
+                );
+                return;
             }
+        }
+        if identified {
+            if let Err(e) = self.accounts.set_callsign(&nick, &call.to_string()) {
+                self.notice_account_error(uid, e);
+                return;
+            }
+            self.strip_callsign_claims(
+                &call,
+                Some(uid),
+                &format!("Callsign {call} now belongs to another nick."),
+            );
+        }
+        if let Some(u) = self.state.user_mut(uid) {
+            u.callsign = Some(call.clone());
         }
         info!(?uid, %call, "IP user claimed a callsign");
         if let Some(u) = self.state.user(uid) {
@@ -140,6 +195,18 @@ impl Server {
                  as such. You are responsible for your own transmissions."
             ),
         );
+        if identified {
+            self.notice_user(
+                uid,
+                &format!("Callsign {call} is bound to this nick. Nobody else can claim it."),
+            );
+        } else {
+            self.notice_user(
+                uid,
+                "This claim lasts for this session only. REGISTER <password> to bind the nick \
+                 and this callsign so nobody else can use them.",
+            );
+        }
         self.refresh_privileges(uid);
     }
 
@@ -512,5 +579,206 @@ impl Server {
             self.send_raw(id, format!("ERROR :Killed ({reason})"));
         }
         self.quit_user(&target, &format!("Killed ({reason})"));
+    }
+
+    pub(super) fn cmd_accounts(&mut self, uid: &UserId) {
+        if !self.require_oper(uid) {
+            return;
+        }
+        let rows: Vec<(String, Option<String>, bool)> = self
+            .accounts
+            .list()
+            .into_iter()
+            .map(|a| (a.nick.clone(), a.callsign.clone(), a.rf_tx))
+            .collect();
+        if rows.is_empty() {
+            self.notice_user(uid, "No registered nicks.");
+            return;
+        }
+        self.notice_user(uid, "nick  callsign  rf-tx");
+        for (nick, call, rf_tx) in rows {
+            let call = call.unwrap_or_else(|| "-".into());
+            let rf = if rf_tx { "yes" } else { "no" };
+            self.notice_user(uid, &format!("{nick}  {call}  {rf}"));
+        }
+    }
+
+    pub(super) fn cmd_dropnick(&mut self, uid: &UserId, msg: &Message) {
+        if !self.require_oper(uid) {
+            return;
+        }
+        let Some(nick) = msg.param(0).map(|s| s.to_string()) else {
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["DROPNICK", "Not enough parameters"],
+            );
+            return;
+        };
+        if let Err(e) = self.accounts.drop_nick(&nick) {
+            self.notice_account_error(uid, e);
+            return;
+        }
+        if let Some(target) = self.find_target(&nick) {
+            if let Some(u) = self.state.user_mut(&target) {
+                u.nick_identified = false;
+                u.rf_tx = u.oper;
+            }
+            self.notice_user(&target, "A control operator unregistered this nick.");
+            self.refresh_privileges(&target);
+        }
+        self.notice_user(uid, &format!("Unregistered {nick}."));
+        self.audit.event("dropnick", &[("nick", &nick)]);
+    }
+
+    pub(super) fn cmd_unclaim(&mut self, uid: &UserId, msg: &Message) {
+        if !self.require_oper(uid) {
+            return;
+        }
+        let Some(arg) = msg.param(0) else {
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["UNCLAIM", "Not enough parameters"],
+            );
+            return;
+        };
+        let Ok(call) = arg.parse::<Callsign>() else {
+            self.notice_user(uid, "That is not a valid callsign.");
+            return;
+        };
+        match self.accounts.clear_callsign(&call.to_string()) {
+            Ok(owner) => {
+                self.strip_callsign_claims(
+                    &call,
+                    None,
+                    &format!("A control operator released callsign {call}."),
+                );
+                self.notice_user(
+                    uid,
+                    &format!("Callsign {call} is no longer bound to {owner}."),
+                );
+                self.audit
+                    .event("unclaim", &[("call", &call.to_string()), ("nick", &owner)]);
+            }
+            Err(crate::accounts::AccountError::NotRegistered) => {
+                self.notice_user(uid, "That callsign is not bound to any nick.");
+            }
+            Err(e) => self.notice_account_error(uid, e),
+        }
+    }
+
+    pub(super) fn cmd_kline(&mut self, uid: &UserId, msg: &Message) {
+        if !self.require_oper(uid) {
+            return;
+        }
+        let Some(host) = msg.param(0) else {
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["KLINE", "Not enough parameters"],
+            );
+            return;
+        };
+        let key = host_ban_key(host);
+        if key.is_empty() {
+            self.notice_user(uid, "Usage: KLINE <host> [reason]");
+            return;
+        }
+        let reason = msg.param(1).unwrap_or("Banned").to_string();
+        match self.accounts.ban_ip(&key) {
+            Ok(_) => {}
+            Err(e) => {
+                self.notice_account_error(uid, e);
+                return;
+            }
+        }
+        let issuer = uid.clone();
+        let victims: Vec<UserId> = self
+            .state
+            .users
+            .values()
+            .filter(|u| u.id != issuer && !u.is_rf() && host_ban_key(&u.host) == key)
+            .map(|u| u.id.clone())
+            .collect();
+        for v in &victims {
+            if let UserId::Ip(id) = v {
+                self.send_raw(*id, "ERROR :Banned from this server".into());
+            }
+            self.quit_user(v, "Banned");
+        }
+        self.notice_user(
+            uid,
+            &format!("Banned {key} ({reason}). Stored in the nick file."),
+        );
+        self.audit
+            .event("kline", &[("host", &key), ("reason", &reason)]);
+    }
+
+    pub(super) fn cmd_unkline(&mut self, uid: &UserId, msg: &Message) {
+        if !self.require_oper(uid) {
+            return;
+        }
+        let Some(host) = msg.param(0) else {
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["UNKLINE", "Not enough parameters"],
+            );
+            return;
+        };
+        match self.accounts.unban_ip(host) {
+            Ok(true) => {
+                let key = host_ban_key(host);
+                self.notice_user(uid, &format!("Removed the ban on {key}."));
+                self.audit.event("unkline", &[("host", &key)]);
+            }
+            Ok(false) => self.notice_user(uid, "That host is not banned."),
+            Err(e) => self.notice_account_error(uid, e),
+        }
+    }
+
+    pub(super) fn cmd_klines(&mut self, uid: &UserId) {
+        if !self.require_oper(uid) {
+            return;
+        }
+        let bans = self.accounts.ip_bans().to_vec();
+        if bans.is_empty() {
+            self.notice_user(uid, "No IP bans.");
+            return;
+        }
+        for b in bans {
+            self.notice_user(uid, &format!("KLINE {b}"));
+        }
+    }
+
+    pub(super) fn cmd_passwd(&mut self, uid: &UserId, msg: &Message) {
+        if !self.require_oper(uid) {
+            return;
+        }
+        let Some(arg) = msg.param(0).filter(|s| !s.is_empty()) else {
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["PASSWD", "Not enough parameters"],
+            );
+            return;
+        };
+        if arg.eq_ignore_ascii_case("off") {
+            self.connection_password = None;
+            self.notice_user(
+                uid,
+                "IRC connection password cleared for this process. A restart reloads the config file.",
+            );
+            self.audit.event("passwd", &[("set", "off")]);
+            return;
+        }
+        self.connection_password = Some(arg.to_string());
+        self.notice_user(
+            uid,
+            "IRC connection password is now required (PASS). Not written to the config file; \
+             a restart restores whatever is in server.password.",
+        );
+        self.audit.event("passwd", &[("set", "on")]);
     }
 }

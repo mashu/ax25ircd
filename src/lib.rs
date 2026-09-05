@@ -15,7 +15,7 @@
 //!                    server             the actor: one state, one ordering
 //!                              │
 //!                    server::commands   what an IRC client may ask for
-//!                    server::clients ─ irc::client ─ TCP ─ IRC client
+//!                    server::clients ─ irc::client ─ TLS/TCP ─ IRC client
 //! ```
 //!
 //! # Two properties hold the design together

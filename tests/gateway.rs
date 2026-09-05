@@ -141,6 +141,7 @@ impl Harness {
         server.handle(Event::Connected {
             id: CLIENT,
             host: "127.0.0.1".into(),
+            listen_only: false,
             out,
             hangup: None,
         });
@@ -171,6 +172,7 @@ impl Harness {
             // otherwise refuse everything past the eighth, and a test that
             // silently has one user in the channel proves nothing.
             host: format!("10.0.{}.{}", id / 256, id % 256),
+            listen_only: false,
             out,
             hangup: None,
         });

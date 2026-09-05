@@ -32,6 +32,9 @@ password-hash = "0.5"
 
 # Serial KISS TNC support is optional so the core builds with no C deps.
 tokio-serial = { version = "5", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"
 
 [features]
 default = []
@@ -43,3 +46,6 @@ unsafe_code = "forbid"
 [profile.release]
 lto = "thin"
 panic = "abort"
+
+[dev-dependencies]
+rcgen = "0.13"

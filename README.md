@@ -9,7 +9,6 @@
 An IRC server that is also an AX.25 packet-radio gateway.
 
 ```
-   irssi ──TCP──┐                        ┌── SM0ABC-7
-   WeeChat ─────┼──►  ax25ircd  ──KISS──►│
-    HexChat ─────┘                        └── SM0XYZ-9
+   irssi ──TCP/TLS──►  ax25ircd  ──KISS──►  SM0ABC-7
+                                        └── SM0XYZ-9
 ```
