@@ -257,13 +257,32 @@ async fn connect(link: &TncLink) -> io::Result<Box<dyn ReadWrite>> {
     }
 }
 
+/// Everything that survives a reconnect: the frames waiting to go out, the
+/// one the pump is holding, and where received frames go.
+///
+/// Grouped so a link failure cannot lose any of it. The held frame in
+/// particular has already reserved airtime in the published backlog, so
+/// dropping it would leak that reservation permanently.
+struct Link {
+    tx_queue: mpsc::Receiver<Ax25Frame>,
+    id_queue: mpsc::Receiver<Ax25Frame>,
+    rx_sink: mpsc::Sender<Ax25Frame>,
+    pending: Option<(Ax25Frame, tokio::time::Instant)>,
+}
+
 async fn run(
     config: TncConfig,
-    mut tx_queue: mpsc::Receiver<Ax25Frame>,
-    mut id_queue: mpsc::Receiver<Ax25Frame>,
+    tx_queue: mpsc::Receiver<Ax25Frame>,
+    id_queue: mpsc::Receiver<Ax25Frame>,
     rx_sink: mpsc::Sender<Ax25Frame>,
     shared: Arc<AirtimeShared>,
 ) {
+    let mut state = Link {
+        tx_queue,
+        id_queue,
+        rx_sink,
+        pending: None,
+    };
     // The governor outlives individual TNC connections on purpose: airtime
     // already radiated does not stop counting because Direwolf restarted.
     let mut governor = Governor::new(config.airtime.clone());
@@ -273,17 +292,7 @@ async fn run(
             Ok(link) => {
                 info!(?config.link, "TNC connected");
                 backoff = Duration::from_secs(1);
-                if let Err(e) = pump(
-                    &config,
-                    link,
-                    &mut tx_queue,
-                    &mut id_queue,
-                    &rx_sink,
-                    &mut governor,
-                    &shared,
-                )
-                .await
-                {
+                if let Err(e) = pump(&config, link, &mut state, &mut governor, &shared).await {
                     warn!("TNC link closed: {e}");
                 }
             }
@@ -301,12 +310,16 @@ async fn run(
 async fn pump(
     config: &TncConfig,
     mut link: Box<dyn ReadWrite>,
-    tx_queue: &mut mpsc::Receiver<Ax25Frame>,
-    id_queue: &mut mpsc::Receiver<Ax25Frame>,
-    rx_sink: &mpsc::Sender<Ax25Frame>,
+    state: &mut Link,
     governor: &mut Governor,
     shared: &AirtimeShared,
 ) -> io::Result<()> {
+    let Link {
+        tx_queue,
+        id_queue,
+        rx_sink,
+        pending,
+    } = state;
     // Push KISS parameters at connect.
     //
     // TXDELAY and TXTAIL come from the airtime config rather than a separate
@@ -335,10 +348,9 @@ async fn pump(
 
     let mut decoder = KissDecoder::new(config.max_frame);
     let mut buf = vec![0u8; 4096];
-    // Earliest the pacing gate lets us key up again.
+    // Earliest the pacing gate lets us key up again. A fresh connection has
+    // not transmitted yet, so the gate starts open.
     let mut next_tx = tokio::time::Instant::now();
-    // A frame that is waiting for pacing, the duty governor, or the inhibit.
-    let mut pending: Option<(Ax25Frame, tokio::time::Instant)> = None;
 
     loop {
         // Discard anything queued while the transmitter is inhibited. This is
@@ -413,7 +425,7 @@ async fn pump(
                 }
             }
             Some(frame) = tx_queue.recv(), if pending.is_none() => {
-                pending = Some((frame, tokio::time::Instant::now()));
+                *pending = Some((frame, tokio::time::Instant::now()));
             }
             _ = tokio::time::sleep_until(wake), if pending.is_some() => {
                 let Some((frame, queued_at)) = pending.take() else {
@@ -459,7 +471,7 @@ async fn pump(
                         shared.deferred.fetch_add(1, Ordering::Relaxed);
                         debug!("holding a frame for {:?} ({})", delay, reason.as_str());
                         next_tx = tokio::time::Instant::now() + delay;
-                        pending = Some((frame, queued_at));
+                        *pending = Some((frame, queued_at));
                     }
                 }
             }

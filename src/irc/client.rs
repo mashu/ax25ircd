@@ -55,7 +55,7 @@ pub async fn listen(
         let events = events.clone();
         let opts = opts.clone();
         tokio::spawn(async move {
-            let host = peer.ip().to_string();
+            let host = display_host(peer.ip());
             if let Err(e) = serve(stream, id, host, events, opts).await {
                 debug!(client = id, "connection ended: {e}");
             }
@@ -160,6 +160,20 @@ async fn serve(
     Ok(())
 }
 
+/// How a peer address is shown to IRC clients.
+///
+/// IPv6 addresses are bracketed, as in a URI. An IRC middle parameter may not
+/// begin with a colon — that is what marks the trailing parameter — and the
+/// host appears in a middle position in `RPL_WHOREPLY`, so a raw `::1` would
+/// make the parser treat the rest of the line as one trailing field and every
+/// value after it would shift.
+pub fn display_host(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+    }
+}
+
 /// Cut a line to `max` bytes on a character boundary.
 ///
 /// `Vec::truncate` on the raw bytes can split a multi-byte character, and RF
@@ -238,6 +252,16 @@ mod tests {
             .unwrap();
         assert_eq!(result, LineRead::TooLong);
         assert!(line.len() <= 512);
+    }
+
+    #[test]
+    fn ipv6_hosts_are_bracketed_so_they_cannot_start_with_a_colon() {
+        use std::net::IpAddr;
+        assert_eq!(display_host("127.0.0.1".parse::<IpAddr>().unwrap()), "127.0.0.1");
+        assert_eq!(display_host("::1".parse::<IpAddr>().unwrap()), "[::1]");
+        let shown = display_host("2001:db8::42".parse::<IpAddr>().unwrap());
+        assert!(!shown.starts_with(':'), "{shown}");
+        assert_eq!(shown, "[2001:db8::42]");
     }
 
     #[test]

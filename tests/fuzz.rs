@@ -308,9 +308,12 @@ fn message_round_trips_survive_reparsing() {
         let back = Message::parse(&line).expect("our own output must parse");
         assert_eq!(back.command, "PRIVMSG");
         assert_eq!(
-            back.params.len().min(1),
-            1,
-            "at least the target must survive"
+            back.params.len(),
+            msg.params.len(),
+            "the parameter count changed across a round trip, so every field after \
+             the culprit shifted: {:?} -> {line:?} -> {:?}",
+            msg.params,
+            back.params
         );
     }
 }
@@ -391,5 +394,244 @@ fn a_reserved_callsign_nick_can_never_be_claimed_by_an_ip_user() {
                 "{spelling} should be reserved for an RF station"
             );
         }
+    }
+}
+
+#[test]
+fn a_middle_parameter_containing_a_space_cannot_split_the_message() {
+    // Middle parameters are space-delimited on the wire, so one that contains
+    // a space silently becomes two. This is reachable from configuration:
+    // `server.name` is used as the topic setter, and RPL_TOPICWHOTIME puts
+    // the setter in a middle position.
+    let m = Message::new(
+        "333",
+        vec![
+            "alice".into(),
+            "#rf".into(),
+            "My Gateway".into(), // the setter, with a space
+            "1700000000".into(),
+        ],
+    )
+    .with_prefix("server.example");
+    let line = m.to_string();
+    let back = Message::parse(&line).expect("our own output must parse");
+    assert_eq!(
+        back.params.len(),
+        m.params.len(),
+        "a middle parameter split the message into extra parameters: {line}"
+    );
+    assert_eq!(
+        back.params[3], "1700000000",
+        "the timestamp moved because an earlier parameter split: {line}"
+    );
+}
+
+#[test]
+fn a_trailing_parameter_keeps_its_spacing() {
+    // The trailing parameter is everything after the colon, so it can hold
+    // runs of spaces. Collapsing them mangles anything aligned — a table, a
+    // code snippet, ASCII art — for no safety benefit.
+    let m = Message::new(
+        "PRIVMSG",
+        vec!["#rf".into(), "column1    column2".into()],
+    )
+    .with_prefix("alice!a@h");
+    let back = Message::parse(&m.to_string()).unwrap();
+    assert_eq!(
+        back.params[1], "column1    column2",
+        "the message text lost its spacing"
+    );
+}
+
+/// Two session layers talking to each other over a lossy, reordering,
+/// duplicating channel — which is what a shared half-duplex radio channel is.
+///
+/// The property: every message the sender commits to reliably is either
+/// delivered exactly once or given up on. Never delivered twice, never
+/// silently mangled, and the reassembly never hands up a payload that is not
+/// one of the messages that was sent.
+#[test]
+fn reliable_delivery_survives_loss_reordering_and_duplication() {
+    let mut rng = Rng::new(0x5AFE7ED5);
+    for trial in 0..200 {
+        let cfg = SessionConfig {
+            paclen: 24 + rng.below(40),
+            ack_timeout: Duration::from_secs(5),
+            max_retries: 6,
+            max_queue: 32,
+            ..Default::default()
+        };
+        let mut tx = Sessions::new(cfg.clone());
+        let mut rx = Sessions::new(cfg.clone());
+        let a: Callsign = "SM0ABC-7".parse().unwrap();
+        let b: Callsign = "SK0MT-1".parse().unwrap();
+
+        // Distinct payloads so a mix-up is visible.
+        let messages: Vec<Vec<u8>> = (0..6)
+            .map(|i| format!("message number {i} {}", "x".repeat(rng.below(60))).into_bytes())
+            .collect();
+
+        let mut now = Instant::now();
+        let mut in_flight: Vec<AircFrame> = Vec::new();
+        let mut delivered: Vec<Vec<u8>> = Vec::new();
+        let mut queued = messages.clone();
+
+        for _ in 0..400 {
+            // Offer the next message when nothing is in flight for it.
+            if !queued.is_empty() {
+                let m = queued.remove(0);
+                in_flight.extend(tx.send(&b, Kind::Msg, m, true, now));
+            }
+
+            // The channel: drop a third, duplicate a sixth, reorder the rest.
+            let mut arriving = std::mem::take(&mut in_flight);
+            if arriving.len() > 1 && rng.below(2) == 0 {
+                let i = rng.below(arriving.len());
+                let j = rng.below(arriving.len());
+                arriving.swap(i, j);
+            }
+            for f in arriving {
+                if rng.below(3) == 0 {
+                    continue; // lost
+                }
+                let repeats = if rng.below(6) == 0 { 2 } else { 1 };
+                for _ in 0..repeats {
+                    let out = rx.on_receive(&a, f.clone(), now);
+                    if let Some(msg) = out.deliver {
+                        delivered.push(msg.payload);
+                    }
+                    // ACKs travel back over the same lossy channel.
+                    for ack in out.transmit {
+                        if rng.below(4) != 0 {
+                            let back = tx.on_receive(&b, ack, now);
+                            in_flight.extend(back.transmit);
+                        }
+                    }
+                }
+            }
+
+            now += Duration::from_secs(6);
+            let tick = tx.tick(now);
+            in_flight.extend(tick.transmit.into_iter().map(|(_, f)| f));
+            let _ = rx.tick(now);
+        }
+
+        // Nothing invented, nothing corrupted.
+        for d in &delivered {
+            assert!(
+                messages.contains(d),
+                "trial {trial}: reassembly produced a payload that was never sent: \
+                 {} bytes",
+                d.len()
+            );
+        }
+        // Nothing delivered twice.
+        let mut seen = delivered.clone();
+        seen.sort();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            before,
+            "trial {trial}: a message was delivered more than once despite the \
+             duplicate-suppression window"
+        );
+    }
+}
+
+/// The peer table and every per-peer structure stay bounded no matter what a
+/// station does, including a station that never acknowledges anything.
+#[test]
+fn a_peer_that_never_acknowledges_is_eventually_given_up_on() {
+    let cfg = SessionConfig {
+        ack_timeout: Duration::from_secs(4),
+        max_retries: 3,
+        ..Default::default()
+    };
+    let mut s = Sessions::new(cfg);
+    let call: Callsign = "SM0ABC-7".parse().unwrap();
+    let mut now = Instant::now();
+
+    assert_eq!(s.send(&call, Kind::Msg, b"hello".to_vec(), true, now).len(), 1);
+    let mut transmissions = 1;
+    let mut lost = false;
+    for _ in 0..40 {
+        now += Duration::from_secs(5);
+        let out = s.tick(now);
+        transmissions += out.transmit.len();
+        if !out.lost.is_empty() {
+            lost = true;
+            break;
+        }
+    }
+    assert!(lost, "a station that never answers must eventually be dropped");
+    assert!(
+        transmissions <= 5,
+        "{transmissions} transmissions for one message: max_retries is 3, and every \
+         extra one is airtime spent on a station that is not listening"
+    );
+    assert_eq!(s.peers().count(), 0, "the peer should have been forgotten");
+}
+
+/// The airtime governor's own arithmetic, under values a configuration file
+/// can actually produce.
+#[test]
+fn the_governor_is_sane_across_the_configurable_range() {
+    use ax25ircd::ax25::airtime::{Governor, TxDecision, HARD_MAX_DUTY};
+    use ax25ircd::config::DutyConfig;
+
+    let mut rng = Rng::new(0xA1147123);
+    for _ in 0..2_000 {
+        let duty = DutyConfig {
+            enabled: true,
+            baud: [50, 300, 1200, 9600, 19200][rng.below(5)],
+            txdelay_ms: (rng.below(255) * 10) as u64,
+            txtail_ms: (rng.below(255) * 10) as u64,
+            window_secs: 1 + rng.below(3600) as u64,
+            max_duty_percent: 1 + rng.below(50) as u32,
+            max_continuous_secs: 1 + rng.below(300) as u64,
+            cooldown_secs: rng.below(600) as u64,
+            hourly_airtime_secs: rng.below(3600) as u64,
+            max_hold_secs: 1 + rng.below(600) as u64,
+        };
+        let air = duty.to_airtime();
+        // The clamp holds regardless of what was asked for.
+        assert!(air.effective_duty() <= HARD_MAX_DUTY);
+
+        // Only exercise configurations the validator would accept. It
+        // deliberately rejects a duty allowance too small to fit one frame,
+        // because such a station could never transmit at all.
+        if air.check_hardware_safe().is_err() {
+            continue;
+        }
+        let mut g = Governor::new(air.clone());
+        let octets = 16 + rng.below(300);
+        let allowance = air.window.mul_f64(air.effective_duty());
+        if g.airtime_for(octets) > allowance {
+            continue;
+        }
+        // Costing a frame never panics and never returns nonsense.
+        let cost = g.airtime_for(octets);
+        assert!(cost >= air.txdelay + air.txtail);
+        assert!(cost < Duration::from_secs(3600));
+
+        // A decision is reached, and a deferral is always a finite wait.
+        let now = Instant::now();
+        match g.check(octets, now) {
+            TxDecision::Send => {
+                let keyed = g.record(octets, now);
+                assert_eq!(keyed, cost);
+            }
+            TxDecision::Defer(d, _) => assert!(d <= Duration::from_secs(3600)),
+        }
+        // The read-only estimate is finite. It can legitimately be as long as
+        // the rolling hour plus one frame when the hourly budget is spent —
+        // `max_hold` drops the frame long before then — but it must never run
+        // away.
+        let clear = g.time_until_clear(octets, now);
+        assert!(
+            clear <= Duration::from_secs(3600) + g.airtime_for(octets),
+            "an estimate of {clear:?} is longer than the longest window in play"
+        );
     }
 }

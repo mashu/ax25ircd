@@ -217,6 +217,12 @@ impl State {
     /// Claim a nickname for a user, releasing the old one. Returns false if it
     /// is already taken by somebody else.
     pub fn set_nick(&mut self, id: &UserId, nick: &str) -> bool {
+        // Claiming a nick for a user that does not exist would leave the
+        // registry pointing at nothing: `remove_user` could never clean it up,
+        // so the nick would be reserved for the life of the process.
+        if !self.users.contains_key(id) {
+            return false;
+        }
         let key = lower(nick);
         if let Some(owner) = self.nicks.get(&key) {
             if owner != id {
@@ -249,6 +255,12 @@ impl State {
     }
 
     pub fn join(&mut self, id: &UserId, channel: &str) -> Option<MemberFlags> {
+        // Same reasoning as `set_nick`: a membership entry for a user that
+        // does not exist is invisible to `names_of` (which looks the user up)
+        // but still counted in `members`, and nothing ever removes it.
+        if !self.users.contains_key(id) {
+            return None;
+        }
         let key = lower(channel);
         let (rf, first, operators) = {
             let chan = self.channels.get(&key)?;
@@ -478,6 +490,24 @@ mod tests {
         assert_eq!(s.remove_user(&UserId::Ip(1)), vec!["#a"]);
         assert!(s.channel("#a").unwrap().members.is_empty());
         assert!(!s.nick_taken("alice"));
+    }
+
+    #[test]
+    fn a_user_that_does_not_exist_cannot_claim_a_nick_or_a_channel() {
+        let mut s = State::default();
+        s.ensure_channel("#a", false).configured = true;
+        let ghost = UserId::Ip(99);
+
+        assert!(!s.set_nick(&ghost, "phantom"));
+        assert!(
+            !s.nick_taken("phantom"),
+            "the nick registry would point at nobody and never be cleaned up"
+        );
+        assert!(s.join(&ghost, "#a").is_none());
+        assert!(
+            s.channel("#a").unwrap().members.is_empty(),
+            "a membership with no user is invisible to NAMES but counted in the member list"
+        );
     }
 
     #[test]

@@ -386,3 +386,75 @@ async fn interlock_failures_are_reported_in_the_command_s_own_words() {
     assert!(check.reason().contains("exited"), "{}", check.reason());
     assert_eq!(Check::Pass.reason(), "ok");
 }
+
+#[tokio::test]
+async fn the_backlog_is_not_leaked_when_the_tnc_link_dies() {
+    // A "TNC" that drops the first few connections and then behaves —
+    // Direwolf restarting, a flaky USB serial adapter, a network TNC on a bad
+    // link. Once it settles, everything queued must drain and the airtime
+    // accounting must come back to zero. Anything left is a reservation that
+    // was made and never released, and it is permanent: admission control
+    // subtracts it from the backlog budget forever.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut attempt = 0u32;
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            attempt += 1;
+            if attempt <= 4 {
+                // Let the client write, then hang up mid-conversation.
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                continue;
+            }
+            // From now on, read everything and stay up.
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                while stream.read(&mut buf).await.unwrap_or(0) > 0 {}
+            });
+        }
+    });
+
+    let (tnc, _rx) = tnc::spawn(TncConfig {
+        link: ax25ircd::ax25::TncLink::Tcp {
+            host: "127.0.0.1".into(),
+            port: addr.port(),
+        },
+        max_frame: 512,
+        tx_pacing: Duration::from_millis(0),
+        tx_queue_depth: 64,
+        airtime: fast(),
+        ..TncConfig::default()
+    });
+
+    // A burst per cycle, not one frame: the first frame of each connection
+    // goes out at once (the pacing gate starts open), so only a burst leaves
+    // a frame sitting in the pump's pending slot when the link dies. That is
+    // the frame whose reservation can be lost.
+    let mut sent = 0;
+    for _ in 0..6 {
+        for _ in 0..4 {
+            if tnc.try_send(frame("SK0MT-1", b"into a dying link")) {
+                sent += 1;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    // Now give it plenty of time on the healthy connection to drain.
+    for _ in 0..60 {
+        if tnc.queued() == Duration::ZERO && tnc.airtime().queued_frame_count() == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    panic!(
+        "after the link recovered, {:?} of airtime in {} frame(s) is still counted as \
+         queued out of {sent} sent: a frame held when the link dropped never released \
+         its reservation",
+        tnc.queued(),
+        tnc.airtime().queued_frame_count(),
+    );
+}
