@@ -352,9 +352,10 @@ impl State {
     }
 
     pub fn ip_count_from_host(&self, host: &str) -> usize {
+        let key = crate::accounts::host_ban_key(host);
         self.users
             .values()
-            .filter(|u| !u.is_rf() && u.host == host)
+            .filter(|u| !u.is_rf() && crate::accounts::host_ban_key(&u.host) == key)
             .count()
     }
 

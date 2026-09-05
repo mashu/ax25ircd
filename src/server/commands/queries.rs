@@ -32,8 +32,17 @@ impl Server {
             if u.oper {
                 flags.push('*');
             }
-            if u.is_rf() {
-                flags.push('@');
+            // `@`/`+` are channel status, only meaningful when WHO is of a
+            // channel. Marking every RF station with `@` made them look like
+            // channel operators in `/who #rf`.
+            if is_channel_name(&mask) {
+                if let Some(f) = self
+                    .state
+                    .channel(&mask)
+                    .and_then(|c| c.members.get(&u.id).copied())
+                {
+                    flags.push_str(f.sigil());
+                }
             }
             let real = format!("0 {}", u.realname);
             self.numeric(
@@ -89,14 +98,14 @@ impl Server {
         if target.rf_tx && !target.is_rf() {
             self.numeric(
                 uid,
-                num::RPL_WHOISOPERATOR,
+                num::RPL_WHOISSPECIAL,
                 &[
                     &target.nick,
                     "has RF-TX privilege (messages may be radiated)",
                 ],
             );
         }
-        if let (UserId::Rf(call), Some(peer)) = (&target.id, {
+        if let (UserId::Rf(_), Some(peer)) = (&target.id, {
             let c = target.id.callsign().cloned();
             c.and_then(|c| self.radio.sessions.peer(&c))
         }) {
@@ -109,13 +118,18 @@ impl Server {
             self.numeric(
                 uid,
                 num::RPL_WHOISIDLE,
-                &[&call.to_string(), &idle.to_string(), &info],
+                &[&target.nick, &idle.to_string(), &info],
             );
         }
         let channels: Vec<String> = target
             .channels
             .iter()
-            .filter_map(|k| self.state.channels.get(k).map(|c| c.name.clone()))
+            .filter_map(|k| {
+                self.state.channels.get(k).map(|c| {
+                    let sigil = c.members.get(&target.id).map(|f| f.sigil()).unwrap_or("");
+                    format!("{sigil}{}", c.name)
+                })
+            })
             .collect();
         if !channels.is_empty() {
             let joined = channels.join(" ");

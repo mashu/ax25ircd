@@ -184,11 +184,11 @@ separate:
   on the internet until the next point.
 * **RF-TX is a persisted grant on a registered nick.** The user `REGISTER`s,
   a control operator `RADIO GRANT`s that nick (stored in `nicks.json`), and
-the user `IDENTIFY`s on later connects. `CALLSIGN` is still required, and
-is restored from the nick file after IDENTIFY. `OPER` has RF-TX for that
-session without a grant. Internet clients that will do any of this must
-connect with TLS (`[listen.tls]`). A plaintext connection from off the
-machine is listen-only.
+the user `IDENTIFY`s on later connects. `CALLSIGN` is still required. IDENTIFY
+binds a callsign claimed this session, or restores the stored one. `OPER` has
+RF-TX for that session without a grant. Internet clients that will do any of
+this must connect with TLS (`[listen.tls]`). A plaintext connection from off
+the machine is listen-only.
 * RF stations are not IRC accounts. Their identity is the AX.25 source
   address; `allow_callsigns` / `deny_callsigns` are the gate.
 
@@ -201,7 +201,8 @@ control operator and nicks they have granted can key the transmitter.
 If you need people on the internet to speak or control the transmitter,
 configure `[listen.tls]` (implicit TLS, typically port 6697). A plaintext
 socket from off this machine is listen-only: they can watch `#rf`, they
-cannot send a password or a transmission. TLS protects the hop to the
+cannot IDENTIFY, REGISTER, OPER, or transmit. A connection `PASS` is still
+accepted so a passworded server remains watchable. TLS protects the hop to the
 gateway and stops there. Everything that reaches the antenna is in the
 clear, by law and by design.
 

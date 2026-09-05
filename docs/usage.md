@@ -13,8 +13,9 @@ in the clear.
   next to the radio.
 * **From the internet** — implicit TLS on `[listen.tls]` (usually port 6697).
   Required to speak, register, identify, `OPER`, or control the transmitter.
-* **Plaintext from off-box** is listen-only: join and watch. No passwords, no
-  `PRIVMSG`, no `RADIO GRANT`.
+* **Plaintext from off-box** is listen-only: join and watch. No
+  `IDENTIFY`/`REGISTER`/`OPER`, no `PRIVMSG`, no `RADIO GRANT`. A connection
+  `PASS` is still accepted so a passworded server remains watchable.
 
 ### irssi, on the radio machine
 
@@ -143,13 +144,14 @@ On the next connect:
 /quote IDENTIFY your-secret-password
 ```
 
-That restores RF-TX (if an oper granted it) and the stored callsign.
+That restores RF-TX (if an oper granted it). A `CALLSIGN` claimed this
+session is bound to the nick; otherwise the stored callsign is restored.
 
 `UNREGISTER <password>` deletes the account, including the grant and the
 stored callsign.
 
-Changing nick drops `IDENTIFY`. Identify again on the nick that owns the
-grant.
+Changing nick drops `IDENTIFY` and the session `CALLSIGN`. Identify again on
+the nick that owns the grant.
 
 Callsign-shaped nicks (`SM0ABC|7`, `SM0ABC-7`, `SM0ABC\7`) are reserved for
 stations heard on the air. An internet user cannot take them.
@@ -272,7 +274,8 @@ store.
 | Channels, `+r`, channel operator lists, OPER passwords, `server.password` | config file | runtime `MODE` / `PASSWD` |
 | Who is connected, mailbox, RF sessions, `OPER` this session | | yes — in memory |
 
-On connect, `IDENTIFY` reloads RF-TX and the stored callsign. `OPER` is entered
+On connect, `IDENTIFY` reloads RF-TX. A `CALLSIGN` claimed this session is
+bound; otherwise the stored callsign is restored. `OPER` is entered
 again each session. The mailbox is a cache, not a mail server.
 
 ## Channel modes
@@ -322,7 +325,7 @@ OPER <name> <pass>   control operator this session ([[opers]] in the config)
 CALLSIGN <call>      claim a callsign; +v on +r. Required before radiation.
 CALLSIGN             show the current claim
 REGISTER <password>  bind this nick (and current CALLSIGN) so nobody else can use them
-IDENTIFY <password>  prove you own it; reloads RF-TX and last CALLSIGN
+IDENTIFY <password>  prove you own it; bind this session's CALLSIGN, or restore the stored one
 UNREGISTER <password>
 RADIO                transmitter status (anyone)
 KICK <chan> <nick>   channel op or OPER

@@ -177,6 +177,18 @@ fn registration_sends_the_expected_welcome_burst() {
         lines.iter().any(|l| l.contains("CASEMAPPING=rfc1459")),
         "ISUPPORT should tell the client how nicks compare"
     );
+    let five = lines
+        .iter()
+        .find(|l| l.split(' ').any(|f| f == "005"))
+        .expect("missing 005");
+    assert!(
+        five.contains(" PREFIX=(ov)@+"),
+        "ISUPPORT tokens are separate parameters, not one underscore-glued field: {five}"
+    );
+    assert!(
+        !five.contains("_PREFIX="),
+        "005 must not scrub token spaces into underscores: {five}"
+    );
 }
 
 #[test]
@@ -332,6 +344,30 @@ fn a_server_password_is_required_when_configured() {
     n.send(good, "USER bob 0 * :Bob");
     assert!(has_numeric(&n.drain(good), "001"));
 
+    // Off-box plaintext is listen-only, but it still has to be able to PASS
+    // or a passworded server is unwatchable.
+    let (out, rx) = mpsc::channel(64);
+    n.server.handle(Event::Connected {
+        id: 4,
+        host: "203.0.113.4".into(),
+        listen_only: true,
+        out,
+        hangup: None,
+    });
+    n.rx.push((4, rx));
+    n.send(4, "PASS letmein");
+    n.send(4, "NICK eve");
+    n.send(4, "USER eve 0 * :Eve");
+    let watched = n.drain(4);
+    assert!(
+        has_numeric(&watched, "001"),
+        "a spectator may PASS to watch: {watched:?}"
+    );
+    assert!(
+        !has_numeric(&watched, "484"),
+        "PASS is not a speak command: {watched:?}"
+    );
+
     // PASS with no argument is a parameter error, not a silent pass.
     let none = n.raw_client(3);
     n.send(none, "PASS");
@@ -349,6 +385,16 @@ fn joining_and_parting_a_channel() {
     assert!(has_numeric(&lines, "332"), "topic: {lines:?}");
     assert!(has_numeric(&lines, "353"), "names");
     assert!(has_numeric(&lines, "366"), "end of names");
+
+    let again = n.ask(a, "JOIN #lobby");
+    assert!(
+        has_numeric(&again, "353") && has_numeric(&again, "366"),
+        "re-JOIN must refresh NAMES, not hang: {again:?}"
+    );
+    assert!(
+        again.iter().all(|l| !l.contains("JOIN #lobby")),
+        "already on the channel: do not announce a second JOIN: {again:?}"
+    );
 
     let lines = n.ask(a, "PART #lobby :bye");
     assert!(lines.iter().any(|l| l.contains("PART #lobby")));
@@ -452,6 +498,13 @@ fn topic_requires_operator_when_locked() {
     assert_eq!(
         n.server.state.channel("#lobby").unwrap().topic.as_deref(),
         Some("a better topic")
+    );
+
+    n.drain(b);
+    n.send(a, "TOPIC #lobby :a better topic");
+    assert!(
+        n.drain(b).is_empty(),
+        "setting the topic to itself is a no-op on IRC"
     );
 
     // Reading it back, and reading an empty one.
@@ -560,7 +613,10 @@ fn away_is_reported_to_whoever_messages_you() {
     let a = n.client(1, "alice");
     let b = n.client(2, "bob");
     n.send(b, "AWAY :walking the dog");
-    n.drain(b);
+    assert!(
+        has_numeric(&n.drain(b), "306"),
+        "the client needs RPL_NOWAWAY to know AWAY stuck"
+    );
 
     assert!(has_numeric(&n.ask(a, "PRIVMSG bob :you there?"), "301"));
     assert!(n
@@ -569,7 +625,7 @@ fn away_is_reported_to_whoever_messages_you() {
         .any(|l| l.contains("walking the dog")));
 
     n.send(b, "AWAY");
-    n.drain(b);
+    assert!(has_numeric(&n.drain(b), "305"));
     assert!(!has_numeric(&n.ask(a, "PRIVMSG bob :back?"), "301"));
 }
 
@@ -801,6 +857,34 @@ fn a_non_oper_cannot_change_r_on_any_channel() {
 }
 
 #[test]
+fn turning_r_on_makes_the_channel_an_rf_channel() {
+    let mut n = Net::new();
+    let a = n.client(1, "alice");
+    let op = n.client(2, "root");
+    n.send(a, "JOIN #room");
+    n.drain(a);
+    assert!(
+        n.server.state.channel("#room").unwrap().members[&user_id(a)].op,
+        "first joiner is op on a local channel"
+    );
+
+    n.send(op, "OPER root operpass1");
+    n.drain(op);
+    n.send(op, "MODE #room +r");
+    n.drain(op);
+    let chan = n.server.state.channel("#room").unwrap();
+    assert!(chan.rf);
+    assert!(
+        chan.moderated,
+        "+r implies +m, as configured RF channels do"
+    );
+    assert!(
+        !chan.members[&user_id(a)].op,
+        "the first joiner must not keep +o after the channel becomes +r"
+    );
+}
+
+#[test]
 fn a_refused_mode_change_is_not_announced_to_the_channel() {
     let mut n = Net::new();
     let a = n.client(1, "alice");
@@ -837,6 +921,26 @@ fn oper_accepts_only_the_configured_credentials() {
     assert!(has_numeric(&n.ask(a, "OPER root operpass1"), "381"));
     assert!(n.server.state.user(&user_id(a)).unwrap().oper);
     assert!(n.ask(a, "MODE alice").iter().any(|l| l.contains("+o")));
+    let whois = n.ask(a, "WHOIS alice");
+    assert!(
+        whois
+            .iter()
+            .any(|l| l.contains(" 313 ") && l.contains("control operator")),
+        "{whois:?}"
+    );
+    assert!(
+        whois
+            .iter()
+            .any(|l| l.contains(" 320 ") && l.contains("RF-TX")),
+        "RF-TX is not IRC operator status: {whois:?}"
+    );
+    assert!(
+        whois
+            .iter()
+            .filter(|l| l.contains(" 313 "))
+            .all(|l| !l.contains("RF-TX")),
+        "313 must not be reused for RF-TX: {whois:?}"
+    );
 }
 
 #[test]
@@ -911,6 +1015,89 @@ fn a_registered_callsign_cannot_be_taken_by_another_nick() {
 }
 
 #[test]
+fn identify_binds_the_session_callsign() {
+    let mut n = Net::new();
+    let a = n.client(1, "alice");
+    n.send(a, "CALLSIGN SM0XYZ");
+    n.send(a, "REGISTER goodpassword");
+    n.drain(a);
+    n.server.handle(Event::Disconnected {
+        id: a,
+        reason: "gone".into(),
+    });
+
+    let a = n.client(1, "alice");
+    n.send(a, "CALLSIGN SM0ABC");
+    n.drain(a);
+    assert_eq!(
+        n.server.accounts.owner_of_callsign("SM0XYZ").as_deref(),
+        Some("alice")
+    );
+
+    let lines = n.ask(a, "IDENTIFY goodpassword");
+    assert!(
+        lines.iter().any(|l| l.contains("Password accepted")),
+        "{lines:?}"
+    );
+    assert_eq!(
+        n.server.accounts.owner_of_callsign("SM0ABC").as_deref(),
+        Some("alice"),
+        "IDENTIFY must bind the callsign claimed this session"
+    );
+    assert!(
+        n.server.accounts.owner_of_callsign("SM0XYZ").is_none(),
+        "the previous stored callsign is replaced"
+    );
+}
+
+#[test]
+fn changing_nick_drops_the_callsign_claim() {
+    let mut n = Net::new();
+    let a = n.client(1, "alice");
+    n.send(a, "CALLSIGN SM0XYZ");
+    n.send(a, "REGISTER goodpassword");
+    n.drain(a);
+    n.send(a, "NICK ally");
+    n.drain(a);
+    assert!(
+        n.server.state.user(&user_id(a)).unwrap().callsign.is_none(),
+        "a nick change must not keep another nick's callsign"
+    );
+    assert!(!n.server.state.user(&user_id(a)).unwrap().nick_identified);
+    assert_eq!(
+        n.server.accounts.owner_of_callsign("SM0XYZ").as_deref(),
+        Some("alice")
+    );
+}
+
+#[test]
+fn a_nick_case_change_keeps_identify_and_callsign() {
+    let mut n = Net::new();
+    let a = n.client(1, "alice");
+    n.send(a, "CALLSIGN SM0XYZ");
+    n.send(a, "REGISTER goodpassword");
+    n.drain(a);
+
+    let lines = n.ask(a, "NICK alice");
+    assert!(
+        !has_numeric(&lines, "433"),
+        "own nick is not in use by someone else: {lines:?}"
+    );
+    assert!(n.server.state.user(&user_id(a)).unwrap().nick_identified);
+    assert_eq!(n.server.state.user(&user_id(a)).unwrap().nick, "alice");
+
+    n.send(a, "NICK Alice");
+    n.drain(a);
+    let u = n.server.state.user(&user_id(a)).unwrap();
+    assert_eq!(u.nick, "Alice");
+    assert!(u.nick_identified, "a case change is the same nick");
+    assert_eq!(
+        u.callsign.as_ref().map(|c| c.to_string()).as_deref(),
+        Some("SM0XYZ")
+    );
+}
+
+#[test]
 fn oper_can_drop_a_nick_and_unclaim_a_callsign() {
     let mut n = Net::new();
     let a = n.client(1, "alice");
@@ -945,6 +1132,10 @@ fn oper_can_drop_a_nick_and_unclaim_a_callsign() {
     n.drain(op);
     assert!(!n.server.accounts.is_registered("alice"));
     assert!(!n.server.state.user(&user_id(a)).unwrap().nick_identified);
+    assert!(
+        n.server.state.user(&user_id(a)).unwrap().callsign.is_none(),
+        "the bound callsign went with the nick"
+    );
 }
 
 #[test]

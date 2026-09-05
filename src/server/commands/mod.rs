@@ -39,13 +39,16 @@ use super::Server;
 
 /// Commands a listen-only (plaintext, off-box) connection may issue.
 ///
-/// They may watch a channel. They may not send text, a password, a callsign
-/// claim, or anything that keys or retunes the transmitter.
+/// They may watch a channel. They may send the connection `PASS` so a
+/// passworded server is still watchable. They may not send text, claim a
+/// callsign, IDENTIFY/REGISTER/OPER, or anything that keys or retunes the
+/// transmitter.
 fn listen_only_command(cmd: &str, msg: &Message) -> bool {
     match cmd {
-        "CAP" | "NICK" | "USER" | "QUIT" | "PING" | "PONG" | "JOIN" | "PART" | "NAMES" | "LIST"
-        | "WHO" | "WHOIS" | "WHOWAS" | "MOTD" | "LUSERS" | "AWAY" | "RADIO" | "VERSION"
-        | "TIME" | "ADMIN" | "INFO" | "HELP" | "STATS" | "LINKS" | "ISON" | "USERHOST" => true,
+        "CAP" | "PASS" | "NICK" | "USER" | "QUIT" | "PING" | "PONG" | "JOIN" | "PART" | "NAMES"
+        | "LIST" | "WHO" | "WHOIS" | "WHOWAS" | "MOTD" | "LUSERS" | "AWAY" | "RADIO"
+        | "VERSION" | "TIME" | "ADMIN" | "INFO" | "HELP" | "STATS" | "LINKS" | "ISON"
+        | "USERHOST" => true,
         "MODE" => msg.param(1).is_none(),
         "TOPIC" => msg.param(1).is_none(),
         _ => false,
@@ -175,7 +178,20 @@ impl Server {
                     .map(|s| s.to_string())
                     .filter(|s| !s.is_empty());
                 if let Some(u) = self.state.user_mut(&uid) {
-                    u.away = away;
+                    u.away = away.clone();
+                }
+                if away.is_some() {
+                    self.numeric(
+                        &uid,
+                        num::RPL_NOWAWAY,
+                        &["You have been marked as being away"],
+                    );
+                } else {
+                    self.numeric(
+                        &uid,
+                        num::RPL_UNAWAY,
+                        &["You are no longer marked as being away"],
+                    );
                 }
             }
             "OPER" => self.cmd_oper(&uid, &msg),

@@ -507,6 +507,81 @@ async fn irc_notice_and_ctcp_are_not_put_on_the_air() {
 }
 
 #[tokio::test]
+async fn a_long_action_is_truncated_on_the_air() {
+    let text = CONFIG.replace("[policy]", "[policy]\nmax_rf_text_len = 20");
+    let mut rf = Rf::with(&text);
+    let a = rf.client(1, "alice");
+    rf.send(a, "OPER root operpass1");
+    rf.send(a, "CALLSIGN SM0XYZ");
+    rf.send(a, "JOIN #rf");
+    rf.heard("SM0ABC-7", Kind::Join, &["#rf"]);
+    rf.drain(a);
+    let _ = rf.transmitted().await;
+
+    let rest = "x".repeat(40);
+    rf.send(a, &format!("PRIVMSG #rf :\u{1}ACTION {rest}\u{1}"));
+    let sent = rf.transmitted().await;
+    let bodies: Vec<String> = sent.iter().flat_map(|f| f.fields()).collect();
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b.contains("/me ") && b.contains('\u{2026}')),
+        "the radiated /me must be the shortened body: {sent:?}"
+    );
+    assert!(
+        bodies.iter().all(|b| !b.contains(&rest)),
+        "the unshortened ACTION must not go out: {sent:?}"
+    );
+}
+
+#[tokio::test]
+async fn rf_channel_flood_still_reaches_other_irc_users() {
+    let text = CONFIG
+        .replace(
+            "rf_channel_msgs_per_min = 600",
+            "rf_channel_msgs_per_min = 1",
+        )
+        .replace("rf_channel_burst = 100", "rf_channel_burst = 1");
+    let mut rf = Rf::with(&text);
+    let a = rf.client(1, "alice");
+    let b = rf.client(2, "bob");
+    rf.send(a, "OPER root operpass1");
+    rf.send(a, "CALLSIGN SM0XYZ");
+    rf.send(a, "JOIN #rf");
+    rf.send(b, "JOIN #rf");
+    rf.heard("SM0ABC-7", Kind::Join, &["#rf"]);
+    rf.drain(a);
+    rf.drain(b);
+    let _ = rf.transmitted().await;
+
+    rf.send(a, "PRIVMSG #rf :first");
+    rf.drain(a);
+    assert!(
+        rf.drain(b).iter().any(|l| l.contains("first")),
+        "the first message is delivered"
+    );
+    let _ = rf.transmitted().await;
+
+    rf.send(a, "PRIVMSG #rf :second");
+    let alice = rf.drain(a);
+    assert!(
+        alice.iter().any(|l| l.contains("Flood protection")),
+        "the sender is told: {alice:?}"
+    );
+    let bob = rf.drain(b);
+    assert!(
+        bob.iter().any(|l| l.contains("second")),
+        "flood protection is for the air, not for IRC: {bob:?}"
+    );
+    assert!(
+        alice.iter().all(|l| !l.contains("Queued for RF")
+            && !l.contains("stay on IRC")
+            && !l.contains("Messages from users with RF-TX")),
+        "flood must not also send the generic air-status notice: {alice:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_message_from_a_station_that_never_joined_still_arrives() {
     let mut rf = Rf::new();
     let a = rf.client(1, "alice");
@@ -747,6 +822,38 @@ async fn whois_on_a_station_reports_what_the_radio_side_knows() {
     assert!(
         lines.iter().any(|l| l.contains("last heard")),
         "idle time and queue depth belong in WHOIS for a station: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains(" 317 ") && l.contains("SM0ABC|7")),
+        "317 must name the IRC nick, not the AX.25 call: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn who_on_an_rf_channel_does_not_mark_stations_as_ops() {
+    let mut rf = Rf::new();
+    let a = rf.client(1, "alice");
+    rf.send(a, "JOIN #rf");
+    rf.heard("SM0ABC-7", Kind::Join, &["#rf"]);
+    rf.drain(a);
+
+    let lines = {
+        rf.send(a, "WHO #rf");
+        rf.drain(a)
+    };
+    let station = lines
+        .iter()
+        .find(|l| l.contains("SM0ABC|7") && l.contains(" 352 "))
+        .unwrap_or_else(|| panic!("WHO should list the station: {lines:?}"));
+    assert!(
+        station.split_whitespace().any(|f| f == "H+"),
+        "a station is voiced on +r, not a channel operator: {station}"
+    );
+    assert!(
+        !station.split_whitespace().any(|f| f == "H@"),
+        "WHO @ means chanop: {station}"
     );
 }
 

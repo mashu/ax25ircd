@@ -478,6 +478,7 @@ impl Server {
             );
             if let Some(u) = self.state.user_mut(&uid) {
                 u.identify_by = None;
+                u.callsign = None;
             }
             if self.state.nick_taken(&guest) {
                 self.notice_user(&uid, "This nick is registered. Disconnecting.");

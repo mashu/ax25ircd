@@ -46,6 +46,24 @@ fn chat_for_air(text: &str, notice: bool) -> Option<String> {
     }
 }
 
+/// Put the screened air body back into the IRC delivery.
+///
+/// `/me` is screened as `/me rest` and may be shortened. Rebuild the CTCP
+/// ACTION so clients still highlight it, with the same (possibly truncated)
+/// rest that will be radiated. Leaving the original CTCP in place was how a
+/// long `/me` could be flagged truncated and still go out in full.
+fn delivery_text_after_screen(original: &str, screened: Screened) -> (String, bool) {
+    if parse_ctcp(original).is_some_and(|(cmd, _)| cmd.eq_ignore_ascii_case("ACTION")) {
+        if let Some(rest) = screened.text.strip_prefix("/me ") {
+            return (format!("\u{1}ACTION {rest}\u{1}"), screened.truncated);
+        }
+        if screened.text == "/me" {
+            return ("\u{1}ACTION\u{1}".into(), screened.truncated);
+        }
+    }
+    (screened.text, screened.truncated)
+}
+
 impl Server {
     pub(super) fn cmd_privmsg(&mut self, uid: &UserId, msg: &Message, notice: bool) {
         let Some(target) = msg.param(0).map(|s| s.to_string()) else {
@@ -95,6 +113,7 @@ impl Server {
             let air = chat_for_air(&text, notice);
             let mut allow_rf =
                 air.is_some() && chan.rf && chan.has_rf_members() && self.radio.available();
+            let mut rf_flooded = false;
             if allow_rf {
                 if !self.policy.rf_channel_rate_ok(
                     &format!("{}:{}", self.rate_key(uid), chan.name),
@@ -108,18 +127,19 @@ impl Server {
                         "flood_rf",
                         &[("nick", &sender.nick), ("channel", &chan.name)],
                     );
-                    return;
+                    // The cap is on radiation, not on the internet side.
+                    allow_rf = false;
+                    rf_flooded = true;
                 }
+            }
+            if allow_rf {
                 match self.screen_for_air(uid, air.as_deref().unwrap_or(&text)) {
                     Some(s) => {
-                        truncated = s.truncated;
-                        if parse_ctcp(&text).is_none() {
-                            text = s.text;
-                        }
+                        (text, truncated) = delivery_text_after_screen(&text, s);
                     }
                     None => allow_rf = false,
                 }
-            } else if chan.rf && air.is_some() {
+            } else if !rf_flooded && chan.rf && air.is_some() {
                 let why = self.channel_air_line(&chan.name);
                 if !why.is_empty() {
                     self.notice_user(uid, &why);
@@ -170,10 +190,7 @@ impl Server {
             };
             match self.screen_for_air(uid, &air) {
                 Some(s) => {
-                    truncated = s.truncated;
-                    if parse_ctcp(&text).is_none() {
-                        text = s.text;
-                    }
+                    (text, truncated) = delivery_text_after_screen(&text, s);
                 }
                 None => return,
             }
@@ -404,5 +421,25 @@ mod chat_allowlist {
         assert!(chat_for_air("hello", true).is_none());
         assert!(chat_for_air("\u{1}VERSION\u{1}", false).is_none());
         assert!(chat_for_air("\u{1}PING 1\u{1}", false).is_none());
+    }
+
+    #[test]
+    fn a_truncated_action_keeps_the_shortened_body() {
+        use super::super::Screened;
+        use super::delivery_text_after_screen;
+
+        let original = format!("\u{1}ACTION {}\u{1}", "x".repeat(40));
+        let screened = Screened {
+            text: format!("/me {}\u{2026}", "x".repeat(10)),
+            truncated: true,
+        };
+        let (text, truncated) = delivery_text_after_screen(&original, screened);
+        assert!(truncated);
+        assert!(text.contains("\u{1}ACTION "));
+        assert!(text.contains('\u{2026}'));
+        assert!(
+            !text.contains(&"x".repeat(40)),
+            "the unshortened rest must not survive: {text:?}"
+        );
     }
 }

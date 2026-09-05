@@ -56,6 +56,23 @@ impl Server {
             self.numeric(uid, num::ERR_NOSUCHCHANNEL, &[name, "No such channel"]);
             return;
         }
+        if self
+            .state
+            .channel(name)
+            .is_some_and(|c| c.members.contains_key(uid))
+        {
+            // Already here. Clients re-JOIN to refresh NAMES; answering with
+            // silence looks like a hung join, and counting it against the
+            // channel cap would 405 a user who is merely still in the room.
+            let real_name = self
+                .state
+                .channel(name)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| name.to_string());
+            self.send_topic(uid, &real_name, false);
+            self.send_names(uid, &real_name);
+            return;
+        }
         let count = self.state.user(uid).map(|u| u.channels.len()).unwrap_or(0);
         if count >= self.config.server.max_channels_per_user {
             self.numeric(
@@ -289,6 +306,9 @@ impl Server {
         // A TOPIC that sets the topic to what it already was is a no-op on
         // IRC and would be a transmission on RF. Notice it before deciding.
         let changed = chan.topic.as_deref() != Some(topic.as_str());
+        if !changed {
+            return;
+        }
         if let Some(c) = self.state.channel_mut(&name) {
             c.topic = Some(topic.clone());
             c.topic_setter = nick.clone();
@@ -391,6 +411,7 @@ impl Server {
         let mut applied = String::new();
         let mut applied_args: Vec<String> = Vec::new();
         let mut last_sign: Option<char> = None;
+        let mut rf_refresh: Vec<UserId> = Vec::new();
         let push_mode =
             |applied: &mut String, last_sign: &mut Option<char>, adding: bool, letter: char| {
                 let sign = if adding { '+' } else { '-' };
@@ -433,10 +454,39 @@ impl Server {
                             num::ERR_NOPRIVILEGES,
                             &["Only a control operator may change +r"],
                         );
-                    } else if let Some(ch) = self.state.channel_mut(&target) {
-                        if ch.rf != adding {
-                            ch.rf = adding;
+                    } else {
+                        let mut changed = false;
+                        let mut added_m = false;
+                        let members: Vec<UserId> = {
+                            let Some(ch) = self.state.channel_mut(&target) else {
+                                continue;
+                            };
+                            if ch.rf == adding {
+                                Vec::new()
+                            } else {
+                                changed = true;
+                                ch.rf = adding;
+                                // Configured +r channels are +m. Turning +r on
+                                // a local channel must not leave it unmoderated
+                                // with the first joiner still holding +o.
+                                if adding && !ch.moderated {
+                                    ch.moderated = true;
+                                    added_m = true;
+                                }
+                                if adding {
+                                    for f in ch.members.values_mut() {
+                                        f.op_manual = false;
+                                    }
+                                }
+                                ch.members.keys().cloned().collect()
+                            }
+                        };
+                        if changed {
                             push_mode(&mut applied, &mut last_sign, adding, 'r');
+                            if added_m {
+                                push_mode(&mut applied, &mut last_sign, adding, 'm');
+                            }
+                            rf_refresh = members;
                         }
                     }
                 }
@@ -565,6 +615,9 @@ impl Server {
             if let UserId::Ip(id) = member {
                 self.send_raw(id, line.clone());
             }
+        }
+        for member in rf_refresh {
+            self.refresh_privileges(&member);
         }
     }
 

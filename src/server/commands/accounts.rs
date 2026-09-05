@@ -187,6 +187,10 @@ impl Server {
         }
         match kind {
             AuthKind::Identify => {
+                if !self.accounts.is_registered(&user.nick) {
+                    self.notice_account_error(&uid, AccountError::NotRegistered);
+                    return;
+                }
                 if let Some(u) = self.state.user_mut(&uid) {
                     u.nick_identified = true;
                     u.identify_by = None;
@@ -194,6 +198,10 @@ impl Server {
                 self.notice_user(
                     &uid,
                     "Password accepted. You own this nick for this session.",
+                );
+                self.bind_session_callsign(
+                    &uid,
+                    "That callsign already belongs to another nick. CALLSIGN something else.",
                 );
                 self.audit
                     .event("identify", &[("nick", &user.nick), ("host", &user.host)]);
@@ -220,33 +228,10 @@ impl Server {
                     u.nick_identified = true;
                     u.identify_by = None;
                 }
-                if let Some(c) = user.callsign.as_ref() {
-                    match self.accounts.set_callsign(&user.nick, &c.to_string()) {
-                        Ok(()) => {
-                            self.strip_callsign_claims(
-                                c,
-                                Some(&uid),
-                                &format!("Callsign {c} now belongs to another nick."),
-                            );
-                            self.notice_user(
-                                &uid,
-                                &format!(
-                                    "Callsign {c} is bound to this nick. Nobody else can claim it."
-                                ),
-                            );
-                        }
-                        Err(AccountError::CallsignTaken) => {
-                            if let Some(u) = self.state.user_mut(&uid) {
-                                u.callsign = None;
-                            }
-                            self.notice_user(
-                                &uid,
-                                "Nick registered, but that callsign already belongs to another nick. CALLSIGN something else.",
-                            );
-                        }
-                        Err(e) => self.notice_account_error(&uid, e),
-                    }
-                }
+                self.bind_session_callsign(
+                    &uid,
+                    "Nick registered, but that callsign already belongs to another nick. CALLSIGN something else.",
+                );
                 self.notice_user(
                     &uid,
                     "Nick registered. The password is stored as an Argon2id hash, not recoverable. IDENTIFY on next connect.",
@@ -270,6 +255,40 @@ impl Server {
                 Err(e) => self.notice_account_error(&uid, e),
             },
             AuthKind::Oper => self.grant_oper(&uid),
+        }
+    }
+
+    /// Persist this session's CALLSIGN onto the nick that just proved ownership.
+    ///
+    /// `CALLSIGN` before IDENTIFY is session-only. Without this, IDENTIFY
+    /// restored the *previous* stored callsign and left the one just claimed
+    /// unbound — so another nick could still REGISTER it.
+    fn bind_session_callsign(&mut self, uid: &UserId, taken_notice: &str) {
+        let Some(user) = self.state.user(uid).cloned() else {
+            return;
+        };
+        let Some(c) = user.callsign.clone() else {
+            return;
+        };
+        match self.accounts.set_callsign(&user.nick, &c.to_string()) {
+            Ok(()) => {
+                self.strip_callsign_claims(
+                    &c,
+                    Some(uid),
+                    &format!("Callsign {c} now belongs to another nick."),
+                );
+                self.notice_user(
+                    uid,
+                    &format!("Callsign {c} is bound to this nick. Nobody else can claim it."),
+                );
+            }
+            Err(AccountError::CallsignTaken) => {
+                if let Some(u) = self.state.user_mut(uid) {
+                    u.callsign = None;
+                }
+                self.notice_user(uid, taken_notice);
+            }
+            Err(e) => self.notice_account_error(uid, e),
         }
     }
 

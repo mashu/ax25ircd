@@ -623,6 +623,7 @@ impl Server {
             if let Some(u) = self.state.user_mut(&target) {
                 u.nick_identified = false;
                 u.rf_tx = u.oper;
+                u.callsign = None;
             }
             self.notice_user(&target, "A control operator unregistered this nick.");
             self.refresh_privileges(&target);

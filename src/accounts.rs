@@ -235,7 +235,7 @@ impl Accounts {
         if key.is_empty() {
             return Ok(false);
         }
-        if self.store.ip_bans.iter().any(|h| h == &key) {
+        if self.store.ip_bans.iter().any(|h| host_ban_key(h) == key) {
             return Ok(false);
         }
         self.store.ip_bans.push(key);
@@ -246,7 +246,7 @@ impl Accounts {
     pub fn unban_ip(&mut self, host: &str) -> Result<bool, AccountError> {
         let key = host_ban_key(host);
         let before = self.store.ip_bans.len();
-        self.store.ip_bans.retain(|h| h != &key);
+        self.store.ip_bans.retain(|h| host_ban_key(h) != key);
         if self.store.ip_bans.len() == before {
             return Ok(false);
         }
@@ -256,7 +256,7 @@ impl Accounts {
 
     pub fn is_ip_banned(&self, host: &str) -> bool {
         let key = host_ban_key(host);
-        self.store.ip_bans.iter().any(|h| h == &key)
+        self.store.ip_bans.iter().any(|h| host_ban_key(h) == key)
     }
 
     pub fn ip_bans(&self) -> &[String] {
@@ -367,9 +367,22 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), AccountError> {
     Ok(())
 }
 
-/// Compare IRC host strings the way KLINE stores them: lowercase, no IPv6 brackets.
+/// Compare IRC host strings the way KLINE stores them: lowercase, no IPv6
+/// brackets, IPv4-mapped IPv6 folded to IPv4 so `10.0.0.1` matches
+/// `[::ffff:10.0.0.1]`.
 pub fn host_ban_key(host: &str) -> String {
-    lower(host.trim().trim_matches(|c| c == '[' || c == ']'))
+    let trimmed = host.trim().trim_matches(|c| c == '[' || c == ']');
+    let lowered = lower(trimmed);
+    if let Ok(ip) = lowered.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => v4.to_string(),
+            std::net::IpAddr::V6(v6) => v6
+                .to_ipv4_mapped()
+                .map(|v4| v4.to_string())
+                .unwrap_or_else(|| v6.to_string()),
+        };
+    }
+    lowered
 }
 
 pub fn hash_password(password: &str) -> Result<String, AccountError> {
@@ -536,6 +549,20 @@ mod tests {
         let b = Accounts::load(&path).unwrap();
         assert!(b.is_ip_banned("203.0.113.9"));
         assert_eq!(b.ip_bans(), &["203.0.113.9".to_string()]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ipv4_mapped_bans_match_plain_v4() {
+        assert_eq!(host_ban_key("[::ffff:10.0.0.1]"), "10.0.0.1");
+        assert_eq!(host_ban_key("::ffff:10.0.0.1"), "10.0.0.1");
+        assert_eq!(host_ban_key("10.0.0.1"), "10.0.0.1");
+        let path = tmp();
+        let mut a = Accounts::empty(&path);
+        assert!(a.ban_ip("[::ffff:203.0.113.9]").unwrap());
+        assert!(a.is_ip_banned("203.0.113.9"));
+        assert!(a.unban_ip("203.0.113.9").unwrap());
+        assert!(!a.is_ip_banned("[::ffff:203.0.113.9]"));
         let _ = std::fs::remove_file(path);
     }
 }

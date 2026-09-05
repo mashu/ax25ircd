@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use crate::callsign::Callsign;
-use crate::irc::message::{is_valid_nick, Message};
+use crate::irc::message::{is_valid_nick, lower, Message};
 use crate::irc::numerics as num;
 
 use super::super::state::UserId;
@@ -62,6 +62,35 @@ impl Server {
             );
             return;
         }
+        let was_registered = self.state.user(uid).map(|u| u.registered).unwrap_or(false);
+        let old = self
+            .state
+            .user(uid)
+            .map(|u| u.nick.clone())
+            .unwrap_or_default();
+        // Own nick, including a case-only change. `nick_taken` is true for
+        // ourselves, and treating that as 433 made `/nick alice` and `/nick
+        // Alice` fail — and a case change going through the full path would
+        // have dropped IDENTIFY and CALLSIGN.
+        if !old.is_empty() && old != "*" && lower(&old) == lower(&nick) {
+            if old != nick {
+                let prefix = self.state.user(uid).map(|u| u.prefix()).unwrap_or_default();
+                let _ = self.state.set_nick(uid, &nick);
+                if was_registered {
+                    let d = Delivery::NickChange {
+                        old_nick: old,
+                        prefix,
+                        new_nick: nick,
+                    };
+                    self.broadcast_peers(uid, &d, true);
+                }
+            }
+            if !was_registered {
+                self.try_complete_registration(uid);
+            }
+            return;
+        }
+
         if self.state.nick_taken(&nick) {
             self.numeric(
                 uid,
@@ -70,13 +99,6 @@ impl Server {
             );
             return;
         }
-
-        let was_registered = self.state.user(uid).map(|u| u.registered).unwrap_or(false);
-        let old = self
-            .state
-            .user(uid)
-            .map(|u| u.nick.clone())
-            .unwrap_or_default();
         let prefix = self.state.user(uid).map(|u| u.prefix()).unwrap_or_default();
         if !self.state.set_nick(uid, &nick) {
             self.numeric(
@@ -91,6 +113,10 @@ impl Server {
         if let Some(u) = self.state.user_mut(uid) {
             u.got_nick = true;
             u.nick_identified = false;
+            // The callsign belongs to a nick, not to the TCP session. Keeping
+            // it across NICK would let mallory radiate (and hold +v on +r)
+            // as alice's SM0ABC.
+            u.callsign = None;
             u.identify_by = if claimed {
                 Some(Instant::now() + timeout)
             } else {
@@ -201,16 +227,25 @@ impl Server {
         );
 
         let radio = if self.radio.available() { "ON" } else { "OFF" };
-        let isupport = format!(
-            "CHANTYPES=#& PREFIX=(ov)@+ NICKLEN={} CHANNELLEN=50 CASEMAPPING=rfc1459 \
-             NETWORK={} MAXTARGETS=1 TOPICLEN=200 CHANMODES=k,l,r,mnt RADIO={} RFCALL={}",
-            self.config.server.max_nick_len, network, radio, self.config.radio.callsign
-        );
-        self.numeric(
-            uid,
-            num::RPL_ISUPPORT,
-            &[&isupport, "are supported by this server"],
-        );
+        // Each token is its own middle parameter. A single space-separated
+        // string would be scrubbed into `CHANTYPES=#&_PREFIX=…` and clients
+        // would not see ISUPPORT tokens at all.
+        let isupport = [
+            "CHANTYPES=#&".to_string(),
+            "PREFIX=(ov)@+".to_string(),
+            format!("NICKLEN={}", self.config.server.max_nick_len),
+            "CHANNELLEN=50".to_string(),
+            "CASEMAPPING=rfc1459".to_string(),
+            format!("NETWORK={network}"),
+            "MAXTARGETS=1".to_string(),
+            "TOPICLEN=200".to_string(),
+            "CHANMODES=k,l,r,mnt".to_string(),
+            format!("RADIO={radio}"),
+            format!("RFCALL={}", self.config.radio.callsign),
+            "are supported by this server".to_string(),
+        ];
+        let isupport: Vec<&str> = isupport.iter().map(|s| s.as_str()).collect();
+        self.numeric(uid, num::RPL_ISUPPORT, &isupport);
 
         self.send_lusers(uid);
         self.send_motd(uid);
