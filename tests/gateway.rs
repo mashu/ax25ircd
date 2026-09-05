@@ -854,13 +854,13 @@ async fn a_busy_channel_fills_the_backlog_and_then_is_refused() {
         "every message should have got one answer or the other"
     );
     assert!(
-        h.server.stats.rf_frames_refused as usize == refused,
+        h.server.radio.stats.rf_frames_refused as usize == refused,
         "the counter and the notices should agree"
     );
 
     // The backlog is bounded by airtime, and by the share a chat message may
     // occupy — half of the 60 s budget.
-    let air = h.server.airtime().unwrap();
+    let air = h.server.radio.airtime().unwrap();
     assert!(
         air.queued() <= Duration::from_secs(31),
         "the transmit queue holds {:?}, past the chat share of the 60s budget",
@@ -922,7 +922,7 @@ async fn senders_are_given_a_growing_and_honest_estimate() {
         "the sender does not get their own message echoed back"
     );
     assert_eq!(
-        h.server.stats.rf_frames_refused, 0,
+        h.server.radio.stats.rf_frames_refused, 0,
         "a 600s backlog should admit all eight"
     );
 
@@ -944,7 +944,7 @@ async fn senders_are_given_a_growing_and_honest_estimate() {
         "eight full-length messages at 300 baud is a real queue: {etas:?}"
     );
     assert!(
-        h.server.airtime().unwrap().queued() > Duration::from_secs(1),
+        h.server.radio.airtime().unwrap().queued() > Duration::from_secs(1),
         "the queued airtime should reflect what was accepted"
     );
 }
@@ -1050,7 +1050,7 @@ async fn held_mail_is_delivered_a_little_at_a_time() {
         "held mail should drip, not flood: {stored} messages went out at once"
     );
     assert!(
-        h.server.mailbox.depth(&"SM0ABC-7".parse().unwrap()) > 0,
+        h.server.radio.mailbox.depth(&"SM0ABC-7".parse().unwrap()) > 0,
         "the rest should still be waiting, not discarded"
     );
 }
@@ -1100,7 +1100,7 @@ async fn the_safety_interlock_stops_everything_including_identification() {
 
     // An SWR check (or a temperature probe, or a tower interlock) has failed.
     h.server
-        .airtime()
+        .radio.airtime()
         .unwrap()
         .interlock_ok
         .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1121,7 +1121,7 @@ async fn the_safety_interlock_stops_everything_including_identification() {
 
     // Interlock recovers; the station transmits again.
     h.server
-        .airtime()
+        .radio.airtime()
         .unwrap()
         .interlock_ok
         .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1157,7 +1157,7 @@ async fn opers_can_see_the_unsent_queue_and_retune_the_limits() {
     let lines = h.drain_client();
     assert!(lines.iter().any(|l| l.contains("10%")), "{lines:?}");
     assert_eq!(
-        h.server.airtime().unwrap().duty_limit(0.25),
+        h.server.radio.airtime().unwrap().duty_limit(0.25),
         0.10,
         "the override should be in force"
     );
@@ -1165,11 +1165,11 @@ async fn opers_can_see_the_unsent_queue_and_retune_the_limits() {
     // Asking for more than the ceiling gets the ceiling.
     h.send("RADIO LIMIT DUTY 90");
     h.drain_client();
-    assert_eq!(h.server.airtime().unwrap().duty_limit(0.25), 0.5);
+    assert_eq!(h.server.radio.airtime().unwrap().duty_limit(0.25), 0.5);
 
     h.send("RADIO LIMIT DUTY off");
     h.drain_client();
-    assert_eq!(h.server.airtime().unwrap().duty_limit(0.25), 0.25);
+    assert_eq!(h.server.radio.airtime().unwrap().duty_limit(0.25), 0.25);
 }
 
 #[tokio::test]

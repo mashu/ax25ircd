@@ -348,12 +348,12 @@ rf = true
             gw.loopback.is_some(),
             "a loopback TNC hands back its far end, or the fake radio closes"
         );
-        assert!(gw.server.rf_available(), "the radio should be usable");
-        assert!(gw.server.airtime().is_some(), "airtime counters are published");
+        assert!(gw.server.radio.available(), "the radio should be usable");
+        assert!(gw.server.radio.airtime().is_some(), "airtime counters are published");
         assert!(gw.server.state.channel("#rf").is_some());
         assert!(gw
             .server
-            .radio_status_line()
+            .radio.status_line()
             .contains("transmitter ON"));
     }
 
@@ -363,9 +363,9 @@ rf = true
         let config = Arc::new(Config::from_toml(&text).unwrap());
         let gw = build(config).unwrap();
         assert!(gw.loopback.is_none());
-        assert!(!gw.server.rf_available());
-        assert!(gw.server.airtime().is_none());
-        assert!(gw.server.radio_status_line().contains("disabled"));
+        assert!(!gw.server.radio.available());
+        assert!(gw.server.radio.airtime().is_none());
+        assert!(gw.server.radio.status_line().contains("disabled"));
     }
 
     #[tokio::test]

@@ -17,12 +17,12 @@ use crate::ax25::{frame::PID_NO_L3, Ax25Frame};
 use crate::callsign::Callsign;
 use crate::irc::message::is_channel_name;
 use crate::policy::{sanitize, Verdict};
-use crate::server::state::{User, UserId};
-use crate::server::{Delivery, Server, TxClass};
+use super::state::{User, UserId};
+use super::{Delivery, Server, TxClass};
 
 impl Server {
     pub(crate) fn handle_rf_frame(&mut self, frame: Ax25Frame, now: Instant) {
-        self.stats.rf_frames_rx += 1;
+        self.radio.stats.rf_frames_rx += 1;
 
         if !frame.is_ui() || frame.pid != Some(PID_NO_L3) {
             debug!(target: "rf::monitor", "{}", frame.to_monitor_line());
@@ -76,7 +76,7 @@ impl Server {
             return;
         }
 
-        let outcome = self.sessions.on_receive(&src, airc, now);
+        let outcome = self.radio.sessions.on_receive(&src, airc, now);
         for f in outcome.transmit {
             self.transmit_airc(&src, f);
         }
@@ -116,7 +116,7 @@ impl Server {
                 // One MOTD line, hard-capped. A gateway's welcome banner is
                 // the operator's prose; the air does not have room for it.
                 let motd: String = motd.chars().take(48).collect();
-                self.unicast(
+                self.radio.unicast(
                     src,
                     Kind::Welcome,
                     encode_fields(&[&name, &motd]),
@@ -126,7 +126,7 @@ impl Server {
                 if created {
                     info!(%src, "station registered");
                 }
-                self.flush_mailbox(src);
+                self.radio.flush_mailbox(src);
             }
             Kind::Join => {
                 if !self.rf_ctrl_ok(src, now) {
@@ -136,7 +136,7 @@ impl Server {
                     return;
                 };
                 if self.ensure_rf_user(src) {
-                    self.flush_mailbox(src);
+                    self.radio.flush_mailbox(src);
                 }
                 self.rf_join(src, &channel);
             }
@@ -152,7 +152,7 @@ impl Server {
                 if self.state.user(&uid).is_some() {
                     self.rf_part(&uid, &display, reason);
                 }
-                if let Some(peer) = self.sessions.peer_mut(src) {
+                if let Some(peer) = self.radio.sessions.peer_mut(src) {
                     peer.channels.remove(&display);
                 }
             }
@@ -187,7 +187,7 @@ impl Server {
                 if !self.rf_ctrl_ok(src, now) {
                     return;
                 }
-                if !self.sessions.peer(src).map(|p| p.registered).unwrap_or(false) {
+                if !self.radio.sessions.peer(src).map(|p| p.registered).unwrap_or(false) {
                     return;
                 }
                 let Some(channel) = fields.first().cloned() else {
@@ -195,7 +195,7 @@ impl Server {
                 };
                 let display = self.channel_display_name(&channel);
                 let names = self.names_for_air(&display);
-                self.unicast(
+                self.radio.unicast(
                     src,
                     Kind::NamesReply,
                     encode_fields(&[&display, &names]),
@@ -207,12 +207,12 @@ impl Server {
                 if !self.rf_ctrl_ok(src, now) {
                     return;
                 }
-                if !self.sessions.peer(src).map(|p| p.registered).unwrap_or(false) {
+                if !self.radio.sessions.peer(src).map(|p| p.registered).unwrap_or(false) {
                     return;
                 }
                 let token: String = fields.first().cloned().unwrap_or_default();
                 let token: String = token.chars().take(8).collect();
-                self.unicast(
+                self.radio.unicast(
                     src,
                     Kind::Pong,
                     encode_fields(&[&token]),
@@ -261,7 +261,7 @@ impl Server {
                 return false;
             }
         }
-        self.sessions.force_touch(call, Instant::now()).registered = true;
+        self.radio.sessions.force_touch(call, Instant::now()).registered = true;
         true
     }
 
@@ -283,7 +283,7 @@ impl Server {
         if self.state.join(&uid, &display).is_none() {
             return;
         }
-        if let Some(peer) = self.sessions.peer_mut(call) {
+        if let Some(peer) = self.radio.sessions.peer_mut(call) {
             peer.channels.insert(display.clone());
         }
         let flags = self
@@ -334,7 +334,7 @@ impl Server {
             .chars()
             .take(64)
             .collect();
-        self.unicast(
+        self.radio.unicast(
             call,
             Kind::NamesReply,
             encode_fields(&[&display, &format!("{count} here"), &topic]),
@@ -351,7 +351,7 @@ impl Server {
     /// is lost, the station simply sees no reply, which is the same
     /// information.
     fn rf_error(&mut self, dst: &Callsign, code: &str, text: &str) {
-        self.unicast(
+        self.radio.unicast(
             dst,
             Kind::Error,
             encode_fields(&[code, text]),
@@ -431,7 +431,7 @@ impl Server {
             // Do not answer a flood with more transmissions; just drop it and
             // let the operator see it in the log.
             warn!(%src, "rate limit exceeded, dropping message");
-            if let Some(peer) = self.sessions.peer_mut(src) {
+            if let Some(peer) = self.radio.sessions.peer_mut(src) {
                 peer.dropped += 1;
             }
             return;
@@ -441,7 +441,7 @@ impl Server {
             return;
         }
         if self.ensure_rf_user(src) {
-            self.flush_mailbox(src);
+            self.radio.flush_mailbox(src);
         }
         let uid = UserId::Rf(src.clone());
         let Some(user) = self.state.user(&uid).cloned() else {
@@ -535,6 +535,6 @@ impl Server {
     fn transmit_airc(&mut self, dst: &Callsign, frame: AircFrame) {
         // ACKs are the cheapest airtime there is: one short frame that stops
         // the sender retransmitting a long one. They are never rationed.
-        self.transmit_direct(dst, frame, TxClass::Ack);
+        self.radio.transmit_direct(dst, frame, TxClass::Ack);
     }
 }

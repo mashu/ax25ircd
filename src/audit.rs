@@ -16,6 +16,8 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
@@ -24,11 +26,15 @@ use tracing::warn;
 /// Audit lines buffered before the server starts dropping them.
 const QUEUE: usize = 4096;
 
+/// A handle onto the audit trail. Cheap to clone, so each subsystem can hold
+/// one rather than reaching back through the server for it.
+#[derive(Clone)]
 pub struct Audit {
     tx: Option<mpsc::Sender<String>>,
     /// Lines dropped because the writer fell behind. Reported to the log so a
-    /// gap in the audit trail is never silent.
-    dropped: u64,
+    /// gap in the audit trail is never silent. Shared across clones: the
+    /// count is a property of the log, not of who is writing to it.
+    dropped: Arc<AtomicU64>,
 }
 
 impl Audit {
@@ -38,7 +44,7 @@ impl Audit {
         let Some(path) = path else {
             return Self {
                 tx: None,
-                dropped: 0,
+                dropped: Arc::new(AtomicU64::new(0)),
             };
         };
         let file = match open_append(path) {
@@ -47,7 +53,7 @@ impl Audit {
                 warn!(path, "cannot open audit log: {e}");
                 return Self {
                     tx: None,
-                    dropped: 0,
+                    dropped: Arc::new(AtomicU64::new(0)),
                 };
             }
         };
@@ -56,12 +62,12 @@ impl Audit {
         spawn_writer(file, rx);
         Self {
             tx: Some(tx),
-            dropped: 0,
+            dropped: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// One line, `unix_ms event k=v k=v ...`. Values with spaces are quoted.
-    pub fn event(&mut self, kind: &str, fields: &[(&str, &str)]) {
+    pub fn event(&self, kind: &str, fields: &[(&str, &str)]) {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -79,21 +85,18 @@ impl Audit {
             return;
         };
         if tx.try_send(line).is_err() {
-            self.dropped += 1;
-            // Complain once per power of ten, so a failing disk is visible
-            // without the complaint itself becoming the flood.
-            if self.dropped.is_power_of_two() {
-                warn!(
-                    "audit log is not keeping up; {} line(s) dropped so far",
-                    self.dropped
-                );
+            let n = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+            // Complain once per doubling, so a failing disk is visible without
+            // the complaint itself becoming the flood.
+            if n.is_power_of_two() {
+                warn!("audit log is not keeping up; {n} line(s) dropped so far");
             }
         }
     }
 
     /// Audit lines lost because the writer could not keep up.
     pub fn dropped(&self) -> u64 {
-        self.dropped
+        self.dropped.load(Ordering::Relaxed)
     }
 }
 
@@ -132,7 +135,7 @@ mod tests {
     #[test]
     fn quoting_keeps_one_line_per_event() {
         // No path: nothing is spawned, so this needs no runtime.
-        let mut a = Audit::open(None);
+        let a = Audit::open(None);
         a.event("kick", &[("reason", "flooding the channel"), ("n", "3")]);
         assert_eq!(a.dropped(), 0);
     }
@@ -148,7 +151,7 @@ mod tests {
         ));
         let name = path.to_string_lossy().to_string();
         {
-            let mut a = Audit::open(Some(&name));
+            let a = Audit::open(Some(&name));
             a.event("rf_tx", &[("dest", "SM0ABC-7"), ("bytes", "42")]);
             a.event("oper", &[("nick", "alice"), ("host", "127.0.0.1")]);
         }

@@ -1,0 +1,223 @@
+//! Getting a client from a raw socket to a registered user: `PASS`, `NICK`,
+//! `USER`, and the welcome burst that follows.
+//!
+//! Nothing else may run until this succeeds — see the gate in the dispatcher —
+//! because an unregistered connection has no nickname to answer to and no
+//! identity to rate-limit.
+
+use std::time::{Duration, Instant};
+
+
+use crate::callsign::Callsign;
+use crate::irc::message::{is_valid_nick, Message};
+use crate::irc::numerics as num;
+
+use super::super::state::UserId;
+use super::super::{Delivery, Server};
+use super::constant_time_eq;
+
+impl Server {
+    pub(super) fn cmd_pass(&mut self, uid: &UserId, msg: &Message) {
+        let Some(given) = msg.param(0) else {
+            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["PASS", "Not enough parameters"]);
+            return;
+        };
+        let ok = self
+            .config
+            .server
+            .password
+            .as_ref()
+            .map(|p| constant_time_eq(p, given))
+            .unwrap_or(true);
+        if let Some(u) = self.state.user_mut(uid) {
+            u.pass_ok = ok;
+        }
+    }
+
+    pub(super) fn cmd_nick(&mut self, uid: &UserId, msg: &Message) {
+        let Some(nick) = msg.param(0).map(|s| s.to_string()) else {
+            self.numeric(uid, num::ERR_NONICKNAMEGIVEN, &["No nickname given"]);
+            return;
+        };
+        if !is_valid_nick(&nick, self.config.server.max_nick_len) {
+            self.numeric(uid, num::ERR_ERRONEUSNICKNAME, &[&nick, "Erroneous nickname"]);
+            return;
+        }
+        // Callsign-shaped nicks belong to RF stations. RFC 1459 casemapping
+        // makes `\` the uppercase of `|`, so SM0ABC\7 must be rejected too,
+        // as must the AX.25 form SM0ABC-7.
+        if Callsign::reserved_from_nick(&nick).is_some() {
+            self.numeric(
+                uid,
+                num::ERR_ERRONEUSNICKNAME,
+                &[
+                    &nick,
+                    "Callsign nicknames are reserved; use CALLSIGN to identify",
+                ],
+            );
+            return;
+        }
+        if self.state.nick_taken(&nick) {
+            self.numeric(uid, num::ERR_NICKNAMEINUSE, &[&nick, "Nickname is already in use"]);
+            return;
+        }
+
+        let was_registered = self.state.user(uid).map(|u| u.registered).unwrap_or(false);
+        let old = self.state.user(uid).map(|u| u.nick.clone()).unwrap_or_default();
+        let prefix = self.state.user(uid).map(|u| u.prefix()).unwrap_or_default();
+        if !self.state.set_nick(uid, &nick) {
+            self.numeric(uid, num::ERR_NICKNAMEINUSE, &[&nick, "Nickname is already in use"]);
+            return;
+        }
+        let claimed = self.accounts.is_registered(&nick);
+        let timeout = Duration::from_secs(self.config.accounts.identify_timeout_secs);
+        if let Some(u) = self.state.user_mut(uid) {
+            u.got_nick = true;
+            u.nick_identified = false;
+            u.identify_by = if claimed {
+                Some(Instant::now() + timeout)
+            } else {
+                None
+            };
+        }
+        if claimed {
+            self.notice_user(
+                uid,
+                &format!(
+                    "This nick is registered. IDENTIFY <password> within {} seconds or it will be released.",
+                    self.config.accounts.identify_timeout_secs
+                ),
+            );
+        }
+
+        if was_registered {
+            let d = Delivery::NickChange {
+                old_nick: old,
+                prefix,
+                new_nick: nick.clone(),
+            };
+            self.broadcast_peers(uid, &d, true);
+            self.refresh_privileges(uid);
+        } else {
+            self.try_complete_registration(uid);
+        }
+    }
+
+    pub(super) fn cmd_user(&mut self, uid: &UserId, msg: &Message) {
+        if self.state.user(uid).map(|u| u.registered).unwrap_or(false) {
+            self.numeric(uid, num::ERR_ALREADYREGISTERED, &["You may not reregister"]);
+            return;
+        }
+        if msg.params.len() < 4 {
+            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["USER", "Not enough parameters"]);
+            return;
+        }
+        if let Some(u) = self.state.user_mut(uid) {
+            u.username = msg.params[0].chars().take(10).collect();
+            u.realname = msg.params[3].clone();
+            u.got_user = true;
+        }
+        self.try_complete_registration(uid);
+    }
+
+    pub(super) fn try_complete_registration(&mut self, uid: &UserId) {
+        let Some(user) = self.state.user(uid).cloned() else {
+            return;
+        };
+        if user.registered || !user.got_nick || !user.got_user {
+            return;
+        }
+        if self.config.server.password.is_some() && !user.pass_ok {
+            self.numeric(uid, num::ERR_PASSWDMISMATCH, &["Password incorrect"]);
+            if let UserId::Ip(id) = uid {
+                self.send_raw(*id, "ERROR :Closing link (bad password)".into());
+            }
+            self.quit_user(uid, "Bad password");
+            return;
+        }
+        if let Some(u) = self.state.user_mut(uid) {
+            u.registered = true;
+        }
+        if let Some(u) = self.state.user(uid) {
+            self.audit.event(
+                "register",
+                &[("nick", &u.nick), ("user", &u.username), ("host", &u.host)],
+            );
+        }
+
+        let server = self.server_name().to_string();
+        let network = self.config.server.network.clone();
+        self.numeric(
+            uid,
+            num::RPL_WELCOME,
+            &[&format!(
+                "Welcome to the {network} amateur radio IRC network {}",
+                user.nick
+            )],
+        );
+        self.numeric(
+            uid,
+            num::RPL_YOURHOST,
+            &[&format!(
+                "Your host is {server}, running ax25ircd {}",
+                env!("CARGO_PKG_VERSION")
+            )],
+        );
+        self.numeric(uid, num::RPL_CREATED, &["This server was created at startup"]);
+        self.numeric(uid, num::RPL_MYINFO, &[&server, "ax25ircd-0.1", "iow", "mnrtkl"]);
+
+        let radio = if self.radio.available() { "ON" } else { "OFF" };
+        let isupport = format!(
+            "CHANTYPES=#& PREFIX=(ov)@+ NICKLEN={} CHANNELLEN=50 CASEMAPPING=rfc1459 \
+             NETWORK={} MAXTARGETS=1 TOPICLEN=200 CHANMODES=k,l,r,mnt RADIO={} RFCALL={}",
+            self.config.server.max_nick_len,
+            network,
+            radio,
+            self.config.radio.callsign
+        );
+        self.numeric(uid, num::RPL_ISUPPORT, &[&isupport, "are supported by this server"]);
+
+        self.send_lusers(uid);
+        self.send_motd(uid);
+
+        let status = self.radio.status_line();
+        self.notice_user(uid, &status);
+        self.notice_user(
+            uid,
+            "On +r channels CALLSIGN grants +v (speak on IRC). A control operator \
+             must RADIO GRANT a registered nick before that nick's messages are \
+             radiated. REGISTER/IDENTIFY keep the nick and the grant across restarts.",
+        );
+        if self.accounts.is_registered(&user.nick) {
+            self.notice_user(
+                uid,
+                &format!(
+                    "{} is registered. IDENTIFY <password> within {} seconds.",
+                    user.nick, self.config.accounts.identify_timeout_secs
+                ),
+            );
+        }
+    }
+
+    pub(super) fn send_lusers(&mut self, uid: &UserId) {
+        let total = self.state.users.len();
+        let rf = self.state.users.keys().filter(|u| u.is_rf()).count();
+        let text = format!("There are {total} users online, {rf} of them on RF");
+        self.numeric(uid, num::RPL_LUSERCLIENT, &[&text]);
+        let me = format!("I have {} clients and 0 servers", total - rf);
+        self.numeric(uid, num::RPL_LUSERME, &[&me]);
+    }
+
+    pub(super) fn send_motd(&mut self, uid: &UserId) {
+        if self.config.server.motd.is_empty() {
+            self.numeric(uid, num::ERR_NOMOTD, &["MOTD File is missing"]);
+            return;
+        }
+        let server = self.server_name().to_string();
+        self.numeric(uid, num::RPL_MOTDSTART, &[&format!("- {server} Message of the day -")]);
+        for line in self.config.server.motd.clone() {
+            self.numeric(uid, num::RPL_MOTD, &[&format!("- {line}")]);
+        }
+        self.numeric(uid, num::RPL_ENDOFMOTD, &["End of /MOTD command"]);
+    }
+}

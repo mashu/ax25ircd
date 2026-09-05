@@ -489,7 +489,7 @@ async fn a_station_that_floods_is_dropped_not_answered() {
     );
     let call: Callsign = "SM0ABC-7".parse().unwrap();
     assert!(
-        rf.server.sessions.peer(&call).unwrap().dropped > 0,
+        rf.server.radio.sessions.peer(&call).unwrap().dropped > 0,
         "drops should be counted so RADIO HEARD can show them"
     );
 }
@@ -620,15 +620,15 @@ async fn the_mailbox_holds_and_reports_messages_for_absent_stations() {
 
     rf.send(a, "PRIVMSG SM0ABC|7 :call me when you are back");
     assert!(rf.drain(a).iter().any(|l| l.contains("Held for delivery")));
-    assert_eq!(rf.server.mailbox.len(), 1);
+    assert_eq!(rf.server.radio.mailbox.len(), 1);
 
     rf.send(a, "RADIO MAIL");
     assert!(rf.drain(a).iter().any(|l| l.contains("SM0ABC-7")));
 
     // Held messages expire.
     let much_later = Instant::now() + Duration::from_secs(48 * 3600);
-    assert_eq!(rf.server.mailbox.expire(much_later), 1);
-    assert!(rf.server.mailbox.is_empty());
+    assert_eq!(rf.server.radio.mailbox.expire(much_later), 1);
+    assert!(rf.server.radio.mailbox.is_empty());
 }
 
 #[tokio::test]
@@ -672,11 +672,11 @@ async fn a_station_appearing_gets_its_held_mail_a_little_at_a_time() {
         rf.send(a, &format!("PRIVMSG SM0ABC|7 :held {i}"));
     }
     rf.drain(a);
-    assert_eq!(rf.server.mailbox.len(), 4);
+    assert_eq!(rf.server.radio.mailbox.len(), 4);
 
     rf.heard("SM0ABC-7", Kind::Hello, &[]);
     assert_eq!(
-        rf.server.mailbox.len(),
+        rf.server.radio.mailbox.len(),
         3,
         "one message per exchange, not the whole mailbox at once"
     );
