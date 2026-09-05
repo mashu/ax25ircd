@@ -85,6 +85,23 @@ repeat_rf_traffic = false
 # NOTICE the sender when a channel message is actually put on the air.
 notice_air_relay = true
 
+# Airtime the transmit queue may hold before new traffic is refused.
+# In seconds of key-down time, not frames: sixty short frames and six long
+# ones are very different amounts of transmitting. When the queue is this
+# deep, senders are told so immediately rather than having their message
+# accepted and quietly dropped at the transmitter two minutes later.
+max_queued_airtime_secs = 60
+
+# Held messages delivered per exchange with a station. Keep this at 1: a
+# full mailbox released on one HELLO is a minute of transmitting caused by
+# one short frame from a handheld that may be in range for thirty seconds.
+# The rest go out as the station keeps talking.
+mailbox_flush_batch = 1
+
+# Most names sent in reply to an explicit NAMES from a station. Member lists
+# are never sent unasked — joining a channel does not read out the roll.
+rf_names_max = 8
+
 [radio.tnc]
 # "tcp" (Direwolf, ax25-tools KISS-over-TCP), "serial" (needs --features
 # serial), or "loopback" for a dry run that transmits nothing.
@@ -124,6 +141,9 @@ tx_pacing_ms = 1500
 # `RADIO DUTY` shows the live figures. Frames the governor has held longer
 # than max_hold_secs are dropped: a two-minute-old chat line is not worth
 # the airtime it would cost.
+# max_duty_percent is capped at 50 whatever you write here, and a
+# max_continuous/cooldown pair that would exceed 50% in bursts is refused at
+# startup. Both are checked by `--check`.
 [radio.duty]
 enabled = true
 baud = 300
@@ -139,7 +159,14 @@ hourly_airtime_secs = 900
 max_hold_secs = 120
 
 [policy]
+# Upper bound on a radiated message. The effective limit is whichever is
+# smaller: this, or whatever fits in max_rf_fragments frames at the
+# configured paclen — the server logs the figure it settled on at startup.
 max_rf_text_len = 160
+# Most AX.25 frames one radiated message may become. This is the real length
+# limit: fragmentation multiplies the airtime and the loss rate, and a
+# message only arrives if every fragment does. Two frames is a sentence.
+max_rf_fragments = 2
 rf_msgs_per_min = 6
 rf_burst = 4
 ip_to_rf_msgs_per_min = 10

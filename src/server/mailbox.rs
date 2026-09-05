@@ -81,6 +81,24 @@ impl Mailbox {
             .unwrap_or_default()
     }
 
+    /// Remove and return at most `n` messages, oldest first.
+    ///
+    /// Held mail is delivered a little at a time rather than all at once. Ten
+    /// messages released the instant a station is heard is a minute of
+    /// near-continuous transmitting triggered by one short frame — and the
+    /// station may be a handheld that has come into range for thirty seconds.
+    /// Draining one per exchange lets the station's own activity set the pace.
+    pub fn take_some(&mut self, call: &Callsign, n: usize) -> Vec<StoredMessage> {
+        let Some(queue) = self.boxes.get_mut(call) else {
+            return Vec::new();
+        };
+        let out: Vec<StoredMessage> = queue.drain(..n.min(queue.len())).collect();
+        if queue.is_empty() {
+            self.boxes.remove(call);
+        }
+        out
+    }
+
     pub fn depth(&self, call: &Callsign) -> usize {
         self.boxes.get(call).map(|q| q.len()).unwrap_or(0)
     }
@@ -147,6 +165,21 @@ mod tests {
             vec!["one", "two"]
         );
         assert!(mb.is_empty());
+    }
+
+    #[test]
+    fn take_some_drains_a_little_at_a_time() {
+        let mut mb = Mailbox::new(true, 8, 100, Duration::from_secs(3600));
+        for t in ["a", "b", "c"] {
+            mb.store(&call(), msg(t)).unwrap();
+        }
+        let first = mb.take_some(&call(), 1);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].text, "a");
+        assert_eq!(mb.depth(&call()), 2);
+        assert_eq!(mb.take_some(&call(), 10).len(), 2);
+        assert!(mb.is_empty());
+        assert!(mb.take_some(&call(), 1).is_empty());
     }
 
     #[test]

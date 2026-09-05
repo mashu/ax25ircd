@@ -106,6 +106,9 @@ pub struct TncHandle {
     /// station signing off owes the band its callsign.
     priority: mpsc::Sender<Ax25Frame>,
     airtime: Arc<AirtimeShared>,
+    /// A copy of the governor's cost model, so the sender can price a frame
+    /// before committing to it. The governor itself lives in the TNC task.
+    cost: AirtimeConfig,
 }
 
 impl TncHandle {
@@ -139,12 +142,36 @@ impl TncHandle {
         }
     }
 
+    /// Key-down time a frame of this size will cost.
+    pub fn airtime_for(&self, octets: usize) -> Duration {
+        Governor::new(self.cost.clone()).airtime_for(octets)
+    }
+
+    /// Airtime already queued and not yet radiated.
+    pub fn queued(&self) -> Duration {
+        self.airtime.queued()
+    }
+
+    /// Best estimate of how long a frame queued now would wait: the
+    /// governor's next free slot plus the existing backlog.
+    pub fn eta(&self) -> Duration {
+        self.airtime.eta()
+    }
+
     /// Queue a frame for transmission. Returns false if the transmit queue is
     /// full, which is a normal condition on a congested channel and must be
     /// handled by the caller (usually: drop, count, and tell the user).
+    ///
+    /// The frame's airtime is added to the published backlog here and removed
+    /// by the TNC task when the frame is radiated or dropped, so both sides
+    /// of the channel keep the figure honest.
     pub fn try_send(&self, frame: Ax25Frame) -> bool {
+        let cost = self.airtime_for(frame.encode().len()).as_millis() as u64;
         match self.tx.try_send(frame) {
-            Ok(()) => true,
+            Ok(()) => {
+                self.airtime.queued_ms.fetch_add(cost, Ordering::Relaxed);
+                true
+            }
             Err(e) => {
                 warn!("TX queue full, dropping frame: {e}");
                 false
@@ -153,18 +180,32 @@ impl TncHandle {
     }
 }
 
+/// Subtract a frame's airtime from the published backlog once it has left the
+/// queue, whether it was transmitted or dropped. Saturating, because the two
+/// sides update independently and a negative backlog is meaningless.
+fn release_queued(shared: &AirtimeShared, governor: &Governor, octets: usize) {
+    let cost = governor.airtime_for(octets).as_millis() as u64;
+    let _ = shared
+        .queued_ms
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |q| {
+            Some(q.saturating_sub(cost))
+        });
+}
+
 /// Start the TNC task. Received frames are delivered on the returned channel.
 pub fn spawn(config: TncConfig) -> (TncHandle, mpsc::Receiver<Ax25Frame>) {
     let (tx_out, rx_out) = mpsc::channel::<Ax25Frame>(config.tx_queue_depth);
     let (tx_id, rx_id) = mpsc::channel::<Ax25Frame>(4);
     let (tx_in, rx_in) = mpsc::channel::<Ax25Frame>(256);
     let airtime = Arc::new(AirtimeShared::default());
-    tokio::spawn(run(config, rx_out, rx_id, tx_in, airtime.clone()));
+    tokio::spawn(run(config.clone(), rx_out, rx_id, tx_in, airtime.clone()));
+    let cost = config.airtime.clone();
     (
         TncHandle {
             tx: tx_out,
             priority: tx_id,
             airtime,
+            cost,
         },
         rx_in,
     )
@@ -265,10 +306,12 @@ async fn pump(
         // the operator's kill switch: it must take effect on the frames that
         // are already in flight, not just on the next one.
         if shared.inhibit.load(Ordering::Relaxed) {
-            if pending.take().is_some() {
+            if let Some((frame, _)) = pending.take() {
+                release_queued(shared, governor, frame.encode().len());
                 shared.dropped_inhibited.fetch_add(1, Ordering::Relaxed);
             }
-            while tx_queue.try_recv().is_ok() {
+            while let Ok(frame) = tx_queue.try_recv() {
+                release_queued(shared, governor, frame.encode().len());
                 shared.dropped_inhibited.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -307,8 +350,9 @@ async fn pump(
                 let bytes = frame.encode();
                 if bytes.len() <= config.max_frame {
                     write_kiss_bytes(&mut link, config, &frame, &bytes).await?;
-                    let keyed = governor.record(bytes.len(), std::time::Instant::now());
-                    governor.publish(shared, std::time::Instant::now());
+                    let now = std::time::Instant::now();
+                    let keyed = governor.record(bytes.len(), now);
+                    governor.publish_with(shared, now, config.max_frame);
                     next_tx = next_tx.max(tokio::time::Instant::now() + config.tx_pacing.max(keyed));
                 }
             }
@@ -320,12 +364,14 @@ async fn pump(
                     continue;
                 };
                 if shared.inhibit.load(Ordering::Relaxed) {
+                    release_queued(shared, governor, frame.encode().len());
                     shared.dropped_inhibited.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
                 let bytes = frame.encode();
                 if bytes.len() > config.max_frame {
                     warn!("refusing to transmit oversized frame ({} bytes)", bytes.len());
+                    release_queued(shared, governor, bytes.len());
                     continue;
                 }
                 let now = std::time::Instant::now();
@@ -333,7 +379,8 @@ async fn pump(
                     TxDecision::Send => {
                         write_kiss_bytes(&mut link, config, &frame, &bytes).await?;
                         let keyed = governor.record(bytes.len(), now);
-                        governor.publish(shared, now);
+                        release_queued(shared, governor, bytes.len());
+                        governor.publish_with(shared, now, config.max_frame);
                         // Pace on whichever is longer: the operator's minimum
                         // gap, or the time this transmission actually occupies
                         // the channel. Without the latter the "gap" would
@@ -341,9 +388,10 @@ async fn pump(
                         next_tx = tokio::time::Instant::now() + config.tx_pacing.max(keyed);
                     }
                     TxDecision::Defer(delay, reason) => {
-                        governor.publish(shared, now);
+                        governor.publish_with(shared, now, config.max_frame);
                         let waited = queued_at.elapsed();
                         if waited + delay > config.airtime.max_hold {
+                            release_queued(shared, governor, bytes.len());
                             shared.dropped_stale.fetch_add(1, Ordering::Relaxed);
                             warn!(
                                 "dropping a frame held {:?} by {} — stale traffic is worse than no traffic",

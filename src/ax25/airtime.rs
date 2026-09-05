@@ -49,6 +49,18 @@ const FRAMING_OCTETS: usize = 4;
 /// as the power amplifier is concerned.
 const RUN_GAP: Duration = Duration::from_secs(3);
 
+/// The duty cycle this station will never exceed, whatever the configuration
+/// says.
+///
+/// Amateur HF transceivers are rated on the assumption of a speech duty cycle.
+/// A QRP rig with unheatsunk finals has no margin at all, and an automatically
+/// controlled station keys up when nobody is in the room. 50 % is the number
+/// below which essentially any transceiver survives indefinitely, so it is a
+/// ceiling rather than a default: `max_duty_percent` is clamped to it on the
+/// way in, and [`AirtimeConfig::check_hardware_safe`] refuses a configuration
+/// that would breach it in bursts.
+pub const HARD_MAX_DUTY: f64 = 0.5;
+
 #[derive(Clone, Debug)]
 pub struct AirtimeConfig {
     /// Off entirely. Only sensible on a loopback or a dummy load.
@@ -144,6 +156,15 @@ pub struct AirtimeShared {
     pub cooling_ms: AtomicU64,
     /// Total keyed time since start, for the operator's own records.
     pub total_ms: AtomicU64,
+    /// How long before the governor would clear a typical frame. Read by the
+    /// server to give a sender an honest estimate instead of a promise.
+    pub next_slot_ms: AtomicU64,
+    /// Airtime of everything queued for transmission but not yet radiated.
+    /// Incremented when a frame is queued and decremented when it leaves,
+    /// so it is maintained from both sides.
+    pub queued_ms: AtomicU64,
+    /// Frames refused admission because the backlog was already too long.
+    pub rejected_backlog: AtomicU64,
     /// Frames held back at least once, and frames given up on.
     pub deferred: AtomicU64,
     pub dropped_stale: AtomicU64,
@@ -151,6 +172,18 @@ pub struct AirtimeShared {
 }
 
 impl AirtimeShared {
+    /// Estimated wait before a frame queued right now reaches the air:
+    /// the governor's next free slot plus everything already in the queue.
+    pub fn eta(&self) -> Duration {
+        Duration::from_millis(
+            self.next_slot_ms.load(Ordering::Relaxed) + self.queued_ms.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn queued(&self) -> Duration {
+        Duration::from_millis(self.queued_ms.load(Ordering::Relaxed))
+    }
+
     pub fn duty_percent(&self) -> f64 {
         let span = self.window_span_ms.load(Ordering::Relaxed);
         if span == 0 {
@@ -173,9 +206,14 @@ impl AirtimeShared {
             s.push_str(&format!(" (budget {}s)", budget / 1000));
         }
         s.push_str(&format!(
-            "; total keyed {}s; {} frames deferred, {} dropped stale, {} dropped while inhibited",
+            "; {:.1}s queued ({:.1}s until the next slot); total keyed {}s; \
+             {} frames deferred, {} refused as backlog, {} dropped stale, \
+             {} dropped while inhibited",
+            self.queued_ms.load(Ordering::Relaxed) as f64 / 1000.0,
+            self.next_slot_ms.load(Ordering::Relaxed) as f64 / 1000.0,
             self.total_ms.load(Ordering::Relaxed) / 1000,
             self.deferred.load(Ordering::Relaxed),
+            self.rejected_backlog.load(Ordering::Relaxed),
             self.dropped_stale.load(Ordering::Relaxed),
             self.dropped_inhibited.load(Ordering::Relaxed),
         ));
@@ -224,6 +262,53 @@ impl Governor {
 
     pub fn config(&self) -> &AirtimeConfig {
         &self.cfg
+    }
+
+    /// Airtime permitted inside one duty window.
+    fn allowance(&self) -> Duration {
+        self.cfg.window.mul_f64(self.cfg.effective_duty())
+    }
+
+    /// How long before a frame of `octets` could be transmitted, without
+    /// changing any state.
+    ///
+    /// [`Governor::check`] has to record that a cooldown started, so it takes
+    /// `&mut self` and cannot be used to answer "when could I send this?" for
+    /// a message the caller has not committed to yet. Admission control needs
+    /// exactly that question, so it gets its own read-only path.
+    pub fn time_until_clear(&self, octets: usize, now: Instant) -> Duration {
+        if !self.cfg.enabled {
+            return Duration::ZERO;
+        }
+        let mut wait = Duration::ZERO;
+        if let Some(until) = self.cooling_until {
+            wait = wait.max(until.saturating_duration_since(now));
+        }
+        let cost = self.airtime_for(octets);
+        let run = if self
+            .last_end
+            .map(|l| now.saturating_duration_since(l) >= RUN_GAP)
+            .unwrap_or(true)
+        {
+            Duration::ZERO
+        } else {
+            self.run
+        };
+        if run > Duration::ZERO && run + cost > self.cfg.max_continuous {
+            let until = self.last_end.unwrap_or(now) + self.cfg.cooldown;
+            wait = wait.max(until.saturating_duration_since(now));
+        }
+        let allowance = self.allowance();
+        if self.airtime_within(now, self.cfg.window) + cost > allowance {
+            wait = wait.max(self.retry_delay(now, self.cfg.window, allowance, cost));
+        }
+        if !self.cfg.hourly_budget.is_zero() {
+            let hour = self.cfg.hourly_budget_window();
+            if self.airtime_within(now, hour) + cost > self.cfg.hourly_budget {
+                wait = wait.max(self.retry_delay(now, hour, self.cfg.hourly_budget, cost));
+            }
+        }
+        wait
     }
 
     /// Key-down time a frame of `octets` will cost, TXDELAY and TXTAIL
@@ -295,7 +380,7 @@ impl Governor {
         }
 
         // 2. Duty cycle over the sliding window.
-        let allowance = self.cfg.window.mul_f64(self.cfg.max_duty.clamp(0.0, 1.0));
+        let allowance = self.allowance();
         let used = self.airtime_within(now, self.cfg.window);
         if used + cost > allowance {
             return TxDecision::Defer(self.retry_delay(now, self.cfg.window, allowance, cost), DeferReason::Duty);
@@ -368,6 +453,16 @@ impl Governor {
         cost
     }
 
+    /// Publish the current picture for `RADIO STATUS` and for admission
+    /// control. `typical` is the frame size used to estimate the next slot.
+    pub fn publish_with(&self, shared: &AirtimeShared, now: Instant, typical: usize) {
+        shared.next_slot_ms.store(
+            self.time_until_clear(typical, now).as_millis() as u64,
+            Ordering::Relaxed,
+        );
+        self.publish(shared, now);
+    }
+
     /// Publish the current picture for `RADIO STATUS`.
     pub fn publish(&self, shared: &AirtimeShared, now: Instant) {
         let hour = self.cfg.hourly_budget_window();
@@ -405,6 +500,49 @@ impl Governor {
 }
 
 impl AirtimeConfig {
+    /// The duty target actually used, never above [`HARD_MAX_DUTY`].
+    pub fn effective_duty(&self) -> f64 {
+        self.max_duty.clamp(0.0, HARD_MAX_DUTY)
+    }
+
+    /// The worst instantaneous duty cycle the run/cooldown pair permits.
+    ///
+    /// The sliding window bounds the *average*; this bounds the *burst*.
+    /// A 30 s run followed by a 60 s cooldown is 33 %, whatever the window
+    /// average happens to be. Without this, `max_duty_percent = 50` over ten
+    /// minutes still allows five unbroken minutes of key-down.
+    pub fn burst_duty(&self) -> f64 {
+        let run = self.max_continuous.as_secs_f64();
+        let rest = self.cooldown.as_secs_f64();
+        if run + rest <= 0.0 {
+            return 1.0;
+        }
+        run / (run + rest)
+    }
+
+    /// Reject a configuration that could exceed [`HARD_MAX_DUTY`] in bursts.
+    ///
+    /// Clamping `max_duty` is not enough on its own: the run and cooldown
+    /// settings are a second, independent way to keep the transmitter keyed.
+    pub fn check_hardware_safe(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.burst_duty() > HARD_MAX_DUTY {
+            return Err(format!(
+                "max_continuous_secs {} with cooldown_secs {} is a {:.0}% burst duty cycle; \
+                 the ceiling is {:.0}%. Raise cooldown_secs to at least {} s, or lower \
+                 max_continuous_secs.",
+                self.max_continuous.as_secs(),
+                self.cooldown.as_secs(),
+                self.burst_duty() * 100.0,
+                HARD_MAX_DUTY * 100.0,
+                self.max_continuous.as_secs(),
+            ));
+        }
+        Ok(())
+    }
+
     /// The rolling-hour budget is measured over an hour by definition, but
     /// keep it in one place so the retention window follows it.
     fn hourly_budget_window(&self) -> Duration {
@@ -529,6 +667,85 @@ mod tests {
             keyed <= Duration::from_secs(25),
             "hourly budget of 20 s was overrun: {keyed:?}"
         );
+    }
+
+    /// The invariant the whole module exists for. Drive the governor as hard
+    /// as anything possibly could and measure the duty cycle it actually
+    /// permitted, over every window position, not just on average.
+    #[test]
+    fn duty_never_exceeds_the_hard_ceiling() {
+        let mut c = cfg();
+        // Ask for far more than the ceiling and check the clamp holds.
+        c.max_duty = 0.95;
+        c.max_continuous = Duration::from_secs(30);
+        c.cooldown = Duration::from_secs(30);
+        c.hourly_budget = Duration::ZERO;
+        assert!(c.check_hardware_safe().is_ok(), "50/50 is exactly the ceiling");
+
+        let mut g = Governor::new(c);
+        let start = Instant::now();
+        let mut t = start;
+        // Every burst that was actually transmitted, as (start, end).
+        let mut keyed: Vec<(Duration, Duration)> = Vec::new();
+        // Two hours of a sender that never stops trying.
+        while t < start + Duration::from_secs(7200) {
+            match g.check(158, t) {
+                TxDecision::Send => {
+                    let cost = g.record(158, t);
+                    keyed.push((t - start, t - start + cost));
+                    t += cost;
+                }
+                TxDecision::Defer(d, _) => t += d.max(Duration::from_millis(100)),
+            }
+        }
+
+        // Slide a window across the whole run and check every position.
+        let window = Duration::from_secs(600);
+        for start_s in 0..(7200 - 600) {
+            let from = Duration::from_secs(start_s);
+            let to = from + window;
+            let busy: f64 = keyed
+                .iter()
+                .map(|(a, b)| {
+                    let lo = (*a).max(from);
+                    let hi = (*b).min(to);
+                    if hi > lo {
+                        (hi - lo).as_secs_f64()
+                    } else {
+                        0.0
+                    }
+                })
+                .sum();
+            let duty = busy / window.as_secs_f64();
+            assert!(
+                duty <= HARD_MAX_DUTY + 0.02,
+                "duty {duty:.3} in the window starting at {start_s}s exceeds the {HARD_MAX_DUTY} ceiling"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cooldown_shorter_than_the_run_is_refused() {
+        let mut c = cfg();
+        c.max_continuous = Duration::from_secs(60);
+        c.cooldown = Duration::from_secs(10);
+        // 60 on / 10 off is an 86 % burst duty cycle.
+        let err = c.check_hardware_safe().unwrap_err();
+        assert!(err.contains("burst duty cycle"), "{err}");
+    }
+
+    #[test]
+    fn time_until_clear_does_not_mutate() {
+        let mut g = Governor::new(cfg());
+        let mut t = Instant::now();
+        while let TxDecision::Send = g.check(158, t) {
+            g.record(158, t);
+            t += Duration::from_millis(5100);
+        }
+        let a = g.time_until_clear(158, t);
+        let b = g.time_until_clear(158, t);
+        assert_eq!(a, b, "the read-only query changed the governor's state");
+        assert!(a > Duration::ZERO, "it should report the cooldown it is in");
     }
 
     #[test]

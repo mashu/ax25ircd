@@ -103,6 +103,27 @@ transmit it again. Two gateways sharing a frequency would then key each other
 indefinitely, with nobody watching either of them. Stations always unicast to
 the gateway, so nothing is lost by the restriction.
 
+## 3.2 What the gateway will and will not transmit
+
+The gateway is an automatically controlled station on a shared, thermally
+limited channel, so its side of the protocol is deliberately quieter than the
+IRC feature set behind it.
+
+* **`JOIN` is answered with a member count, not a member list.** The reply is
+  `NAMESREPLY [channel, "<n> here", topic]`. A station that joins did not ask
+  who else is present, and a roll call is seconds of airtime.
+* **`NAMES` is the only way to get the list**, and the reply is capped both by
+  count (`radio.rf_names_max`) and by length; the truncation is visible as a
+  trailing `+<n> more`.
+* **`ERROR` is never acknowledged or retried.** A reliable error costs up to
+  `max_retries` transmissions — more than the frame that provoked it.
+* **`PRESENCE` is off by default.** Join and part notices are the lowest-value
+  traffic on the channel.
+* Quits, nick changes, channel modes and IRC numerics are never transmitted.
+
+A station implementation should therefore expect `NAMESREPLY` in two shapes and
+distinguish them by whether the second field is a count or a list.
+
 ## 4. Reliability
 
 Two modes:

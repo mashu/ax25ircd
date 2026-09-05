@@ -166,6 +166,11 @@ max_hold_secs = 120
     the second one is between a busy `#rf` and your finals. `RADIO DUTY` shows
     the live figures.
 
+    The 50 % duty ceiling is a bound, not a default: `max_duty_percent` above
+    50 is refused, a `max_continuous_secs`/`cooldown_secs` pair that would
+    exceed 50 % in bursts is refused, and `enabled = false` is only accepted
+    with a loopback TNC. `--check` catches all three before you key up.
+
 ```sh
 ax25ircd --check -c ~/.config/ax25ircd/ax25ircd.toml
 ```
@@ -227,6 +232,10 @@ callsign with `-` turned into `|` (`YOURCALL|7`).
 - Hamlib 2057 unknown — switch PTT to `RIG 2028`.
 - No `+v` on `#rf` — you skipped `CALLSIGN`.
 - Spoke on `#rf` but nothing on the air — no RF-TX grant; `OPER` or `RADIO GRANT`.
+- "Queued for RF … 40s of queue ahead of it" — normal. 300 baud is slow and the
+  duty limit is doing its job; `RADIO DUTY` shows the backlog.
+- "Not put on the air: the transmit queue is Ns deep" — the channel is busier
+  than the duty cycle allows. Shorter messages, or fewer of them.
 - Practice with no RF: `ax25irc-kisshub --bind 127.0.0.1:8001` and the same
   toml, indoors. Still do not enable radio toward a real antenna until you
   mean it.

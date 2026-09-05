@@ -104,7 +104,10 @@ impl Harness {
         let (out, rx) = mpsc::channel(1024);
         self.server.handle(Event::Connected {
             id,
-            host: "127.0.0.2".into(),
+            // A distinct host per client: `max_conns_per_host` would
+            // otherwise refuse everything past the eighth, and a test that
+            // silently has one user in the channel proves nothing.
+            host: format!("10.0.{}.{}", id / 256, id % 256),
             out,
             hangup: None,
         });
@@ -217,15 +220,24 @@ async fn station_joins_and_appears_on_irc() {
         "IRC users should see the station join: {lines:?}"
     );
 
-    // The gateway answers with a NAMES reply addressed to the station.
+    // The gateway confirms the join, but does NOT read out the member list:
+    // nobody asked for it, and a roll call is airtime.
     let tx = h.transmitted().await;
     let reply = tx
         .iter()
         .find(|(_, a)| a.kind == Kind::NamesReply)
-        .expect("expected a NAMES reply");
+        .expect("expected a join confirmation");
     assert_eq!(reply.0.destination.call.to_string(), "SM0ABC-7");
     assert_eq!(reply.0.source.call.to_string(), "SK0MT-1");
-    assert!(reply.1.fields()[1].contains("alice"));
+    let fields = reply.1.fields();
+    assert!(
+        !fields[1].contains("alice"),
+        "the member list was sent unasked: {fields:?}"
+    );
+    assert!(
+        fields[1].contains("here"),
+        "the join confirmation should carry a member count: {fields:?}"
+    );
 }
 
 #[tokio::test]
@@ -702,7 +714,7 @@ async fn names_reply_to_rf_is_bounded() {
     h.drain_client();
     // Fill the channel with IP users so an unbounded NAMES would be huge.
     for i in 0..60u64 {
-        let mut rx = h.connect_extra(100 + i, &format!("user{i:02}"));
+        let mut rx = h.connect_extra(100 + i, &format!("op_{i:02}"));
         h.server.handle(Event::Line {
             id: 100 + i,
             line: "JOIN #rf".into(),
@@ -783,4 +795,129 @@ async fn config_rejects_a_duty_budget_that_can_never_pass_a_frame() {
     );
     let err = Config::from_toml(&toml).unwrap_err().to_string();
     assert!(err.contains("duty"), "{err}");
+}
+
+
+#[tokio::test]
+async fn member_lists_are_sent_only_when_asked_and_are_capped() {
+    let mut h = Harness::new().await;
+    h.drain_client();
+    for i in 0..40u64 {
+        let mut rx = h.connect_extra(200 + i, &format!("ham_{i:02}"));
+        h.server.handle(Event::Line {
+            id: 200 + i,
+            line: "JOIN #rf".into(),
+        });
+        let _ = drain_rx(&mut rx);
+    }
+
+    assert!(
+        h.server.state.channel("#rf").unwrap().members.len() > 30,
+        "test setup: only {} members in #rf",
+        h.server.state.channel("#rf").unwrap().members.len()
+    );
+    h.station_transmits(
+        "SM0ABC-7",
+        AircFrame::new(Kind::Join, 1, encode_fields(&["#rf"])),
+    )
+    .await;
+    let tx = h.transmitted().await;
+    for (_, f) in &tx {
+        if f.kind == Kind::NamesReply {
+            let fields = f.fields();
+            assert!(
+                !fields[1].contains("ham_"),
+                "JOIN leaked the member list: {fields:?}"
+            );
+        }
+    }
+
+    // Now ask for it explicitly. It arrives, but capped.
+    h.station_transmits(
+        "SM0ABC-7",
+        AircFrame::new(Kind::Names, 2, encode_fields(&["#rf"])),
+    )
+    .await;
+    let tx = h.transmitted().await;
+    let reply = tx
+        .iter()
+        .find(|(_, a)| a.kind == Kind::NamesReply)
+        .expect("an explicit NAMES should be answered");
+    let names = reply.1.fields()[1].clone();
+    let listed = names.split(',').filter(|n| n.contains("ham_")).count();
+    assert!(listed <= 8, "{listed} names is more than rf_names_max");
+    assert!(names.contains("more"), "the truncation should be visible: {names}");
+    assert!(
+        reply.1.payload.len() <= 200,
+        "a NAMES reply of {} octets is too much airtime",
+        reply.1.payload.len()
+    );
+}
+
+#[tokio::test]
+async fn held_mail_is_delivered_a_little_at_a_time() {
+    let mut h = Harness::new().await;
+    h.oper_and_callsign();
+    h.drain_client();
+    // Five messages held for a station that is not on frequency.
+    for i in 0..5 {
+        h.send(&format!("PRIVMSG SM0ABC|7 :held message {i}"));
+    }
+    h.drain_client();
+
+    // The station appears. Its welcome goes out first and is acknowledged;
+    // only then does held mail leave the per-station queue — and only one
+    // message of it, not the whole mailbox.
+    h.station_transmits("SM0ABC-7", AircFrame::new(Kind::Hello, 1, Vec::new()))
+        .await;
+    let welcome = h
+        .transmitted()
+        .await
+        .into_iter()
+        .find(|(_, a)| a.kind == Kind::Welcome)
+        .expect("a station that says HELLO gets a welcome");
+    h.ack(&welcome.1).await;
+
+    let tx = h.transmitted().await;
+    let stored = tx.iter().filter(|(_, a)| a.kind == Kind::Stored).count();
+    assert_eq!(
+        stored, 1,
+        "held mail should drip, not flood: {stored} messages went out at once"
+    );
+    assert!(
+        h.server.mailbox.depth(&"SM0ABC-7".parse().unwrap()) > 0,
+        "the rest should still be waiting, not discarded"
+    );
+}
+
+#[tokio::test]
+async fn a_full_backlog_is_refused_out_loud_not_dropped_silently() {
+    // One second of queue: the second message has nowhere to go.
+    let toml = CONFIG.replace(
+        "id_interval_secs = 60",
+        "id_interval_secs = 60\nmax_queued_airtime_secs = 1",
+    );
+    let mut h = Harness::from_toml(&toml).await;
+    h.oper_and_callsign();
+    h.send("JOIN #rf");
+    h.station_transmits("SM0ABC-7", AircFrame::new(Kind::Hello, 1, Vec::new()))
+        .await;
+    h.station_transmits(
+        "SM0ABC-7",
+        AircFrame::new(Kind::Join, 2, encode_fields(&["#rf"])),
+    )
+    .await;
+    h.drain_client();
+
+    // Fire messages without letting the TNC task drain the queue.
+    for i in 0..30 {
+        h.send(&format!("PRIVMSG #rf :message number {i}"));
+    }
+    let lines = h.drain_client();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("transmit queue") || l.contains("Queued for RF")),
+        "the sender was told nothing about what happened to their message: {lines:?}"
+    );
 }

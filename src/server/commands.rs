@@ -21,7 +21,7 @@ use crate::irc::numerics as num;
 use crate::policy::Verdict;
 
 use super::state::{ClientId, UserId};
-use super::{AuthKind, Delivery, Event, Server};
+use super::{AuthKind, Delivery, Event, Server, TxClass};
 
 impl Server {
     pub fn handle_client_message(&mut self, id: ClientId, msg: Message) {
@@ -554,20 +554,26 @@ impl Server {
             .unwrap_or_default();
         let now = self.now_unix();
         let topic = crate::policy::sanitize(&topic);
+        // A TOPIC that sets the topic to what it already was is a no-op on
+        // IRC and would be a transmission on RF. Notice it before deciding.
+        let changed = chan.topic.as_deref() != Some(topic.as_str());
         if let Some(c) = self.state.channel_mut(&name) {
             c.topic = Some(topic.clone());
             c.topic_setter = nick.clone();
             c.topic_time = now;
         }
-        let mut allow_rf = chan.rf
+        // Topic changes go through exactly the same gate as chat: RF-TX
+        // privilege, callsign, per-sender rate limit, content screening and
+        // the airtime backlog. A channel operator retyping the topic is not
+        // a reason to key the transmitter.
+        let mut allow_rf = changed
+            && chan.rf
             && chan.has_rf_members()
-            && self.rf_available()
-            && self.user_may_tx_rf(uid);
+            && self.rf_available();
         let air_topic = if allow_rf {
-            match self.policy.screen_outbound(&topic) {
-                Verdict::Allow(t) | Verdict::Truncated(t) => t,
-                Verdict::Deny(reason) => {
-                    self.notice_user(uid, reason);
+            match self.screen_for_air(uid, &topic) {
+                Some(t) => t,
+                None => {
                     allow_rf = false;
                     topic.clone()
                 }
@@ -940,10 +946,20 @@ impl Server {
             };
             self.broadcast_channel_ex(&chan.name, &d, Some(uid), allow_rf);
             if allow_rf && self.config.radio.notice_air_relay && !notice {
+                // Say "queued", not "relayed". On a duty-limited channel the
+                // two are different, sometimes by a minute, and a sender who
+                // is told the truth will not repeat themselves — which is the
+                // cheapest airtime saving available.
+                let eta = self.rf_eta();
+                let when = if eta.as_secs() < 2 {
+                    "going out now".to_string()
+                } else {
+                    format!("about {}s of queue ahead of it", eta.as_secs())
+                };
                 self.notice_user(
                     uid,
                     &format!(
-                        "Relayed to RF ({}). {} station(s) on frequency.",
+                        "Queued for RF ({}), {when}. {} station(s) on frequency.",
                         self.config.radio.callsign,
                         self.sessions.peers().count()
                     ),
@@ -1036,6 +1052,12 @@ impl Server {
     /// Common gate for anything an IP user wants to put on the air. Returns
     /// the text to transmit, or `None` if it must not be transmitted (the
     /// user has already been told why).
+    ///
+    /// Every refusal below happens *before* the message is committed to the
+    /// radio queue, and every one of them says something to the sender. The
+    /// alternative — accept it, queue it, and let the transmitter drop it two
+    /// minutes later — is the worst of both worlds: the sender believes it
+    /// went out, and the airtime was reserved for nothing.
     fn screen_for_air(&mut self, uid: &UserId, text: &str) -> Option<String> {
         if !self.rf_available() {
             self.notice_user(uid, "The transmitter is off; your message stayed on the wire.");
@@ -1074,17 +1096,45 @@ impl Server {
             );
             return None;
         }
-        match self.policy.screen_outbound(text) {
-            Verdict::Allow(t) => Some(t),
+        let screened = match self.policy.screen_outbound(text) {
+            Verdict::Allow(t) => t,
             Verdict::Truncated(t) => {
-                self.notice_user(uid, "Your message was shortened before transmission.");
-                Some(t)
+                self.notice_user(
+                    uid,
+                    &format!(
+                        "Your message was shortened to {} characters before transmission. \
+                         The radio side carries sentences, not paragraphs.",
+                        self.policy.config.max_rf_text_len
+                    ),
+                );
+                t
             }
             Verdict::Deny(reason) => {
                 self.notice_user(uid, reason);
-                None
+                return None;
             }
+        };
+
+        // Last gate, and the one that protects the transmitter: is there room
+        // in the airtime backlog? Checked here rather than at the transmitter
+        // because from here we can still tell the sender. The payload also
+        // carries the channel name and the sender's nick, so allow for those.
+        let octets = self.wire_octets(screened.len() + 40);
+        if !self.rf_backlog_has_room(octets, TxClass::Chat) {
+            let queued = self.rf_eta().as_secs();
+            self.notice_user(
+                uid,
+                &format!(
+                    "Not put on the air: the transmit queue is {queued}s deep and the duty-cycle \
+                     limit will not clear it in time. Your message was delivered on IRC. \
+                     Try again shortly — or say it shorter."
+                ),
+            );
+            self.stats.rf_frames_refused += 1;
+            self.audit.event("rf_backlog_refused", &[("octets", &octets.to_string())]);
+            return None;
         }
+        Some(screened)
     }
 
     // ------------------------------------------------------------ extensions
@@ -1646,7 +1696,7 @@ impl Server {
             "{} {}",
             self.config.radio.callsign, self.config.radio.id_text
         );
-        self.broadcast(Kind::Id, encode_fields(&[&text]));
+        self.broadcast(Kind::Id, encode_fields(&[&text]), TxClass::Control);
     }
 
     pub(crate) fn channel_display_name(&self, name: &str) -> String {

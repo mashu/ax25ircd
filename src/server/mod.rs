@@ -111,11 +111,56 @@ pub enum Delivery {
     },
 }
 
+/// What a frame is *for*, which decides how much of the transmit backlog it
+/// may occupy.
+///
+/// A single FIFO is the wrong shape for a shared, thermally limited channel:
+/// a burst of channel chat would fill it and the ACK that would have ended a
+/// retry cycle waits behind ten seconds of gossip — costing more airtime than
+/// the chat did. Each class may fill only a fraction of the backlog budget,
+/// so protocol traffic always has room and conversation is what gets squeezed.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TxClass {
+    /// Acknowledgements. Cheap, and every one of them prevents a retransmit.
+    Ack,
+    /// Session control: WELCOME, NAMES replies, errors, PONG.
+    Control,
+    /// Addressed to one station: private messages and held mail.
+    Direct,
+    /// Channel conversation. The largest source of traffic and the most
+    /// tolerant of being dropped, so it is squeezed first.
+    Chat,
+}
+
+impl TxClass {
+    /// Fraction of the backlog budget this class may occupy.
+    fn allowance(self) -> f64 {
+        match self {
+            TxClass::Ack => 1.0,
+            TxClass::Control => 0.85,
+            TxClass::Direct => 0.7,
+            TxClass::Chat => 0.5,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            TxClass::Ack => "ack",
+            TxClass::Control => "control",
+            TxClass::Direct => "direct",
+            TxClass::Chat => "chat",
+        }
+    }
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct Stats {
     pub rf_frames_rx: u64,
     pub rf_frames_tx: u64,
     pub rf_frames_dropped: u64,
+    /// Frames refused before they were queued, because the backlog for their
+    /// class was already full.
+    pub rf_frames_refused: u64,
     pub rf_bytes_tx: u64,
     pub ip_connections: u64,
 }
@@ -165,7 +210,28 @@ impl Server {
                 .map(|n| lower(n))
                 .collect();
         }
-        let policy = Policy::new(config.policy.clone());
+        // The configured text length is only an upper bound. What actually
+        // decides the airtime is how many AX.25 frames the message becomes,
+        // so clamp the text limit to whatever fits in `max_rf_fragments`
+        // frames at this paclen. Fragmentation multiplies the airtime *and*
+        // the loss rate — a message is only delivered if every fragment
+        // arrives, and a retry resends all of them.
+        let mut policy_config = config.policy.clone();
+        let per_frame = sessions.config.max_payload();
+        // Leave room for the AIRC field separators and the target/sender
+        // fields that ride along with the text.
+        let fragment_cap = per_frame
+            .saturating_mul(policy_config.max_rf_fragments.max(1))
+            .saturating_sub(48);
+        if fragment_cap > 0 && fragment_cap < policy_config.max_rf_text_len {
+            info!(
+                "capping RF message length to {fragment_cap} characters: \
+                 policy.max_rf_fragments = {} at paclen {}",
+                policy_config.max_rf_fragments, config.radio.paclen
+            );
+            policy_config.max_rf_text_len = fragment_cap;
+        }
+        let policy = Policy::new(policy_config);
         let mailbox = Mailbox::new(
             config.radio.mailbox_enabled,
             config.radio.mailbox_per_station,
@@ -463,9 +529,13 @@ impl Server {
                 self.send_raw(*id, msg.to_string());
             }
             UserId::Rf(call) => {
+                // A server notice to a station is a courtesy, not a message
+                // somebody sent. Keep it to one frame and do not retry it:
+                // "your message was shortened" is not worth four transmissions.
                 let call = call.clone();
-                let payload = encode_fields(&["*", text]);
-                self.unicast(&call, Kind::Notice, payload, true);
+                let text: String = text.chars().take(80).collect();
+                let payload = encode_fields(&["*", &text]);
+                self.unicast(&call, Kind::Notice, payload, false, TxClass::Control);
             }
         }
     }
@@ -497,18 +567,20 @@ impl Server {
                 // Channel traffic goes out once as a broadcast; a private
                 // message is unicast and acknowledged.
                 if target.starts_with('#') || target.starts_with('&') {
-                    self.broadcast(kind, payload);
+                    self.broadcast(kind, payload, TxClass::Chat);
                 } else {
-                    self.unicast(call, kind, payload, true);
+                    self.unicast(call, kind, payload, true, TxClass::Direct);
                 }
             }
+            // Presence is off by default and is the lowest-value traffic
+            // there is: a transmission to say somebody opened a window.
             Delivery::Join { nick, channel, .. } if self.config.radio.presence_notices => {
                 let payload = encode_fields(&[channel, nick, "+"]);
-                self.broadcast(Kind::Presence, payload);
+                self.broadcast(Kind::Presence, payload, TxClass::Chat);
             }
             Delivery::Part { nick, channel, .. } if self.config.radio.presence_notices => {
                 let payload = encode_fields(&[channel, nick, "-"]);
-                self.broadcast(Kind::Presence, payload);
+                self.broadcast(Kind::Presence, payload, TxClass::Chat);
             }
             Delivery::Topic {
                 nick,
@@ -516,8 +588,9 @@ impl Server {
                 topic,
                 ..
             } => {
-                let payload = encode_fields(&[channel, nick, topic]);
-                self.broadcast(Kind::Notice, payload);
+                let topic: String = topic.chars().take(64).collect();
+                let payload = encode_fields(&[channel, nick, &topic]);
+                self.broadcast(Kind::Notice, payload, TxClass::Chat);
             }
             // Quits, nick changes and (by default) presence are not worth the
             // airtime.
@@ -597,7 +670,7 @@ impl Server {
 
     /// Unreliable one-to-many transmission addressed to the protocol's
     /// destination address. Every station in range hears it once.
-    pub fn broadcast(&mut self, kind: Kind, payload: Vec<u8>) {
+    pub fn broadcast(&mut self, kind: Kind, payload: Vec<u8>, class: TxClass) {
         if !self.rf_available() {
             return;
         }
@@ -623,27 +696,86 @@ impl Server {
             let mut f = AircFrame::new(kind, seq, chunk);
             f.frag_index = i as u8;
             f.frag_total = total;
-            self.transmit_direct(&dest, f);
+            self.transmit_direct(&dest, f, class);
         }
     }
 
     /// Reliable one-to-one transmission with ACK and retry.
-    pub fn unicast(&mut self, dst: &Callsign, kind: Kind, payload: Vec<u8>, reliable: bool) {
+    pub fn unicast(
+        &mut self,
+        dst: &Callsign,
+        kind: Kind,
+        payload: Vec<u8>,
+        reliable: bool,
+        class: TxClass,
+    ) {
         if !self.rf_available() {
+            return;
+        }
+        // Admission control happens before the session layer sees the message.
+        // Once `Sessions::send` accepts it, an ACK timer is running and the
+        // message will be retransmitted up to `max_retries` times — so a
+        // message admitted when there is no airtime for it does not cost one
+        // transmission, it costs four.
+        if !self.rf_backlog_has_room(self.wire_octets(payload.len()), class) {
+            self.stats.rf_frames_refused += 1;
             return;
         }
         let now = Instant::now();
         let frames = self.sessions.send(dst, kind, payload, reliable, now);
         for f in frames {
-            self.transmit_direct(dst, f);
+            self.transmit_direct(dst, f, class);
         }
     }
 
     fn transmit_to(&mut self, dst: &Callsign, frame: AircFrame) {
-        self.transmit_direct(dst, frame);
+        // A retransmission the session layer has already decided on. It is
+        // finishing an exchange that is part-way done, so it is not subject to
+        // fresh admission control — dropping it here would leave the peer
+        // waiting for something that will never arrive.
+        self.transmit_direct(dst, frame, TxClass::Control);
     }
 
-    pub(crate) fn transmit_direct(&mut self, dest: &Callsign, frame: AircFrame) {
+    /// Octets this payload will actually put on the wire once fragmented.
+    ///
+    /// Fragmentation is not free and the naive estimate hides it: each
+    /// fragment carries its own AIRC header *and* a full AX.25 address field,
+    /// so a payload one octet over the limit costs a whole extra frame — plus
+    /// its TXDELAY and TXTAIL, which the governor prices separately.
+    fn wire_octets(&self, payload: usize) -> usize {
+        // AX.25 addresses (source, destination, up to two digipeaters),
+        // control, PID and FCS.
+        let per_frame = crate::airc::frame::HEADER_LEN + 7 * (2 + self.config.radio.path.len()) + 4;
+        let max = self.sessions.config.max_payload();
+        let fragments = payload.div_ceil(max).max(1);
+        payload + fragments * per_frame
+    }
+
+    /// Airtime the transmit queue may hold before new traffic is refused.
+    pub fn rf_backlog_budget(&self) -> Duration {
+        Duration::from_secs(self.config.radio.max_queued_airtime_secs)
+    }
+
+    /// Is there room in the backlog for `octets` of this class?
+    ///
+    /// This is the decision point that matters. Refusing here means the sender
+    /// finds out immediately and can say something shorter or wait; accepting
+    /// and then dropping the frame two minutes later at the transmitter means
+    /// the message vanished and nobody knows.
+    pub fn rf_backlog_has_room(&self, octets: usize, class: TxClass) -> bool {
+        let Some(tnc) = self.tnc.as_ref() else {
+            return false;
+        };
+        let budget = self.rf_backlog_budget().mul_f64(class.allowance());
+        tnc.queued() + tnc.airtime_for(octets) <= budget
+    }
+
+    /// How long a message queued now would wait before it is on the air.
+    pub fn rf_eta(&self) -> Duration {
+        self.tnc.as_ref().map(|t| t.eta()).unwrap_or_default()
+    }
+
+    pub(crate) fn transmit_direct(&mut self, dest: &Callsign, frame: AircFrame, class: TxClass) {
         let (Some(tnc), Some(source)) = (self.tnc.as_ref(), self.config.gateway_callsign()) else {
             return;
         };
@@ -668,26 +800,44 @@ impl Server {
             let dest_s = dest.to_string();
             self.audit.event(
                 "rf_tx",
-                &[("dest", &dest_s), ("kind", &kind), ("bytes", &n)],
+                &[
+                    ("dest", &dest_s),
+                    ("kind", &kind),
+                    ("bytes", &n),
+                    ("class", class.as_str()),
+                ],
             );
         } else {
             self.stats.rf_frames_dropped += 1;
         }
     }
 
-    /// Deliver anything that was held for a station we have just heard from.
-    /// Held messages are sent reliably, oldest first, and carry their age so
-    /// the operator knows they are not fresh.
+    /// Deliver mail held for a station we have just heard from.
+    ///
+    /// A few at a time, not the whole mailbox. Ten held messages released the
+    /// instant a HELLO arrives is a minute of near-continuous transmitting
+    /// caused by one short frame from a station that may be in range for
+    /// thirty seconds. The rest go out on the next thing we hear from them, so
+    /// the station's own activity paces the delivery — which is also the only
+    /// evidence we have that it is still listening.
     pub(crate) fn flush_mailbox(&mut self, call: &Callsign) {
-        if self.mailbox.depth(call) == 0 {
+        let depth = self.mailbox.depth(call);
+        if depth == 0 {
             return;
         }
+        let batch = self.config.radio.mailbox_flush_batch.max(1);
         let now = Instant::now();
         let nick = call.to_nick();
-        for m in self.mailbox.take(call) {
+        let messages = self.mailbox.take_some(call, batch);
+        let sent = messages.len();
+        for m in messages {
             let age = m.age(now).as_secs().to_string();
             let payload = encode_fields(&[&nick, &m.from, &m.text, &age]);
-            self.unicast(call, Kind::Stored, payload, true);
+            self.unicast(call, Kind::Stored, payload, true, TxClass::Direct);
+        }
+        let remaining = depth.saturating_sub(sent);
+        if remaining > 0 {
+            debug!(%call, "{remaining} held message(s) still waiting");
         }
     }
 

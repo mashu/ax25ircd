@@ -284,8 +284,18 @@ impl Station {
                 println!("-- connected to {} : {}", f.first().cloned().unwrap_or_default(), f.get(1).cloned().unwrap_or_default());
             }
             Kind::NamesReply => {
+                // Two shapes share this kind: a join confirmation, which
+                // carries a member *count* ("12 here"), and the answer to an
+                // explicit /names, which carries the (capped) list. Joining
+                // does not read out the roll — that is airtime nobody asked
+                // for — so use /names when you actually want to know.
                 let chan = f.first().cloned().unwrap_or_default();
-                println!("-- {chan} members: {}", f.get(1).cloned().unwrap_or_default());
+                let body = f.get(1).cloned().unwrap_or_default();
+                if body.ends_with("here") {
+                    println!("-- joined {chan} ({body}; /names to list them)");
+                } else {
+                    println!("-- {chan} members: {body}");
+                }
                 if let Some(topic) = f.get(2).filter(|t| !t.is_empty()) {
                     println!("-- {chan} topic: {topic}");
                 }

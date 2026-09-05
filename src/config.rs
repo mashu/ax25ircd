@@ -121,6 +121,11 @@ pub struct RadioConfig {
     /// Held messages older than this are dropped.
     #[serde(default = "default_mailbox_ttl")]
     pub mailbox_ttl_secs: u64,
+    /// Held messages delivered per exchange with a station. The rest wait for
+    /// the next thing the station sends, so its own activity paces delivery
+    /// rather than one HELLO releasing a minute of transmitting.
+    #[serde(default = "default_mailbox_flush_batch")]
+    pub mailbox_flush_batch: usize,
     /// Re-transmit messages that arrived from RF back onto RF, so that
     /// stations hidden from each other but both audible to the gateway can
     /// hold a conversation. Doubles the airtime of every RF message; leave it
@@ -130,6 +135,19 @@ pub struct RadioConfig {
     /// NOTICE the sender when a channel message is actually put on the air.
     #[serde(default = "default_true")]
     pub notice_air_relay: bool,
+    /// Airtime the transmit queue may hold before new traffic is refused.
+    ///
+    /// This is the backlog limit, and it is deliberately in *seconds of
+    /// airtime* rather than a frame count: sixty short frames and six long
+    /// ones are very different amounts of transmitting. When the backlog is
+    /// full, senders are told so immediately instead of having their message
+    /// accepted and silently dropped at the transmitter minutes later.
+    #[serde(default = "default_max_queued_airtime")]
+    pub max_queued_airtime_secs: u64,
+    /// Most names sent in reply to an explicit `NAMES` from a station.
+    /// Member lists are never sent unasked.
+    #[serde(default = "default_rf_names_max")]
+    pub rf_names_max: usize,
     /// Airtime and duty-cycle limits. These protect the transmitter's finals
     /// and the shared channel; they are not the same thing as the per-user
     /// rate limits in `[policy]`.
@@ -296,6 +314,14 @@ pub struct PolicyConfig {
     pub ip_cmds_per_min: u32,
     #[serde(default = "default_ip_cmd_burst")]
     pub ip_cmd_burst: u32,
+    /// Most AX.25 frames one radiated message may be split into.
+    ///
+    /// The real limit on message length, and stricter than
+    /// `max_rf_text_len`: fragmentation multiplies both the airtime and the
+    /// chance of loss, and a lost fragment costs the whole message. Two frames
+    /// is a sentence, which is what packet is for.
+    #[serde(default = "default_max_rf_fragments")]
+    pub max_rf_fragments: usize,
     /// IDENTIFY / REGISTER / OPER guesses per minute per host.
     #[serde(default = "default_identify_per_min")]
     pub identify_per_min: u32,
@@ -317,6 +343,7 @@ impl Default for PolicyConfig {
             rf_channel_burst: default_rf_channel_burst(),
             ip_cmds_per_min: default_ip_cmds_per_min(),
             ip_cmd_burst: default_ip_cmd_burst(),
+            max_rf_fragments: default_max_rf_fragments(),
             identify_per_min: default_identify_per_min(),
             identify_burst: default_identify_burst(),
         }
@@ -440,16 +467,31 @@ impl Config {
         if self.radio.paclen < 32 || self.radio.paclen > 256 {
             anyhow::bail!("radio.paclen must be between 32 and 256");
         }
+        if self.policy.max_rf_fragments == 0 {
+            anyhow::bail!("policy.max_rf_fragments must be at least 1");
+        }
+        if self.radio.max_queued_airtime_secs == 0 {
+            anyhow::bail!("radio.max_queued_airtime_secs must be at least 1");
+        }
         if self.channels.iter().all(|c| !c.rf) {
             anyhow::bail!("radio.enabled is true but no channel has rf = true");
         }
 
         let duty = &self.radio.duty;
+        if !duty.enabled && self.radio.tnc.kind != "loopback" {
+            anyhow::bail!(
+                "radio.duty.enabled = false with a real transmitter: there would be nothing \
+                 limiting how long the finals are keyed. It is only allowed with \
+                 radio.tnc.kind = \"loopback\"."
+            );
+        }
         if duty.enabled {
-            if duty.max_duty_percent == 0 || duty.max_duty_percent > 100 {
+            let ceiling = (crate::ax25::airtime::HARD_MAX_DUTY * 100.0) as u32;
+            if duty.max_duty_percent == 0 || duty.max_duty_percent > ceiling {
                 anyhow::bail!(
-                    "radio.duty.max_duty_percent must be between 1 and 100 \
-                     (use enabled = false if you really mean no limit)"
+                    "radio.duty.max_duty_percent must be between 1 and {ceiling}. \
+                     A transceiver keyed for more than half the time cooks its finals, \
+                     and an automatically controlled station has nobody watching it."
                 );
             }
             if duty.window_secs == 0 {
@@ -461,12 +503,15 @@ impl Config {
             if duty.baud == 0 {
                 anyhow::bail!("radio.duty.baud must be at least 1");
             }
+            let air = duty.to_airtime();
+            // The window average is only half the story: the run and cooldown
+            // settings are an independent way to hold the transmitter keyed.
+            air.check_hardware_safe().map_err(|e| anyhow::anyhow!("radio.duty: {e}"))?;
             // A frame the governor can never fit inside its own allowance
             // would be deferred until `max_hold` and then dropped, forever.
-            let air = duty.to_airtime();
             let biggest = crate::ax25::Governor::new(air.clone())
                 .airtime_for(self.radio.paclen + 64);
-            let allowance = air.window.mul_f64(air.max_duty);
+            let allowance = air.window.mul_f64(air.effective_duty());
             if biggest > allowance {
                 anyhow::bail!(
                     "radio.duty: a full-length frame is {:.1}s of airtime but the duty allowance \
@@ -642,6 +687,18 @@ fn default_hourly_airtime() -> u64 {
 }
 fn default_max_hold() -> u64 {
     120
+}
+fn default_max_queued_airtime() -> u64 {
+    60
+}
+fn default_rf_names_max() -> usize {
+    8
+}
+fn default_mailbox_flush_batch() -> usize {
+    1
+}
+fn default_max_rf_fragments() -> usize {
+    2
 }
 
 #[cfg(test)]
