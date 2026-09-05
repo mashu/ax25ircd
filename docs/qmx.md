@@ -32,9 +32,44 @@ arecord -l
 ls -l /dev/serial/by-id/
 ```
 
-You want a card named **QMX** (remember `plughw:N,0`) and a stable serial path
-such as `/dev/serial/by-id/usb-QRP_Labs_QMX_Transceiver-if00`. Do not put
-`/dev/ttyACM0` in a config you intend to keep — the number moves.
+You want a card named **QMX Transceiver** (ALSA short name `Transceiver`) and a
+stable serial path such as
+`/dev/serial/by-id/usb-QRP_Labs_QMX_Transceiver-if00`. Use
+`plughw:CARD=Transceiver,DEV=0`, not `plughw:1,0` — card numbers move when HDMI
+or another USB gadget appears. Do not put `/dev/ttyACM0` in a config you intend
+to keep; that number moves too.
+
+If PipeWire or PulseAudio has taken the QMX (it often becomes the default
+sink), Direwolf cannot open it for transmit. Keep desktop audio on the laptop
+speakers and leave the radio to ALSA:
+
+```sh
+wpctl status                    # note the Built-in Audio sink/source IDs
+wpctl set-default <sink-id>
+wpctl set-default <source-id>
+pactl set-card-profile alsa_card.usb-QRP_Labs_QMX_Transceiver-02 off
+```
+
+To make that stick across replugs, drop a WirePlumber rule that disables the
+QMX for PipeWire (Direwolf still opens it via ALSA):
+
+```
+# ~/.config/wireplumber/wireplumber.conf.d/51-qmx.conf
+monitor.alsa.rules = [
+  {
+    matches = [
+      { device.name = "~alsa_card.usb-QRP_Labs_QMX_Transceiver.*" }
+    ]
+    actions = {
+      update-props = {
+        device.disabled = true
+      }
+    }
+  }
+]
+```
+
+Then `systemctl --user restart wireplumber`.
 
 ## 3. Set the radio: SSB USB, IQ off, TX from USB
 
@@ -55,7 +90,7 @@ HF packet is 300 baud. VHF FM is 1200; that is a different radio. Copy
 (your callsign), and the `PTT` serial path from step 2.
 
 ```
-ADEVICE  plughw:1,0
+ADEVICE  plughw:CARD=Transceiver,DEV=0
 ARATE    48000
 MYCALL   YOURCALL-1
 CHANNEL  0
@@ -163,7 +198,9 @@ callsign with `-` turned into `|` (`YOURCALL|7`).
 ## 10. If nothing comes back
 
 - Direwolf not running, or not on `127.0.0.1:8001` — ax25ircd reconnects, but nothing radiates.
-- Wrong `plughw` index after unplugging — check `arecord -l` again.
+- `Could not open audio device … No such file or directory` — card index moved
+  (HDMI often occupies `plughw:1,0`). Use `plughw:CARD=Transceiver,DEV=0`.
+- `Device or resource busy` on transmit — PipeWire grabbed the QMX; see step 2.
 - Not in `dialout` — PTT silently fails. `groups` should list it.
 - QMX still in Digi or IQ — audio looks like noise to Direwolf.
 - Hamlib 2057 unknown — switch PTT to `RIG 2028`.
