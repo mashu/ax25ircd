@@ -98,6 +98,16 @@ impl User {
 pub struct MemberFlags {
     pub op: bool,
     pub voice: bool,
+    /// Granted explicitly with `MODE`, rather than derived from who the user
+    /// is.
+    ///
+    /// The two have to be told apart. Privileges are recomputed whenever
+    /// something changes about a user — OPER, IDENTIFY, CALLSIGN, a RADIO
+    /// GRANT — and that recomputation used to overwrite the whole flag set,
+    /// so an unrelated IDENTIFY silently took away a `+v` a channel operator
+    /// had just given out.
+    pub op_manual: bool,
+    pub voice_manual: bool,
 }
 
 impl MemberFlags {
@@ -272,15 +282,22 @@ impl State {
             MemberFlags {
                 op: user.oper || configured_op,
                 voice: user.callsign.is_some() || user.oper,
+                ..Default::default()
             }
         } else {
             MemberFlags {
                 op: (first && !id.is_rf()) || user.oper || configured_op,
                 voice: false,
+                ..Default::default()
             }
         }
     }
 
+    /// Recompute what a user's membership flags *should* be, and apply the
+    /// change. Returns the old and new flags when something moved.
+    ///
+    /// Anything an operator granted by hand is preserved: this only decides
+    /// the derived part.
     pub fn apply_intended_flags(&mut self, id: &UserId, channel: &str) -> Option<(MemberFlags, MemberFlags)> {
         let key = lower(channel);
         let (old, rf, operators) = {
@@ -288,7 +305,13 @@ impl State {
             let old = *chan.members.get(id)?;
             (old, chan.rf, chan.operators.clone())
         };
-        let new = self.flags_for_parts(id, rf, false, &operators);
+        let derived = self.flags_for_parts(id, rf, false, &operators);
+        let new = MemberFlags {
+            op: derived.op || old.op_manual,
+            voice: derived.voice || old.voice_manual,
+            op_manual: old.op_manual,
+            voice_manual: old.voice_manual,
+        };
         if old == new {
             return None;
         }
@@ -455,6 +478,31 @@ mod tests {
         assert_eq!(s.remove_user(&UserId::Ip(1)), vec!["#a"]);
         assert!(s.channel("#a").unwrap().members.is_empty());
         assert!(!s.nick_taken("alice"));
+    }
+
+    #[test]
+    fn a_manual_grant_outlives_a_recomputation() {
+        let mut s = State::default();
+        s.ensure_channel("#a", false).configured = true;
+        s.insert_user(user(UserId::Ip(1), "alice"));
+        s.set_nick(&UserId::Ip(1), "alice");
+        s.join(&UserId::Ip(1), "#a");
+
+        // An operator hands out +v by hand.
+        if let Some(f) = s
+            .channels
+            .get_mut("#a")
+            .and_then(|c| c.members.get_mut(&UserId::Ip(1)))
+        {
+            f.voice = true;
+            f.voice_manual = true;
+        }
+        // Something unrelated recomputes the derived flags.
+        s.apply_intended_flags(&UserId::Ip(1), "#a");
+        assert!(
+            s.channel("#a").unwrap().members[&UserId::Ip(1)].voice,
+            "a recomputation must not undo what an operator granted"
+        );
     }
 
     #[test]

@@ -424,7 +424,12 @@ impl Server {
                 .user(&uid)
                 .map(|u| u.nick.clone())
                 .unwrap_or_default();
-            let guest = format!("Guest{}", match uid {
+            // `Guest_1`, not `Guest1`: the latter parses as a plausible
+            // callsign (letters and a digit), so it sits in the namespace
+            // reserved for RF stations — the server would be handing out a
+            // nick it refuses when a client asks for it. The underscore is a
+            // legal nick character and is never legal in a callsign.
+            let guest = format!("Guest_{}", match uid {
                 UserId::Ip(id) => id,
                 UserId::Rf(_) => 0,
             });

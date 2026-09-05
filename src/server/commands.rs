@@ -806,10 +806,15 @@ impl Server {
                     if let Some(target_id) = who.as_deref().and_then(|n| self.find_target(n)) {
                         if let Some(ch) = self.state.channel_mut(&target) {
                             if let Some(flags) = ch.members.get_mut(&target_id) {
+                                // Record that this was a decision, not a
+                                // derivation, so recomputing the derived
+                                // flags later does not undo it.
                                 if c == 'o' {
                                     flags.op = adding;
+                                    flags.op_manual = adding;
                                 } else {
                                     flags.voice = adding;
+                                    flags.voice_manual = adding;
                                 }
                             }
                         }

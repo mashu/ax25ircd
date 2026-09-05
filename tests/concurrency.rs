@@ -44,14 +44,12 @@ async fn start(config_text: &str) -> String {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    drop(listener);
 
     let opts = ListenerOptions {
         ping_interval: Duration::from_secs(60),
     };
-    let bind = addr.clone();
     tokio::spawn(async move {
-        let _ = listen(bind, events_tx, Arc::new(AtomicU64::new(1)), opts).await;
+        let _ = listen(listener, events_tx, Arc::new(AtomicU64::new(1)), opts).await;
     });
     tokio::spawn(server::run(srv, events_rx));
     // Give the listener a moment to bind.

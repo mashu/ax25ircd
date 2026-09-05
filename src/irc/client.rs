@@ -27,13 +27,21 @@ pub struct ListenerOptions {
     pub ping_interval: Duration,
 }
 
+/// Accept IRC clients on an already-bound listener.
+///
+/// Binding is the caller's job so that a failure to bind is an error at
+/// startup rather than a line in a log nobody is reading, and so a test can
+/// ask the OS for a port.
 pub async fn listen(
-    addr: String,
+    listener: TcpListener,
     events: mpsc::Sender<Event>,
     ids: Arc<AtomicU64>,
     opts: ListenerOptions,
 ) -> std::io::Result<()> {
-    let listener = TcpListener::bind(&addr).await?;
+    let addr = listener
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| "?".into());
     info!(%addr, "listening for IRC clients");
     loop {
         let (stream, peer) = match listener.accept().await {

@@ -22,11 +22,14 @@ pub mod accounts;
 pub mod audit;
 pub mod bridge;
 pub mod callsign;
+pub mod cli;
 pub mod config;
 pub mod interlock;
 pub mod irc;
+pub mod kisshub;
 pub mod policy;
 pub mod server;
+pub mod station;
 
 pub use callsign::Callsign;
 pub use config::Config;

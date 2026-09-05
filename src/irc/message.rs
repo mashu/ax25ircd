@@ -87,7 +87,12 @@ impl fmt::Display for Message {
         if let Some(prefix) = &self.prefix {
             write!(f, ":{} ", scrub_irc(prefix))?;
         }
-        write!(f, "{}", self.command)?;
+        // The command is scrubbed like everything else. Commands we construct
+        // are literals, but a parsed one is attacker-controlled: `parse` only
+        // strips CR/LF from the *end* of a line, so "FOO\rBAR baz" yields a
+        // command with a carriage return in it. Echoing that back unscrubbed
+        // would be an injection into every client that saw it.
+        write!(f, "{}", scrub_irc(&self.command))?;
         for (i, p) in self.params.iter().enumerate() {
             let p = scrub_irc(p);
             let last = i + 1 == self.params.len();
@@ -194,6 +199,18 @@ mod tests {
 
         let m = Message::new("QUIT", vec!["".into()]);
         assert_eq!(m.to_string(), "QUIT :");
+    }
+
+    #[test]
+    fn a_command_with_a_control_character_cannot_split_a_line() {
+        // `parse` trims CR and LF only from the end of the line.
+        let m = Message::parse("PRIV\rMSG #ham :hi").unwrap();
+        assert!(m.command.contains('\r'), "the parser keeps it, by design");
+        let line = m.to_string();
+        assert!(
+            !line.contains('\r') && !line.contains('\n'),
+            "serialising must not carry it back out: {line:?}"
+        );
     }
 
     #[test]
