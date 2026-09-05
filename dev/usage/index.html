@@ -16,7 +16,7 @@
         <link rel="prev" href="../qmx/">
       
       
-        <link rel="next" href="../station/">
+        <link rel="next" href="../airtime/">
       
       
         
@@ -418,6 +418,8 @@
       
         
       
+        
+      
     
     
     
@@ -621,6 +623,34 @@
   
 </nav>
       
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../airtime/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Airtime and duty cycle
+  
+
+    
+  </span>
+  
+  
+
+      </a>
     </li>
   
 
@@ -1159,14 +1189,18 @@ usual. Local extensions:</p>
 <a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>KILL &lt;nick&gt;          OPER only
 </code></pre></div>
 <p>After <code>OPER</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>RADIO STATUS              transmitter, frames, stations heard
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>RADIO OFF / ON            kill switch; IRC keeps running
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>RADIO ID                  identify now
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>RADIO HEARD               stations, last heard, queue depth
-<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>RADIO MAIL                held private messages (in memory, expires)
-<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>RADIO KICK &lt;callsign&gt;     drop an RF station's presence
-<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>RADIO GRANT &lt;nick&gt;        persist RF-TX on a registered nick
-<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>RADIO REVOKE &lt;nick&gt;       take it away (also persisted)
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>RADIO STATUS              transmitter, frames, stations heard, duty cycle
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>RADIO DUTY                airtime spent, backlog, limits in force, PA cooldown
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>RADIO QUEUE               everything accepted but not yet transmitted
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>RADIO LIMIT DUTY &lt;1-50|off&gt;    lower the duty cycle now, no restart
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>RADIO LIMIT PACING &lt;ms|off&gt;    widen the gap between transmissions
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>RADIO OFF / ON            kill switch; purges the transmit queue
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>RADIO ID                  identify now
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>RADIO HEARD               stations, last heard, queue depth
+<a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>RADIO MAIL                held private messages (in memory, expires)
+<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>RADIO KICK &lt;callsign&gt;     drop an RF station's presence
+<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>RADIO GRANT &lt;nick&gt;        persist RF-TX on a registered nick
+<a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>RADIO REVOKE &lt;nick&gt;       take it away (also persisted)
 </code></pre></div>
 <h2 id="held-messages">Held messages<a class="headerlink" href="#held-messages" title="Permanent link">&para;</a></h2>
 <p>A private message to a callsign that is not on frequency is held and delivered
@@ -1235,13 +1269,13 @@ digipeater hops, and <code>radio.enabled</code> with no bridged channel.</p>
         
         
           
-          <a href="../station/" class="md-footer__link md-footer__link--next" aria-label="Next: Station and kisshub">
+          <a href="../airtime/" class="md-footer__link md-footer__link--next" aria-label="Next: Airtime and duty cycle">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Station and kisshub
+                Airtime and duty cycle
               </div>
             </div>
             <div class="md-footer__button md-icon">

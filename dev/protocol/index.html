@@ -416,6 +416,8 @@
       
         
       
+        
+      
     
     
     
@@ -476,6 +478,34 @@
     
   
     IRC and privileges
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../airtime/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Airtime and duty cycle
   
 
     
@@ -727,6 +757,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#32-what-the-gateway-will-and-will-not-transmit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.2 What the gateway will and will not transmit
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#4-reliability" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -966,6 +1007,17 @@
     <span class="md-ellipsis">
       
         3.1 Addressing rules for receivers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#32-what-the-gateway-will-and-will-not-transmit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.2 What the gateway will and will not transmit
       
     </span>
   </a>
@@ -1279,6 +1331,33 @@ processing a frame it <strong>must</strong> check the AX.25 destination address:
 per sender, so consuming another station's unicast traffic pollutes the
 duplicate-suppression window and causes messages meant for you to be discarded
 as duplicates.</p>
+<p>The <strong>gateway</strong> applies the rule more strictly still: it acts only on frames
+addressed to its own callsign, and never on broadcasts. <code>MSG</code> is the same
+<code>kind</code> in both directions but a different shape — uplink <code>[target, text]</code>,
+downlink <code>[target, from, text]</code> — so a gateway that processed broadcasts would
+read another gateway's downlink as uplink traffic from a station, relay it, and
+transmit it again. Two gateways sharing a frequency would then key each other
+indefinitely, with nobody watching either of them. Stations always unicast to
+the gateway, so nothing is lost by the restriction.</p>
+<h2 id="32-what-the-gateway-will-and-will-not-transmit">3.2 What the gateway will and will not transmit<a class="headerlink" href="#32-what-the-gateway-will-and-will-not-transmit" title="Permanent link">&para;</a></h2>
+<p>The gateway is an automatically controlled station on a shared, thermally
+limited channel, so its side of the protocol is deliberately quieter than the
+IRC feature set behind it.</p>
+<ul>
+<li><strong><code>JOIN</code> is answered with a member count, not a member list.</strong> The reply is
+  <code>NAMESREPLY [channel, "&lt;n&gt; here", topic]</code>. A station that joins did not ask
+  who else is present, and a roll call is seconds of airtime.</li>
+<li><strong><code>NAMES</code> is the only way to get the list</strong>, and the reply is capped both by
+  count (<code>radio.rf_names_max</code>) and by length; the truncation is visible as a
+  trailing <code>+&lt;n&gt; more</code>.</li>
+<li><strong><code>ERROR</code> is never acknowledged or retried.</strong> A reliable error costs up to
+  <code>max_retries</code> transmissions — more than the frame that provoked it.</li>
+<li><strong><code>PRESENCE</code> is off by default.</strong> Join and part notices are the lowest-value
+  traffic on the channel.</li>
+<li>Quits, nick changes, channel modes and IRC numerics are never transmitted.</li>
+</ul>
+<p>A station implementation should therefore expect <code>NAMESREPLY</code> in two shapes and
+distinguish them by whether the second field is a count or a list.</p>
 <h2 id="4-reliability">4. Reliability<a class="headerlink" href="#4-reliability" title="Permanent link">&para;</a></h2>
 <p>Two modes:</p>
 <ul>

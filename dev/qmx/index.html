@@ -546,6 +546,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#11-can-direwolf-be-left-out" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        11. Can Direwolf be left out?
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -570,6 +581,8 @@
   
     
     
+      
+        
       
         
       
@@ -635,6 +648,34 @@
     
   
     IRC and privileges
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../airtime/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Airtime and duty cycle
   
 
     
@@ -1027,6 +1068,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#11-can-direwolf-be-left-out" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        11. Can Direwolf be left out?
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1175,7 +1227,33 @@ Direwolf is already listening.</p>
 <a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="n">host</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"127.0.0.1"</span>
 <a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="n">port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8001</span>
 <a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="n">tx_pacing_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2500</span>
+<a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a>
+<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="c1"># Keep the QMX alive. At 300 baud a full frame is about four seconds of</span>
+<a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="c1"># unbroken carrier, and the QMX has no thermal headroom to speak of. These</span>
+<a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a><span class="c1"># numbers must match the TXDELAY/TXTAIL in direwolf-qmx.conf.</span>
+<a id="__codelineno-7-16" name="__codelineno-7-16" href="#__codelineno-7-16"></a><span class="k">[radio.duty]</span>
+<a id="__codelineno-7-17" name="__codelineno-7-17" href="#__codelineno-7-17"></a><span class="n">enabled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+<a id="__codelineno-7-18" name="__codelineno-7-18" href="#__codelineno-7-18"></a><span class="n">baud</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">300</span>
+<a id="__codelineno-7-19" name="__codelineno-7-19" href="#__codelineno-7-19"></a><span class="n">txdelay_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">400</span>
+<a id="__codelineno-7-20" name="__codelineno-7-20" href="#__codelineno-7-20"></a><span class="n">txtail_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">300</span>
+<a id="__codelineno-7-21" name="__codelineno-7-21" href="#__codelineno-7-21"></a><span class="n">window_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">600</span>
+<a id="__codelineno-7-22" name="__codelineno-7-22" href="#__codelineno-7-22"></a><span class="n">max_duty_percent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">25</span>
+<a id="__codelineno-7-23" name="__codelineno-7-23" href="#__codelineno-7-23"></a><span class="n">max_continuous_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">30</span>
+<a id="__codelineno-7-24" name="__codelineno-7-24" href="#__codelineno-7-24"></a><span class="n">cooldown_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">60</span>
+<a id="__codelineno-7-25" name="__codelineno-7-25" href="#__codelineno-7-25"></a><span class="n">hourly_airtime_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">900</span>
+<a id="__codelineno-7-26" name="__codelineno-7-26" href="#__codelineno-7-26"></a><span class="n">max_hold_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">120</span>
 </code></pre></div>
+<div class="admonition danger">
+<p class="admonition-title">Do not raise these without reading <a href="../airtime/">Airtime</a></p>
+<p><code>[policy]</code> limits messages; <code>[radio.duty]</code> limits seconds of key-down.
+Only the second one knows how long a transmission actually takes, and only
+the second one is between a busy <code>#rf</code> and your finals. <code>RADIO DUTY</code> shows
+the live figures.</p>
+<p>The 50 % duty ceiling is a bound, not a default: <code>max_duty_percent</code> above
+50 is refused, a <code>max_continuous_secs</code>/<code>cooldown_secs</code> pair that would
+exceed 50 % in bursts is refused, and <code>enabled = false</code> is only accepted
+with a loopback TNC. <code>--check</code> catches all three before you key up.</p>
+</div>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>ax25ircd<span class="w"> </span>--check<span class="w"> </span>-c<span class="w"> </span>~/.config/ax25ircd/ax25ircd.toml
 </code></pre></div>
 <p>The checker refuses a fake callsign, an ID interval over ten minutes, and
@@ -1245,10 +1323,71 @@ callsign with <code>-</code> turned into <code>|</code> (<code>YOURCALL|7</code>
 <li>Hamlib 2057 unknown — switch PTT to <code>RIG 2028</code>.</li>
 <li>No <code>+v</code> on <code>#rf</code> — you skipped <code>CALLSIGN</code>.</li>
 <li>Spoke on <code>#rf</code> but nothing on the air — no RF-TX grant; <code>OPER</code> or <code>RADIO GRANT</code>.</li>
+<li>"Queued for RF … 40s of queue ahead of it" — normal. 300 baud is slow and the
+  duty limit is doing its job; <code>RADIO DUTY</code> shows the backlog.</li>
+<li>"Not put on the air: the transmit queue is Ns deep" — the channel is busier
+  than the duty cycle allows. Shorter messages, or fewer of them.</li>
 <li>Practice with no RF: <code>ax25irc-kisshub --bind 127.0.0.1:8001</code> and the same
   toml, indoors. Still do not enable radio toward a real antenna until you
   mean it.</li>
 </ul>
+<h2 id="11-can-direwolf-be-left-out">11. Can Direwolf be left out?<a class="headerlink" href="#11-can-direwolf-be-left-out" title="Permanent link">&para;</a></h2>
+<p>Short answer: no, and it is not close.</p>
+<p>Direwolf is not a shim here. Between "an IRC message" and "RF out of a QMX"
+there are four jobs, and ax25ircd deliberately does none of them:</p>
+<table>
+<thead>
+<tr>
+<th>Job</th>
+<th>Who does it</th>
+<th>What replacing it costs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AFSK/BPSK modulation and <strong>demodulation</strong></td>
+<td>Direwolf</td>
+<td>A soundcard modem: filters, timing recovery, DCD, and enough decoder tolerance to work on a real HF channel. This is the hard part, and Direwolf is a decade of it.</td>
+</tr>
+<tr>
+<td>ALSA capture and playback</td>
+<td>Direwolf</td>
+<td>Audio I/O and buffering against xruns</td>
+</tr>
+<tr>
+<td>PTT over CAT</td>
+<td>Direwolf via hamlib</td>
+<td>hamlib bindings or a hand-rolled Kenwood-dialect CAT driver</td>
+</tr>
+<tr>
+<td>AX.25 framing and KISS</td>
+<td>Direwolf, and ax25ircd</td>
+<td>Already done in <code>src/ax25</code></td>
+</tr>
+</tbody>
+</table>
+<p>The QMX itself cannot fill the gap. It is a transceiver with a USB audio
+interface and a CAT port — it has no KISS TNC, and its Digi mode is single-tone
+FSK for FT8-style modes, not AFSK, so it cannot carry AX.25 at all. There is no
+firmware setting that turns it into a TNC.</p>
+<p>So "skip Direwolf" really means "write a soundmodem". That is a real project —
+DSP, audio plumbing, and a decoder that has to work on a noisy 300 baud HF
+channel where Direwolf's multi-decoder approach earns its keep — and it would
+be a separate binary presenting the same KISS socket ax25ircd already speaks
+to. The gateway would not change at all.</p>
+<p>If the goal is <strong>fewer moving parts</strong>, the useful options are:</p>
+<ul>
+<li>Run Direwolf as a systemd unit next to ax25ircd, so it is one <code>systemctl</code>
+  target rather than a terminal you have to remember. See
+  <a href="../packaging/">Packaging</a>.</li>
+<li>Use <code>kind = "serial"</code> with a hardware KISS TNC (Mobilinkd, TNC-Pi) and drop
+  Direwolf <em>and</em> the sound card — but that is a different radio setup, not a
+  QMX one.</li>
+</ul>
+<p>If the goal is <strong>no radio at all</strong> for testing, <code>ax25irc-kisshub</code> already
+replaces Direwolf completely:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>ax25irc-kisshub<span class="w"> </span>--bind<span class="w"> </span><span class="m">127</span>.0.0.1:8001
+</code></pre></div>
 <p>ax25ircd never talks to the QMX. It talks KISS to Direwolf. That split is
 deliberate: audio, PTT and the modem stay in software that already knows
 hamlib. See <a href="../protocol/">Protocol</a> and <a href="../design/">Design</a>.</p>

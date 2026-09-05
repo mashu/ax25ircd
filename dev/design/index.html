@@ -416,6 +416,8 @@
       
         
       
+        
+      
     
     
     
@@ -476,6 +478,34 @@
     
   
     IRC and privileges
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../airtime/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Airtime and duty cycle
   
 
     
@@ -1316,8 +1346,77 @@ path and no <code>Arc&lt;Mutex&lt;State&gt;&gt;</code>.</p>
 <p>This matters more than usual here, because the two sides have wildly different
 latencies (microseconds on TCP, seconds on RF) and a lock-based design would
 let a slow radio write block an IRC client. Instead the radio has a bounded
-transmit queue: when it fills, frames are dropped and counted, and the IRC side
-never notices.</p>
+transmit queue: when it fills, frames are refused at admission and the sender
+is told, and the IRC side never waits.</p>
+<p><strong>"One task owns the state" is not "the server is single threaded."</strong> The
+runtime is <code>rt-multi-thread</code>, and the work that scales with the number of
+clients is per-client:</p>
+<table>
+<thead>
+<tr>
+<th>Task</th>
+<th>How many</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Listener</td>
+<td>one per <code>bind</code> address</td>
+<td>accept, spawn</td>
+</tr>
+<tr>
+<td>Connection reader</td>
+<td>one per client</td>
+<td>socket → <code>Event</code></td>
+</tr>
+<tr>
+<td>Connection writer</td>
+<td>one per client</td>
+<td>bounded queue → socket</td>
+</tr>
+<tr>
+<td>Server actor</td>
+<td>exactly one</td>
+<td>all state mutation</td>
+</tr>
+<tr>
+<td>TNC link</td>
+<td>one</td>
+<td>KISS framing, pacing, the airtime governor</td>
+</tr>
+<tr>
+<td>Argon2</td>
+<td>one per <code>REGISTER</code>/<code>IDENTIFY</code></td>
+<td><code>spawn_blocking</code></td>
+</tr>
+<tr>
+<td>Audit writer</td>
+<td>one</td>
+<td><code>spawn_blocking</code>, batched appends</td>
+</tr>
+<tr>
+<td>Interlock</td>
+<td>one, if configured</td>
+<td>polls the safety command</td>
+</tr>
+</tbody>
+</table>
+<p>So parsing, TLS-free socket I/O, line framing, password hashing and log writing
+all run on the thread pool in parallel; only the state transitions are
+serialised, and those are microseconds of <code>HashMap</code> work. The actor is a
+correctness decision — one ordering of events, no interleaving between the
+radio and the wire — not a throughput compromise.</p>
+<p>The rule that keeps it true: <strong>nothing that can block goes in the actor.</strong>
+Password hashing was moved to <code>spawn_blocking</code> and the audit log to its own
+writer task for exactly this reason. The one blocking call left is the nick
+database write on <code>REGISTER</code>, <code>RADIO GRANT</code> and <code>CALLSIGN</code> — a small file,
+written only on account changes, and rate-limited to six attempts a minute per
+host.</p>
+<p><code>tests/concurrency.rs</code> checks the claim against real sockets rather than
+asserting it: a hundred clients registering and talking simultaneously, a
+client that stops reading, silent sockets that never register, and a
+connection flood from one address.</p>
 <h3 id="32-the-delivery-type">3.2 The <code>Delivery</code> type<a class="headerlink" href="#32-the-delivery-type" title="Permanent link">&para;</a></h3>
 <p>The bridge does not translate IRC lines into AX.25 frames. Both are rendered
 from a neutral <code>Delivery</code> value:</p>
@@ -1439,7 +1538,19 @@ can be smuggled onto the air by waiting.</p>
 </tr>
 <tr>
 <td>Transmit queue full</td>
-<td>frames dropped and counted; visible in <code>RADIO STATUS</code></td>
+<td>new traffic refused at admission and the sender told why; visible in <code>RADIO QUEUE</code></td>
+</tr>
+<tr>
+<td>Duty cycle or PA cooldown reached</td>
+<td>frames deferred until airtime frees up, then dropped after <code>max_hold_secs</code> rather than transmitted stale</td>
+</tr>
+<tr>
+<td>Safety interlock fails or cannot be run</td>
+<td>everything inhibited, station identification included; fails closed</td>
+</tr>
+<tr>
+<td>Audit writer falls behind</td>
+<td>lines dropped and counted, never buffered without limit and never blocking the server</td>
 </tr>
 <tr>
 <td>Station stops answering</td>
@@ -1470,12 +1581,28 @@ can be smuggled onto the air by waiting.</p>
 <td>dropped after <code>registration_timeout_secs</code></td>
 </tr>
 <tr>
+<td>Client stops reading its socket</td>
+<td>bounded output queue; the connection is dropped rather than buffered without limit</td>
+</tr>
+<tr>
+<td>Connection flood</td>
+<td>capped per host and in total (<code>max_conns_per_host</code>, <code>max_clients</code>)</td>
+</tr>
+<tr>
+<td>Channels created and abandoned</td>
+<td>user-created channels are reaped when the last member leaves; configured ones persist</td>
+</tr>
+<tr>
 <td>Message for a station that is out of range</td>
 <td>held, bounded and expiring; delivered as <code>STORED</code> on next contact</td>
 </tr>
 <tr>
 <td>Control operator needs the transmitter off <em>now</em></td>
-<td><code>RADIO OFF</code> — IRC keeps running</td>
+<td><code>RADIO OFF</code> — signs off with an ID, purges the queue, IRC keeps running</td>
+</tr>
+<tr>
+<td>Control operator needs it slower, not off</td>
+<td><code>RADIO LIMIT DUTY</code> / <code>RADIO LIMIT PACING</code>, effective on the next frame</td>
 </tr>
 </tbody>
 </table>

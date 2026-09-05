@@ -13,7 +13,7 @@
         <link rel="canonical" href="https://mashu.github.io/ax25ircd/dev/station/">
       
       
-        <link rel="prev" href="../usage/">
+        <link rel="prev" href="../airtime/">
       
       
         <link rel="next" href="../design/">
@@ -418,6 +418,8 @@
       
         
       
+        
+      
     
     
     
@@ -478,6 +480,34 @@
     
   
     IRC and privileges
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../airtime/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Airtime and duty cycle
   
 
     
@@ -565,6 +595,23 @@
       
     </span>
   </a>
+  
+    <nav class="md-nav" aria-label="ax25irc-station">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#airtime" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Airtime
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -838,6 +885,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="ax25irc-station">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#airtime" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Airtime
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -884,25 +948,41 @@
 retransmission arriving thirty seconds late is noise); joins, private messages
 and requests are ACKed and retried.</p>
 <p>Serial TNCs need a build with <code>--features serial</code>.</p>
+<h3 id="airtime">Airtime<a class="headerlink" href="#airtime" title="Permanent link">&para;</a></h3>
+<p>The station client runs the same airtime governor as the gateway, with the same
+50 % duty ceiling and the same refusal to accept a run/cooldown pair that would
+exceed it. You are a human typing rather than an automatic service, but it is
+the same QRP radio at the same baud rate, and the finals do not know the
+difference.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>ax25irc-station<span class="w"> </span>--call<span class="w"> </span>SM0ABC-7<span class="w"> </span>--gateway<span class="w"> </span>SK0MT-1<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">                </span>--baud<span class="w"> </span><span class="m">300</span><span class="w"> </span>--txdelay<span class="w"> </span><span class="m">400</span><span class="w"> </span>--txtail<span class="w"> </span><span class="m">300</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">                </span>--duty<span class="w"> </span><span class="m">25</span><span class="w"> </span>--max-continuous<span class="w"> </span><span class="m">30</span><span class="w"> </span>--cooldown<span class="w"> </span><span class="m">60</span>
+</code></pre></div>
+<p>Those are the defaults, and they assume HF: 300 baud, a QMX-class radio. For
+1200 baud VHF FM with a heatsink, <code>--baud 1200 --duty 40</code>. <code>--txdelay</code> and
+<code>--txtail</code> are pushed to the TNC as the KISS parameters as well as being used
+to price each frame, so the modem and the model cannot disagree.</p>
+<p>See <a href="../airtime/">Airtime</a> for what the limits mean and why they are shaped the
+way they are.</p>
 <h2 id="ax25irc-kisshub">ax25irc-kisshub<a class="headerlink" href="#ax25irc-kisshub" title="Permanent link">&para;</a></h2>
 <p>A virtual channel: every TCP client that connects is a station on the same
 frequency, and it prints every frame in <code>axlisten</code> monitor format. No radio, no
 licence.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>ax25irc-kisshub<span class="w"> </span>--bind<span class="w"> </span><span class="m">127</span>.0.0.1:8001<span class="w"> </span><span class="p">&amp;</span>
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>ax25ircd<span class="w"> </span>-c<span class="w"> </span>ax25ircd.toml<span class="w"> </span><span class="p">&amp;</span><span class="w">                 </span><span class="c1"># radio.tnc.port = 8001</span>
-<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>ax25irc-station<span class="w"> </span>--call<span class="w"> </span>SM0ABC-7<span class="w"> </span>--gateway<span class="w"> </span>SK0MT-1<span class="w"> </span>--channel<span class="w"> </span><span class="s1">'#rf'</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>ax25irc-kisshub<span class="w"> </span>--bind<span class="w"> </span><span class="m">127</span>.0.0.1:8001<span class="w"> </span><span class="p">&amp;</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>ax25ircd<span class="w"> </span>-c<span class="w"> </span>ax25ircd.toml<span class="w"> </span><span class="p">&amp;</span><span class="w">                 </span><span class="c1"># radio.tnc.port = 8001</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>ax25irc-station<span class="w"> </span>--call<span class="w"> </span>SM0ABC-7<span class="w"> </span>--gateway<span class="w"> </span>SK0MT-1<span class="w"> </span>--channel<span class="w"> </span><span class="s1">'#rf'</span>
 </code></pre></div>
 <p>Then connect an IRC client to <code>127.0.0.1:6667</code>, <code>/quote CALLSIGN SM0XYZ</code>, join
 <code>#rf</code>. That lets you speak on IRC. To key the virtual transmitter from IRC,
 register the nick and have a control operator <code>RADIO GRANT</code> it — see
 <a href="../usage/">usage.md</a>.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>#rf &lt;alice&gt; hello over the air
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>*alice* direct to you
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>-- #rf members: SM0ABC|7,alice
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>#rf &lt;alice&gt; hello over the air
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>*alice* direct to you
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>-- #rf members: SM0ABC|7,alice
 </code></pre></div>
 <p>while the channel monitor shows what it cost:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>SK0MT-1&gt;AIRC:A1......#rf.alice.hello over the air
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>SM0ABC-7&gt;SK0MT-1:A1......#rf.morning all, 5 watts from Kista
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>SK0MT-1&gt;AIRC:A1......#rf.alice.hello over the air
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>SM0ABC-7&gt;SK0MT-1:A1......#rf.morning all, 5 watts from Kista
 </code></pre></div>
 
 
@@ -941,7 +1021,7 @@ register the nick and have a control operator <code>RADIO GRANT</code> it — se
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../usage/" class="md-footer__link md-footer__link--prev" aria-label="Previous: IRC and privileges">
+          <a href="../airtime/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Airtime and duty cycle">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
@@ -951,7 +1031,7 @@ register the nick and have a control operator <code>RADIO GRANT</code> it — se
                 Previous
               </span>
               <div class="md-ellipsis">
-                IRC and privileges
+                Airtime and duty cycle
               </div>
             </div>
           </a>
