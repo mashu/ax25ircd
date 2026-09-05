@@ -43,6 +43,76 @@ set one with `PASSWD`):
 (Or put the password in irssi's `/connect` password field.) Then `NICK` /
 `USER` as usual — irssi does those for you when you `/connect`.
 
+## irssi: this server only
+
+irssi's default config autoconnects to public networks. Start it so it does
+**not** do that, and point it only at this gateway:
+
+```
+irssi -! -c 127.0.0.1 -p 6667 -n alice
+```
+
+`-!` skips autoconnect. `-c` / `-p` / `-n` are this process, this port, this
+nick.
+
+Your **nick cannot be your callsign.** `SM0XYZ`, `SM0XYZ-7` and `SM0XYZ|7` are
+reserved for stations heard on the air. Use a normal nick (`alice`) and claim
+the callsign after connect.
+
+A dedicated config (nothing else in it) lives next to the gateway config:
+
+```
+# ~/.config/ax25ircd/irssi.conf  —  irssi --config=this-file
+servers = (
+  {
+    address = "127.0.0.1";
+    chatnet = "ax25irc";
+    port = "6667";
+    use_tls = "no";
+    autoconnect = "yes";
+  }
+);
+chatnets = {
+  ax25irc = { type = "IRC"; nick = "alice"; };
+};
+settings = {
+  core = {
+    real_name = "alice";
+    user_name = "alice";
+    nick = "alice";
+  };
+};
+channels = (
+  { name = "#rf"; chatnet = "ax25irc"; autojoin = "Yes"; }
+);
+ignores = ( );
+```
+
+```
+mkdir -p ~/.config/ax25ircd
+# save the file above, then:
+irssi --config=~/.config/ax25ircd/irssi.conf
+```
+
+Once connected:
+
+```
+/quote CALLSIGN SM0XYZ
+/quote REGISTER a-secret-password
+```
+
+On later sessions, after the nick is registered:
+
+```
+/quote IDENTIFY a-secret-password
+```
+
+irssi can send those itself (`/set autosendcmd` on that network, or a
+`autosendcmd` in the chatnet block). Do not put the OPER password in
+autosendcmd on a shared machine.
+
+TLS from another host: `use_tls = "yes"; port = "6697"; address = "irc.example.net";`
+
 ## Nick, callsign, and registration
 
 Two things can be reserved so nobody else can use them: the **nick** and the
@@ -83,6 +153,43 @@ grant.
 
 Callsign-shaped nicks (`SM0ABC|7`, `SM0ABC-7`, `SM0ABC\7`) are reserved for
 stations heard on the air. An internet user cannot take them.
+
+## What is transmitted
+
+Radiation is an **allowlist**. Only these IRC events can key the transmitter,
+and only after RF-TX, CALLSIGN, a `+r` channel with a station on frequency,
+and the usual airtime gate:
+
+| On the list | |
+|---|---|
+| `PRIVMSG` chat | including `/me` (CTCP ACTION) |
+| `TOPIC` | if it actually changed; same RF-TX gate as chat |
+| JOIN/PART presence | only if `presence_notices = true` (off by default) |
+
+Everything else is not on the list, so it stays on IRC: NOTICE, other CTCP,
+MODE, KICK, INVITE, QUIT, NICK, numerics, RADIO replies, REGISTER, OPER.
+A new event type does not go on the air until someone adds it to the list.
+
+## Watch a simulated station
+
+No radio and no licence: a virtual frequency plus the station client. This is
+the way to see RF nicks and messages in irssi.
+
+In `ax25ircd.toml`, `[radio] enabled = true` and `[radio.tnc]` pointing at
+kisshub (`host = "127.0.0.1"`, `port = 8001`). Then:
+
+```sh
+./target/release/ax25irc-kisshub --bind 127.0.0.1:8001
+./target/release/ax25ircd -c ax25ircd.toml
+./target/release/ax25irc-station --call SM0ABC-7 --gateway SK0MT-1 --channel '#rf'
+```
+
+In irssi (localhost, as above): `/join #rf`. The station appears as
+`SM0ABC|7`. Type in the station client; the line shows up in `#rf`. Type in
+irssi; it stays on IRC until a control operator `RADIO GRANT`s your registered
+nick (or you `OPER`). The hub prints frames in `axlisten` format.
+
+More detail: [station.md](station.md), [quickstart.md](quickstart.md).
 
 ## Two populations
 
@@ -195,9 +302,20 @@ station is in the channel, the sender has RF-TX, and they have a CALLSIGN.
 
 ## Commands
 
-RFC 1459 `NICK` `USER` `JOIN` `PART` `PRIVMSG` `NOTICE` `TOPIC` `NAMES` `LIST`
-`WHO` `WHOIS` `MODE` `MOTD` `LUSERS` `AWAY` `PING` `PONG` `QUIT` `KICK` work as
-usual. Local extensions:
+RFC 1459 / 2812 client commands this server implements:
+
+```
+PASS NICK USER QUIT PING PONG
+JOIN PART PRIVMSG NOTICE TOPIC NAMES LIST WHO WHOIS WHOWAS MODE
+MOTD LUSERS AWAY KICK INVITE ISON USERHOST
+VERSION TIME ADMIN INFO HELP STATS LINKS CAP
+OPER KILL
+```
+
+Not implemented (deliberately): server linking (`SERVER`, `SQUIT`, `CONNECT`),
+services, SASL, DCC, STARTTLS, IRCv3 capabilities (`sasl`, `server-time`,
+`echo-message`, …). `CAP LS` advertises an empty list; the client sends
+`CAP END` and continues. Local extensions:
 
 ```
 OPER <name> <pass>   control operator this session ([[opers]] in the config)

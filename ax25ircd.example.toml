@@ -82,8 +82,10 @@ ack_timeout_secs = 12
 max_retries = 3
 peer_idle_timeout_secs = 1800
 
-# Send join/part notices over the air. Off by default: on a busy channel this
-# is most of your airtime for very little information.
+# Send join/part notices over the air. Off by default: JOIN/PART/QUIT already
+# stay on IRC, and turning this on is most of your airtime for very little
+# information. Leave it false unless RF stations have no other way to see who
+# is in the channel.
 presence_notices = false
 
 # Hold private messages for stations that are out of range and deliver them

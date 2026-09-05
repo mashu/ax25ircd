@@ -631,4 +631,57 @@ impl Server {
             self.rf_error(call, "442", "kicked from channel");
         }
     }
+
+    pub(super) fn cmd_invite(&mut self, uid: &UserId, msg: &Message) {
+        let (Some(who), Some(channel)) = (msg.param(0), msg.param(1)) else {
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["INVITE", "Not enough parameters"],
+            );
+            return;
+        };
+        let who = who.to_string();
+        let channel = channel.to_string();
+        let Some(chan) = self.state.channel(&channel).cloned() else {
+            self.numeric(uid, num::ERR_NOSUCHCHANNEL, &[&channel, "No such channel"]);
+            return;
+        };
+        if !chan.members.contains_key(uid) {
+            self.numeric(
+                uid,
+                num::ERR_NOTONCHANNEL,
+                &[&chan.name, "You're not on that channel"],
+            );
+            return;
+        }
+        let Some(target) = self.find_target(&who) else {
+            self.numeric(uid, num::ERR_NOSUCHNICK, &[&who, "No such nick"]);
+            return;
+        };
+        if chan.members.contains_key(&target) {
+            self.numeric(
+                uid,
+                num::ERR_USERONCHANNEL,
+                &[&who, &chan.name, "is already on channel"],
+            );
+            return;
+        }
+        let from = self.state.user(uid).map(|u| u.prefix()).unwrap_or_default();
+        self.numeric(uid, num::RPL_INVITING, &[&who, &chan.name]);
+        // INVITE is an IRC-side courtesy. It is never put on the air.
+        if let UserId::Ip(id) = target {
+            self.send_raw(
+                id,
+                Message::new("INVITE", vec![who, chan.name])
+                    .with_prefix(from)
+                    .to_string(),
+            );
+        } else {
+            self.notice_user(
+                uid,
+                "That station is on the radio. Invite is IRC-only; they join from the air.",
+            );
+        }
+    }
 }

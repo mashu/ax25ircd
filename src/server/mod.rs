@@ -19,7 +19,7 @@ use crate::audit::Audit;
 use crate::ax25::{Ax25Frame, TncHandle};
 use crate::callsign::Callsign;
 use crate::config::Config;
-use crate::irc::message::{is_channel_name, lower, Message};
+use crate::irc::message::{is_channel_name, lower, parse_ctcp, Message};
 use crate::policy::Policy;
 
 pub use clients::Clients;
@@ -115,6 +115,94 @@ pub enum Delivery {
         channel: String,
         topic: String,
     },
+}
+
+/// What [`Delivery::rf_emission`] has decided may key the transmitter.
+///
+/// This is an allowlist. A [`Delivery`] that does not produce one of these
+/// stays on IRC — including any variant added later, until it is named here.
+enum RfEmission<'a> {
+    Chat {
+        from_nick: &'a str,
+        target: &'a str,
+        text: String,
+        truncated: bool,
+        unicast: bool,
+    },
+    Topic {
+        nick: &'a str,
+        channel: &'a str,
+        topic: String,
+    },
+    Presence {
+        nick: &'a str,
+        channel: &'a str,
+        join: bool,
+    },
+}
+
+impl Delivery {
+    /// The only events that may be radiated. Exhaustive: a new variant will
+    /// not compile until someone decides whether it belongs on the air.
+    fn rf_emission(&self, presence_notices: bool) -> Option<RfEmission<'_>> {
+        match self {
+            Delivery::Privmsg {
+                from_nick,
+                target,
+                text,
+                notice: false,
+                truncated,
+                ..
+            } => {
+                let text = match parse_ctcp(text) {
+                    Some((cmd, rest)) if cmd.eq_ignore_ascii_case("ACTION") => {
+                        format!("/me {rest}")
+                    }
+                    Some(_) => return None,
+                    None => text.clone(),
+                };
+                Some(RfEmission::Chat {
+                    from_nick,
+                    target,
+                    text,
+                    truncated: *truncated,
+                    unicast: !is_channel_name(target),
+                })
+            }
+            Delivery::Privmsg { notice: true, .. } => None,
+            Delivery::Topic {
+                nick,
+                channel,
+                topic,
+                ..
+            } => {
+                let topic: String = topic.chars().take(64).collect();
+                Some(RfEmission::Topic {
+                    nick,
+                    channel,
+                    topic,
+                })
+            }
+            Delivery::Join { nick, channel, .. } if presence_notices => {
+                Some(RfEmission::Presence {
+                    nick,
+                    channel,
+                    join: true,
+                })
+            }
+            Delivery::Part { nick, channel, .. } if presence_notices => {
+                Some(RfEmission::Presence {
+                    nick,
+                    channel,
+                    join: false,
+                })
+            }
+            Delivery::Join { .. }
+            | Delivery::Part { .. }
+            | Delivery::Quit { .. }
+            | Delivery::NickChange { .. } => None,
+        }
+    }
 }
 
 /// The server actor.
@@ -494,55 +582,52 @@ impl Server {
     }
 
     fn deliver_rf(&mut self, call: &Callsign, d: &Delivery) {
-        match d {
-            Delivery::Privmsg {
+        match d.rf_emission(self.config.radio.presence_notices) {
+            Some(RfEmission::Chat {
                 from_nick,
                 target,
                 text,
-                notice,
                 truncated,
-                ..
-            } => {
-                let kind = if *notice { Kind::Notice } else { Kind::Msg };
-                let payload = encode_fields(&[target, from_nick, text]);
-                let flags = if *truncated {
+                unicast,
+            }) => {
+                let payload = encode_fields(&[target, from_nick, &text]);
+                let flags = if truncated {
                     crate::airc::frame::flags::TRUNCATED
                 } else {
                     0
                 };
-                // Channel traffic goes out once as a broadcast; a private
-                // message is unicast and acknowledged.
-                if is_channel_name(target) {
-                    self.radio
-                        .broadcast_flagged(kind, payload, TxClass::Chat, flags);
+                if unicast {
+                    self.radio.unicast_flagged(
+                        call,
+                        Kind::Msg,
+                        payload,
+                        true,
+                        TxClass::Direct,
+                        flags,
+                    );
                 } else {
                     self.radio
-                        .unicast_flagged(call, kind, payload, true, TxClass::Direct, flags);
+                        .broadcast_flagged(Kind::Msg, payload, TxClass::Chat, flags);
                 }
             }
-            // Presence is off by default and is the lowest-value traffic
-            // there is: a transmission to say somebody opened a window.
-            Delivery::Join { nick, channel, .. } if self.config.radio.presence_notices => {
-                let payload = encode_fields(&[channel, nick, "+"]);
-                self.radio.broadcast(Kind::Presence, payload, TxClass::Chat);
-            }
-            Delivery::Part { nick, channel, .. } if self.config.radio.presence_notices => {
-                let payload = encode_fields(&[channel, nick, "-"]);
-                self.radio.broadcast(Kind::Presence, payload, TxClass::Chat);
-            }
-            Delivery::Topic {
+            Some(RfEmission::Topic {
                 nick,
                 channel,
                 topic,
-                ..
-            } => {
-                let topic: String = topic.chars().take(64).collect();
+            }) => {
                 let payload = encode_fields(&[channel, nick, &topic]);
                 self.radio.broadcast(Kind::Notice, payload, TxClass::Chat);
             }
-            // Quits, nick changes and (by default) presence are not worth the
-            // airtime.
-            _ => {}
+            Some(RfEmission::Presence {
+                nick,
+                channel,
+                join,
+            }) => {
+                let mark = if join { "+" } else { "-" };
+                let payload = encode_fields(&[channel, nick, mark]);
+                self.radio.broadcast(Kind::Presence, payload, TxClass::Chat);
+            }
+            None => {}
         }
     }
 
@@ -570,7 +655,10 @@ impl Server {
                 continue;
             }
             if uid.is_rf() {
-                if !allow_rf || rf_done {
+                if !allow_rf
+                    || rf_done
+                    || d.rf_emission(self.config.radio.presence_notices).is_none()
+                {
                     continue;
                 }
                 rf_done = true;
@@ -587,7 +675,7 @@ impl Server {
         let mut rf_done = false;
         for t in targets {
             if t.is_rf() {
-                if rf_done {
+                if rf_done || d.rf_emission(self.config.radio.presence_notices).is_none() {
                     continue;
                 }
                 rf_done = true;
@@ -902,5 +990,63 @@ pub async fn run(mut server: Server, mut events: mpsc::Receiver<Event>) {
             },
             _ = ticker.tick() => server.handle(Event::Tick),
         }
+    }
+}
+
+#[cfg(test)]
+mod rf_allowlist {
+    use super::*;
+
+    fn privmsg(text: &str, notice: bool) -> Delivery {
+        Delivery::Privmsg {
+            from_nick: "alice".into(),
+            from_prefix: "alice!a@h".into(),
+            target: "#rf".into(),
+            text: text.into(),
+            notice,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn only_named_kinds_are_radiated() {
+        assert!(privmsg("hello", false).rf_emission(false).is_some());
+        assert!(privmsg("\u{1}ACTION waves\u{1}", false)
+            .rf_emission(false)
+            .is_some());
+        assert!(privmsg("hello", true).rf_emission(false).is_none());
+        assert!(privmsg("\u{1}VERSION\u{1}", false)
+            .rf_emission(false)
+            .is_none());
+
+        let join = Delivery::Join {
+            nick: "alice".into(),
+            prefix: "alice!a@h".into(),
+            channel: "#rf".into(),
+        };
+        assert!(join.rf_emission(false).is_none());
+        assert!(join.rf_emission(true).is_some());
+
+        let topic = Delivery::Topic {
+            nick: "alice".into(),
+            prefix: "alice!a@h".into(),
+            channel: "#rf".into(),
+            topic: "net at 1900".into(),
+        };
+        assert!(topic.rf_emission(false).is_some());
+
+        let quit = Delivery::Quit {
+            nick: "alice".into(),
+            prefix: "alice!a@h".into(),
+            reason: "bye".into(),
+        };
+        assert!(quit.rf_emission(true).is_none());
+
+        let nick = Delivery::NickChange {
+            old_nick: "alice".into(),
+            prefix: "alice!a@h".into(),
+            new_nick: "ally".into(),
+        };
+        assert!(nick.rf_emission(true).is_none());
     }
 }

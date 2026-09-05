@@ -40,8 +40,9 @@ difference between a usable QSO and an unusable one.
 
 Consequences that appear throughout the code:
 
-* The RF side never sees numerics, MOTDs, WHOIS replies, nick changes or (by
-  default) join/part notices.
+* The RF side is an allowlist: PRIVMSG chat (`/me` included), TOPIC, and
+  optionally join/part presence. Numerics, MODE, NOTICE, other CTCP, nick
+  changes and (by default) JOIN/PART are not on that list, so they stay on IRC.
 * Channel traffic is transmitted **once**, as a broadcast, not once per
   listening station.
 * Messages that arrive from the air are **not** re-transmitted: every station

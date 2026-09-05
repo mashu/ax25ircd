@@ -65,8 +65,10 @@ port = 8001
 ./target/release/ax25irc-station --call SM0ABC-7 --gateway SK0MT-1 --channel '#rf'
 ```
 
-Connect an IRC client to `127.0.0.1:6667`, `/quote CALLSIGN SM0XYZ`, join
-`#rf`. The station nick appears as `SM0ABC|7`. Your IRC chat stays on the
+Connect an IRC client to `127.0.0.1:6667` **only this server** (irssi:
+`irssi -! -c 127.0.0.1 -p 6667 -n alice`), `/quote CALLSIGN SM0XYZ`, join
+`#rf`. The station nick appears as `SM0ABC|7`. Type a line in the station
+client; it shows in irssi as ordinary channel text. Your IRC chat stays on the
 internet until a control operator `RADIO GRANT`s your registered nick (or
 you `OPER`). The hub prints frames in `axlisten` format.
 
@@ -104,18 +106,14 @@ Debian packages, groups, hamlib, 300 baud Direwolf, and first QSO:
 
 ## IRC client (irssi)
 
-On this machine:
+Do not use a default irssi config that autoconnects to Libera or similar.
+This server only:
 
 ```
-/connect 127.0.0.1 6667
+irssi -! -c 127.0.0.1 -p 6667 -n alice
+/quote CALLSIGN YOURCALL
+/join #rf
 ```
 
-Over the internet, TLS (required to speak):
-
-```
-/connect -tls irc.example.net 6697
-```
-
-Then `/nick alice`, `/quote CALLSIGN YOURCALL`, `/quote REGISTER <password>`.
-That binds the nick and the callsign so nobody else can use them. Next
-session: `/quote IDENTIFY <password>`. Full walkthrough: [usage.md](usage.md).
+Nick and callsign are **not** the same string: a callsign-shaped nick is
+reserved for RF stations. Dedicated config, TLS, REGISTER: [usage.md](usage.md).

@@ -618,6 +618,51 @@ fn who_whois_list_and_names() {
 }
 
 #[test]
+fn rfc2812_queries_that_clients_actually_send() {
+    let mut n = Net::new();
+    let a = n.client(1, "alice");
+    let b = n.client(2, "bob");
+
+    assert!(has_numeric(&n.ask(a, "VERSION"), "351"));
+    assert!(has_numeric(&n.ask(a, "TIME"), "391"));
+    assert!(has_numeric(&n.ask(a, "ADMIN"), "256"));
+    assert!(has_numeric(&n.ask(a, "INFO"), "374"));
+    assert!(has_numeric(&n.ask(a, "HELP"), "704"));
+    assert!(has_numeric(&n.ask(a, "STATS u"), "242"));
+    assert!(has_numeric(&n.ask(a, "LINKS"), "364"));
+    assert!(has_numeric(&n.ask(a, "WHOWAS ghost"), "406"));
+
+    let ison = n.ask(a, "ISON alice bob nobody");
+    assert!(has_numeric(&ison, "303"), "{ison:?}");
+    assert!(ison
+        .iter()
+        .any(|l| l.contains("alice") && l.contains("bob")));
+    assert!(ison.iter().all(|l| !l.contains("nobody")));
+
+    assert!(has_numeric(&n.ask(a, "USERHOST alice"), "302"));
+
+    let cap = n.ask(a, "CAP REQ :sasl");
+    assert!(
+        cap.iter().any(|l| l.contains("NAK") && l.contains("sasl")),
+        "{cap:?}"
+    );
+    assert!(
+        n.ask(a, "CAP END").iter().all(|l| !l.contains(" 421 ")),
+        "CAP END is part of the handshake, not an unknown command"
+    );
+
+    n.send(a, "JOIN #lobby");
+    n.drain(a);
+    n.drain(b);
+    let invited = n.ask(a, "INVITE bob #lobby");
+    assert!(has_numeric(&invited, "341"), "{invited:?}");
+    assert!(n
+        .drain(b)
+        .iter()
+        .any(|l| l.contains("INVITE bob :#lobby") || l.contains("INVITE bob #lobby")));
+}
+
+#[test]
 fn a_server_with_no_motd_says_so() {
     let text = CONFIG.replace(r#"motd = ["first line", "second line"]"#, "motd = []");
     let mut n = Net::with(&text);

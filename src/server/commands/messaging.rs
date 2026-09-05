@@ -1,15 +1,15 @@
 //! Messages, and the gate between an IRC user and the transmitter.
 //!
-//! [`Server::screen_for_air`] is the single place that decides whether
-//! something an IP user typed may be radiated. Every refusal happens there,
+//! [`chat_for_air`] is the allowlist for IRC bodies. The radio only emits
+//! deliveries that are on that same list (chat, topic, optional presence).
+//! A new event type does not transmit until it is named. [`Server::screen_for_air`]
+//! is then the gate for privilege, callsign and airtime. Every refusal happens
 //! before the message is committed to the radio queue, and every one of them
-//! says something to the sender — accepting a message and then dropping it at
-//! the transmitter is the worst outcome available, because the sender believes
-//! it went out.
+//! says something to the sender.
 
 use std::time::Instant;
 
-use crate::irc::message::{is_channel_name, Message};
+use crate::irc::message::{is_channel_name, parse_ctcp, Message};
 use crate::irc::numerics as num;
 use crate::policy::Verdict;
 
@@ -28,6 +28,22 @@ enum AirTiming {
     /// Held for a station that is not on frequency. It will be transmitted
     /// whenever that station is next heard.
     Held,
+}
+
+/// Text that is on the air allowlist: ordinary PRIVMSG, and `/me` (CTCP ACTION).
+///
+/// NOTICE, VERSION, DCC, PING, and anything else is not listed, so it stays
+/// on IRC. Adding a new CTCP kind does not put it on the air until it is
+/// named here.
+fn chat_for_air(text: &str, notice: bool) -> Option<String> {
+    if notice {
+        return None;
+    }
+    match parse_ctcp(text) {
+        Some((cmd, rest)) if cmd.eq_ignore_ascii_case("ACTION") => Some(format!("/me {rest}")),
+        Some(_) => None,
+        None => Some(text.to_string()),
+    }
 }
 
 impl Server {
@@ -74,9 +90,16 @@ impl Server {
                 return;
             }
 
-            if chan.rf {
-                let key = format!("{}:{}", self.rate_key(uid), chan.name);
-                if !self.policy.rf_channel_rate_ok(&key, Instant::now()) {
+            let mut text = text;
+            let mut truncated = false;
+            let air = chat_for_air(&text, notice);
+            let mut allow_rf =
+                air.is_some() && chan.rf && chan.has_rf_members() && self.radio.available();
+            if allow_rf {
+                if !self.policy.rf_channel_rate_ok(
+                    &format!("{}:{}", self.rate_key(uid), chan.name),
+                    Instant::now(),
+                ) {
                     self.notice_user(
                         uid,
                         "Flood protection: too many messages on the RF channel. Slow down.",
@@ -87,20 +110,16 @@ impl Server {
                     );
                     return;
                 }
-            }
-
-            let mut allow_rf = chan.rf && chan.has_rf_members() && self.radio.available();
-            let mut text = text;
-            let mut truncated = false;
-            if allow_rf {
-                match self.screen_for_air(uid, &text) {
+                match self.screen_for_air(uid, air.as_deref().unwrap_or(&text)) {
                     Some(s) => {
-                        text = s.text;
                         truncated = s.truncated;
+                        if parse_ctcp(&text).is_none() {
+                            text = s.text;
+                        }
                     }
                     None => allow_rf = false,
                 }
-            } else if chan.rf {
+            } else if chan.rf && air.is_some() {
                 let why = self.channel_air_line(&chan.name);
                 if !why.is_empty() {
                     self.notice_user(uid, &why);
@@ -145,10 +164,16 @@ impl Server {
         let mut text = text;
         let mut truncated = false;
         if target_id.is_rf() {
-            match self.screen_for_air(uid, &text) {
+            let Some(air) = chat_for_air(&text, notice) else {
+                self.notice_user(uid, "Only PRIVMSG chat (including /me) is put on the air.");
+                return;
+            };
+            match self.screen_for_air(uid, &air) {
                 Some(s) => {
-                    text = s.text;
                     truncated = s.truncated;
+                    if parse_ctcp(&text).is_none() {
+                        text = s.text;
+                    }
                 }
                 None => return,
             }
@@ -178,6 +203,10 @@ impl Server {
         text: &str,
         notice: bool,
     ) {
+        let Some(air) = chat_for_air(text, notice) else {
+            self.numeric(uid, num::ERR_NOSUCHNICK, &[target, "No such nick/channel"]);
+            return;
+        };
         let call = crate::callsign::Callsign::from_nick(target)
             .ok()
             .filter(|c| c.looks_like_amateur_call());
@@ -189,7 +218,7 @@ impl Server {
             self.numeric(uid, num::ERR_NOSUCHNICK, &[target, "No such nick/channel"]);
             return;
         }
-        let Some(screened) = self.screen_for_mailbox(uid, text) else {
+        let Some(screened) = self.screen_for_mailbox(uid, &air) else {
             return;
         };
         let message = crate::server::mailbox::StoredMessage {
@@ -358,5 +387,22 @@ impl Server {
             text: screened,
             truncated,
         })
+    }
+}
+
+#[cfg(test)]
+mod chat_allowlist {
+    use super::chat_for_air;
+
+    #[test]
+    fn only_privmsg_chat_and_action() {
+        assert_eq!(chat_for_air("hello", false).as_deref(), Some("hello"));
+        assert_eq!(
+            chat_for_air("\u{1}ACTION waves\u{1}", false).as_deref(),
+            Some("/me waves")
+        );
+        assert!(chat_for_air("hello", true).is_none());
+        assert!(chat_for_air("\u{1}VERSION\u{1}", false).is_none());
+        assert!(chat_for_air("\u{1}PING 1\u{1}", false).is_none());
     }
 }

@@ -98,16 +98,21 @@ of it is deliberately not bridged:
 
 | IRC event | On the air |
 |---|---|
-| Channel message | **Yes** — queued, class `chat` |
-| Private message to a station | **Yes** — queued, class `direct`, acknowledged |
+What the gateway will transmit is an **allowlist** (see `Delivery::rf_emission`).
+Anything not named there stays on IRC.
+
+| On the list | On the air? |
+|---|---|
+| Channel PRIVMSG (including `/me`) | **Yes** — queued, class `chat` |
+| Private PRIVMSG to a station | **Yes** — queued, class `direct`, acknowledged |
 | Held mail | **Yes** — `mailbox_flush_batch` per exchange, default one |
+| TOPIC | Only if it actually changed, and through the full chat gate |
+| JOIN/PART presence | Only if `presence_notices = true`. Off by default |
 | JOIN by a station | Confirmation with a member **count**, never the list |
-| `NAMES` | Only when explicitly asked; capped at `radio.rf_names_max` and 160 octets |
-| Topic change | Only if it actually changed, and through the full chat gate |
-| Join/part presence | Only if `presence_notices = true`. Off by default |
-| Errors (`no such channel`) | One frame, **not** acknowledged or retried |
+| `NAMES` (from a station) | Only when explicitly asked; capped at `radio.rf_names_max` and 160 octets |
+| Errors to a station | One frame, **not** acknowledged or retried |
 | Server notices to a station | One frame, capped at 80 characters, not retried |
-| QUIT, nick changes, MODE, numerics, WHO, LIST, MOTD, AWAY | **Never** |
+| NOTICE, other CTCP, QUIT, NICK, MODE, KICK, INVITE, numerics, RADIO | **Not on the list** |
 
 Two of those are worth spelling out.
 

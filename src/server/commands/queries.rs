@@ -21,16 +21,25 @@ impl Server {
                 .into_iter()
                 .filter_map(|id| self.state.user(&id).cloned())
                 .collect()
+        } else if mask == "*" || mask.is_empty() {
+            self.state.users.values().cloned().collect()
         } else {
             self.state.by_nick(&mask).cloned().into_iter().collect()
         };
         for u in members {
-            let flags = if u.is_rf() { "H@rf" } else { "H" };
+            let mut flags = String::new();
+            flags.push(if u.away.is_some() { 'G' } else { 'H' });
+            if u.oper {
+                flags.push('*');
+            }
+            if u.is_rf() {
+                flags.push('@');
+            }
             let real = format!("0 {}", u.realname);
             self.numeric(
                 uid,
                 num::RPL_WHOREPLY,
-                &[&mask, &u.username, &u.host, &server, &u.nick, flags, &real],
+                &[&mask, &u.username, &u.host, &server, &u.nick, &flags, &real],
             );
         }
         self.numeric(uid, num::RPL_ENDOFWHO, &[&mask, "End of /WHO list"]);
@@ -120,5 +129,63 @@ impl Server {
             num::RPL_ENDOFWHOIS,
             &[&target.nick, "End of /WHOIS list"],
         );
+    }
+
+    pub(super) fn cmd_whowas(&mut self, uid: &UserId, msg: &Message) {
+        let Some(nick) = msg.param(0) else {
+            self.numeric(uid, num::ERR_NONICKNAMEGIVEN, &["No nickname given"]);
+            return;
+        };
+        // We do not keep nick history. 406 is the honest answer, not a fake
+        // WHOIS of whoever currently holds the name.
+        self.numeric(
+            uid,
+            num::ERR_WASNOSUCHNICK,
+            &[nick, "There was no such nickname"],
+        );
+        self.numeric(uid, num::RPL_ENDOFWHOWAS, &[nick, "End of WHOWAS"]);
+    }
+
+    pub(super) fn cmd_ison(&mut self, uid: &UserId, msg: &Message) {
+        if msg.params.is_empty() {
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["ISON", "Not enough parameters"],
+            );
+            return;
+        }
+        let mut online = Vec::new();
+        for nick in msg.params.iter().flat_map(|p| p.split_whitespace()) {
+            if self.state.by_nick(nick).is_some() {
+                online.push(nick.to_string());
+            }
+        }
+        let list = online.join(" ");
+        self.numeric(uid, num::RPL_ISON, &[&list]);
+    }
+
+    pub(super) fn cmd_userhost(&mut self, uid: &UserId, msg: &Message) {
+        if msg.params.is_empty() {
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["USERHOST", "Not enough parameters"],
+            );
+            return;
+        }
+        let mut replies = Vec::new();
+        for nick in msg.params.iter().take(5) {
+            if let Some(u) = self.state.by_nick(nick) {
+                let oper = if u.oper { "*" } else { "" };
+                let away = if u.away.is_some() { "-" } else { "+" };
+                replies.push(format!(
+                    "{}{}={}{}@{}",
+                    u.nick, oper, away, u.username, u.host
+                ));
+            }
+        }
+        let list = replies.join(" ");
+        self.numeric(uid, num::RPL_USERHOST, &[&list]);
     }
 }

@@ -193,6 +193,19 @@ pub fn lower(s: &str) -> String {
         .collect()
 }
 
+/// CTCP payload: leading (and usually trailing) 0x01. Returns (command, rest).
+pub fn parse_ctcp(text: &str) -> Option<(&str, &str)> {
+    let inner = text.strip_prefix('\u{1}')?;
+    let inner = inner.strip_suffix('\u{1}').unwrap_or(inner);
+    if inner.is_empty() {
+        return None;
+    }
+    match inner.split_once(' ') {
+        Some((cmd, rest)) => Some((cmd, rest)),
+        None => Some((inner, "")),
+    }
+}
+
 pub fn is_channel_name(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
@@ -244,6 +257,16 @@ mod tests {
         assert_eq!(m.params, vec!["#a", "b c"]);
 
         assert!(Message::parse("   ").is_none());
+    }
+
+    #[test]
+    fn parse_ctcp_splits_command_and_rest() {
+        assert_eq!(
+            parse_ctcp("\u{1}ACTION waves\u{1}"),
+            Some(("ACTION", "waves"))
+        );
+        assert_eq!(parse_ctcp("\u{1}VERSION\u{1}"), Some(("VERSION", "")));
+        assert!(parse_ctcp("hello").is_none());
     }
 
     #[test]

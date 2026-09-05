@@ -469,6 +469,44 @@ async fn a_channel_message_from_rf_reaches_irc() {
 }
 
 #[tokio::test]
+async fn irc_notice_and_ctcp_are_not_put_on_the_air() {
+    let mut rf = Rf::new();
+    let a = rf.client(1, "alice");
+    rf.send(a, "OPER root operpass1");
+    rf.send(a, "CALLSIGN SM0XYZ");
+    rf.send(a, "JOIN #rf");
+    rf.heard("SM0ABC-7", Kind::Join, &["#rf"]);
+    rf.drain(a);
+    let _ = rf.transmitted().await;
+
+    rf.send(a, "NOTICE #rf :radio status chatter");
+    let sent = rf.transmitted().await;
+    assert!(
+        sent.iter().all(|f| !f
+            .fields()
+            .iter()
+            .any(|x| x.contains("radio status chatter"))),
+        "NOTICE must stay on IRC: {sent:?}"
+    );
+
+    rf.send(a, "PRIVMSG #rf :\u{1}VERSION\u{1}");
+    let sent = rf.transmitted().await;
+    assert!(
+        sent.iter()
+            .all(|f| !f.fields().iter().any(|x| x.contains("VERSION"))),
+        "CTCP VERSION must not key the transmitter: {sent:?}"
+    );
+
+    rf.send(a, "PRIVMSG #rf :\u{1}ACTION waves\u{1}");
+    let sent = rf.transmitted().await;
+    assert!(
+        sent.iter()
+            .any(|f| f.fields().iter().any(|x| x.contains("/me waves"))),
+        "/me is a message, not a control query: {sent:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_message_from_a_station_that_never_joined_still_arrives() {
     let mut rf = Rf::new();
     let a = rf.client(1, "alice");

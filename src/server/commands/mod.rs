@@ -17,6 +17,7 @@
 mod accounts;
 mod channels;
 mod messaging;
+mod misc;
 mod operator;
 mod queries;
 mod registration;
@@ -43,7 +44,8 @@ use super::Server;
 fn listen_only_command(cmd: &str, msg: &Message) -> bool {
     match cmd {
         "CAP" | "NICK" | "USER" | "QUIT" | "PING" | "PONG" | "JOIN" | "PART" | "NAMES" | "LIST"
-        | "WHO" | "WHOIS" | "MOTD" | "LUSERS" | "AWAY" | "RADIO" => true,
+        | "WHO" | "WHOIS" | "WHOWAS" | "MOTD" | "LUSERS" | "AWAY" | "RADIO" | "VERSION"
+        | "TIME" | "ADMIN" | "INFO" | "HELP" | "STATS" | "LINKS" | "ISON" | "USERHOST" => true,
         "MODE" => msg.param(1).is_none(),
         "TOPIC" => msg.param(1).is_none(),
         _ => false,
@@ -101,22 +103,7 @@ impl Server {
         }
 
         match cmd {
-            "CAP" => {
-                // Minimal IRCv3 handshake: acknowledge nothing, end negotiation.
-                if msg
-                    .param(0)
-                    .map(|s| s.eq_ignore_ascii_case("LS"))
-                    .unwrap_or(false)
-                {
-                    let name = self.server_name().to_string();
-                    self.send_raw(
-                        id,
-                        Message::new("CAP", vec!["*".into(), "LS".into(), String::new()])
-                            .with_prefix(name)
-                            .to_string(),
-                    );
-                }
-            }
+            "CAP" => self.cmd_cap(&uid, &msg),
             "PASS" => self.cmd_pass(&uid, &msg),
             "NICK" => self.cmd_nick(&uid, &msg),
             "USER" => self.cmd_user(&uid, &msg),
@@ -145,11 +132,40 @@ impl Server {
                 if let Some(chan) = msg.param(0) {
                     let chan = chan.to_string();
                     self.send_names(&uid, &chan);
+                } else {
+                    let chans: Vec<String> = self
+                        .state
+                        .user(&uid)
+                        .map(|u| {
+                            u.channels
+                                .iter()
+                                .filter_map(|k| self.state.channels.get(k).map(|c| c.name.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if chans.is_empty() {
+                        self.numeric(&uid, num::RPL_ENDOFNAMES, &["*", "End of /NAMES list"]);
+                    } else {
+                        for ch in chans {
+                            self.send_names(&uid, &ch);
+                        }
+                    }
                 }
             }
             "LIST" => self.cmd_list(&uid),
             "WHO" => self.cmd_who(&uid, &msg),
             "WHOIS" => self.cmd_whois(&uid, &msg),
+            "WHOWAS" => self.cmd_whowas(&uid, &msg),
+            "ISON" => self.cmd_ison(&uid, &msg),
+            "USERHOST" => self.cmd_userhost(&uid, &msg),
+            "VERSION" => self.cmd_version(&uid),
+            "TIME" => self.cmd_time(&uid),
+            "ADMIN" => self.cmd_admin(&uid),
+            "INFO" => self.cmd_info(&uid),
+            "HELP" => self.cmd_help(&uid, &msg),
+            "STATS" => self.cmd_stats(&uid, &msg),
+            "LINKS" => self.cmd_links(&uid),
+            "INVITE" => self.cmd_invite(&uid, &msg),
             "MODE" => self.cmd_mode(&uid, &msg),
             "MOTD" => self.send_motd(&uid),
             "LUSERS" => self.send_lusers(&uid),
