@@ -19,7 +19,7 @@ use crate::audit::Audit;
 use crate::ax25::{Ax25Frame, TncHandle};
 use crate::callsign::Callsign;
 use crate::config::Config;
-use crate::irc::message::{lower, Message};
+use crate::irc::message::{is_channel_name, lower, Message};
 use crate::policy::Policy;
 
 pub use clients::Clients;
@@ -485,7 +485,7 @@ impl Server {
                 };
                 // Channel traffic goes out once as a broadcast; a private
                 // message is unicast and acknowledged.
-                if target.starts_with('#') || target.starts_with('&') {
+                if is_channel_name(target) {
                     self.radio.broadcast_flagged(kind, payload, TxClass::Chat, flags);
                 } else {
                     self.radio.unicast_flagged(call, kind, payload, true, TxClass::Direct, flags);

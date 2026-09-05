@@ -90,6 +90,15 @@ pub struct Radio {
     config: Arc<Config>,
     audit: Audit,
     tnc: Option<TncHandle>,
+    /// This station's own callsign and digipeater path, parsed once.
+    ///
+    /// Both used to be re-derived from the configuration strings on every
+    /// single transmission, which is parsing in the hot path for a value that
+    /// cannot change. Resolving them here also means a frame can always be
+    /// built: the configuration has already been validated, so there is no
+    /// per-transmission failure to handle.
+    source: Option<Callsign>,
+    path: Vec<Callsign>,
     /// Per-station sequencing, ACKs and reassembly.
     pub sessions: Sessions,
     /// Messages held for stations that are out of range.
@@ -122,6 +131,8 @@ impl Radio {
         );
         Self {
             enabled: config.radio.enabled && tnc.is_some(),
+            source: config.gateway_callsign(),
+            path: config.rf_path(),
             config,
             audit,
             tnc,
@@ -227,14 +238,14 @@ impl Radio {
     }
 
     pub fn transmit_direct(&mut self, dest: &Callsign, frame: AircFrame, class: TxClass) {
-        let (Some(tnc), Some(source)) = (self.tnc.as_ref(), self.config.gateway_callsign()) else {
+        let (Some(tnc), Some(source)) = (self.tnc.as_ref(), self.source.clone()) else {
             return;
         };
         if !self.enabled {
             return;
         }
         let info = frame.encode();
-        let ax = match Ax25Frame::ui(source, dest.clone(), &self.config.rf_path(), info) {
+        let ax = match Ax25Frame::ui(source, dest.clone(), &self.path, info) {
             Ok(f) => f,
             Err(e) => {
                 warn!("cannot build AX.25 frame: {e}");
@@ -354,10 +365,10 @@ impl Radio {
     /// behind a backlog and is not discarded by the transmit inhibit. This is
     /// the one frame the station is obliged to send.
     fn transmit_id(&mut self, dest: &Callsign, frame: AircFrame) {
-        let (Some(tnc), Some(source)) = (self.tnc.as_ref(), self.config.gateway_callsign()) else {
+        let (Some(tnc), Some(source)) = (self.tnc.as_ref(), self.source.clone()) else {
             return;
         };
-        let ax = match Ax25Frame::ui(source, dest.clone(), &self.config.rf_path(), frame.encode()) {
+        let ax = match Ax25Frame::ui(source, dest.clone(), &self.path, frame.encode()) {
             Ok(f) => f,
             Err(e) => {
                 warn!("cannot build station ID frame: {e}");
@@ -381,6 +392,16 @@ impl Radio {
                 .into();
         }
         let call = &self.config.radio.callsign;
+        // Most specific reason first. "No TNC" used to sit below the
+        // `enabled` check, which made it unreachable — a radio with no TNC is
+        // never enabled — so an operator whose modem was missing was told the
+        // transmitter was OFF, which reads as "somebody ran RADIO OFF" rather
+        // than "the thing it talks to is not there".
+        if self.tnc.is_none() {
+            return format!(
+                "Radio gateway: no TNC attached. Station {call}. Nothing is being radiated."
+            );
+        }
         if !self.enabled {
             return format!(
                 "Radio gateway: transmitter OFF. Station {call}. Nothing is being radiated."
@@ -391,9 +412,6 @@ impl Radio {
                 "Radio gateway: station {call}, transmitter BLOCKED by the safety interlock. \
                  Nothing is being radiated, including station identification."
             );
-        }
-        if self.tnc.is_none() {
-            return format!("Radio gateway: no TNC. Station {call}. Nothing is being radiated.");
         }
         let duty = self
             .airtime()

@@ -1102,3 +1102,41 @@ fn a_released_nick_never_exceeds_the_configured_length() {
         );
     }
 }
+
+#[test]
+fn configuration_values_that_would_break_the_server_are_refused() {
+    // Each of these parses fine and then makes the server unusable in a way
+    // that is hard to diagnose from the outside, so they are caught at load.
+    let cases = [
+        ("max_nick_len = 20", "max_nick_len = 0", "max_nick_len"),
+        (
+            "max_channels_per_user = 3",
+            "max_channels_per_user = 0",
+            "max_channels_per_user",
+        ),
+        ("min_password_len = 8", "min_password_len = 0", "min_password_len"),
+    ];
+    for (from, to, expect) in cases {
+        let text = CONFIG.replace(from, to);
+        let err = Config::from_toml(&text)
+            .map(|_| String::new())
+            .unwrap_or_else(|e| e.to_string());
+        assert!(
+            err.contains(expect),
+            "{to} should be refused and say why; got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn a_zero_length_rf_message_limit_is_refused() {
+    // `max_rf_text_len = 0` turns every radiated message into a bare ellipsis.
+    let text = CONFIG.replace(
+        "[policy]",
+        "[policy]\nmax_rf_text_len = 0",
+    );
+    let err = Config::from_toml(&text)
+        .map(|_| String::new())
+        .unwrap_or_else(|e| e.to_string());
+    assert!(err.contains("max_rf_text_len"), "{err:?}");
+}

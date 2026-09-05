@@ -512,6 +512,30 @@ impl Config {
         if self.listen.registration_timeout_secs == 0 {
             anyhow::bail!("listen.registration_timeout_secs must be at least 1");
         }
+        // Each of these parses happily and then makes the server unusable in a
+        // way that is hard to diagnose from a client: no nickname is ever
+        // valid, no channel can be joined, every radiated message is an
+        // ellipsis, or any password at all is accepted for a registered nick.
+        if self.server.max_nick_len == 0 {
+            anyhow::bail!("server.max_nick_len must be at least 1, or no nickname is valid");
+        }
+        if self.server.max_channels_per_user == 0 {
+            anyhow::bail!(
+                "server.max_channels_per_user must be at least 1, or nobody can join anything"
+            );
+        }
+        if self.accounts.min_password_len == 0 {
+            anyhow::bail!(
+                "accounts.min_password_len must be at least 1: an empty password on a nick \
+                 that a control operator can grant RF-TX to is not a password"
+            );
+        }
+        if self.policy.max_rf_text_len == 0 {
+            anyhow::bail!(
+                "policy.max_rf_text_len must be at least 1, or every radiated message is \
+                 truncated to nothing"
+            );
+        }
         let mut seen: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
         for ch in &self.channels {
             if !crate::irc::message::is_channel_name(&ch.name) {
