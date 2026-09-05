@@ -1497,10 +1497,12 @@ already held by Direwolf for PTT, and two processes cannot share a serial port.<
 <a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="n">interval_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">30</span>
 <a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="n">timeout_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span>
 </code></pre></div>
-<p>The command runs on a timer. While it fails, <strong>nothing is transmitted</strong>. What
-it measures is your business: SWR from a separate meter, a temperature probe on
-the finals, a GPIO from a hardware interlock, "is the antenna switch on the
-dummy load", or a file somebody touches before climbing the tower.</p>
+<p>The command runs on a timer. While it fails, <strong>nothing is transmitted</strong>.
+Traffic already in the transmit queue is <em>held</em> until the check passes again,
+or dropped as stale if it waits longer than <code>max_hold</code>. It is not discarded
+the way <code>RADIO OFF</code> discards it — a momentary SWR failure must not destroy
+messages already admitted, and must not make the session layer retry into a
+void until it gives a station up for lost.</p>
 <p>Two properties make this a safety feature rather than a status light:</p>
 <ul>
 <li><strong>It fails closed.</strong> A command that cannot be run, times out, or has not run
