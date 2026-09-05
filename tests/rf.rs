@@ -33,6 +33,13 @@ id_interval_secs = 60
 paclen = 128
 presence_notices = true
 
+[radio.tnc]
+kind = "loopback"
+# No enforced gap between transmissions: these tests read the loopback with
+# short timeouts, and pacing is not what they are checking. At the 1500 ms
+# default a frame that *was* transmitted looks like one that was not.
+tx_pacing_ms = 0
+
 [radio.duty]
 enabled = true
 baud = 9600
@@ -74,6 +81,7 @@ struct Rf {
     /// path that asks "can we radiate?".
     _far: tokio::io::DuplexStream,
     _rf_rx: mpsc::Receiver<Ax25Frame>,
+    decoder: ax25ircd::ax25::kiss::KissDecoder,
 }
 
 impl Rf {
@@ -92,6 +100,7 @@ impl Rf {
             seq: 1,
             _far: far,
             _rf_rx: rf_rx,
+            decoder: ax25ircd::ax25::kiss::KissDecoder::new(4096),
         }
     }
 
@@ -151,6 +160,31 @@ impl Rf {
     /// A raw frame, for the cases that are not well-formed AIRC.
     fn heard_raw(&mut self, frame: Ax25Frame) {
         self.server.handle(Event::Rf(frame));
+    }
+
+    /// Everything the gateway has put on the air since the last call.
+    async fn transmitted(&mut self) -> Vec<AircFrame> {
+        use tokio::io::AsyncReadExt;
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match tokio::time::timeout(Duration::from_millis(150), self._far.read(&mut buf)).await {
+                Ok(Ok(n)) if n > 0 => {
+                    for kf in self.decoder.push(&buf[..n]) {
+                        if kf.command != ax25ircd::ax25::kiss::CMD_DATA {
+                            continue;
+                        }
+                        if let Ok(ax) = Ax25Frame::decode(&kf.payload) {
+                            if let Ok(airc) = AircFrame::decode(&ax.info) {
+                                out.push(airc);
+                            }
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+        out
     }
 
     fn station(&self, call: &str) -> Option<UserId> {
@@ -762,4 +796,111 @@ async fn held_mail_is_not_destroyed_when_the_transmit_queue_is_full() {
         "the held message was taken out of the mailbox and then refused by \
          admission control, so it is gone: neither transmitted nor held"
     );
+}
+
+
+#[tokio::test]
+async fn a_topic_change_reaches_the_air_once_however_many_stations_are_listening() {
+    let mut rf = Rf::new();
+    let a = rf.client(1, "alice");
+    rf.send(a, "OPER root operpass1");
+    rf.send(a, "CALLSIGN SM0XYZ");
+    rf.send(a, "JOIN #rf");
+    for call in ["SM0ABC-7", "SM0DEF-1", "SM0GHI-2"] {
+        rf.heard(call, Kind::Join, &["#rf"]);
+    }
+    rf.drain(a);
+    let _ = rf.transmitted().await;
+
+    rf.send(a, "TOPIC #rf :net at 1900 local");
+    let sent = rf.transmitted().await;
+    let topics: Vec<_> = sent
+        .iter()
+        .filter(|f| f.fields().iter().any(|x| x.contains("net at 1900")))
+        .collect();
+    assert_eq!(
+        topics.len(),
+        1,
+        "one transmission reaches every station in range; sending it per station \
+         would be three times the airtime for the same information: {sent:?}"
+    );
+
+    // Setting it to the same value again is not a reason to key up.
+    rf.drain(a);
+    rf.send(a, "TOPIC #rf :net at 1900 local");
+    let sent = rf.transmitted().await;
+    assert!(
+        !sent
+            .iter()
+            .any(|f| f.fields().iter().any(|x| x.contains("net at 1900"))),
+        "an unchanged topic must not be retransmitted"
+    );
+}
+
+#[tokio::test]
+async fn a_server_notice_to_a_station_is_short_and_not_retried() {
+    use ax25ircd::airc::frame::flags;
+    let mut rf = Rf::new();
+    rf.heard("SM0ABC-7", Kind::Hello, &[]);
+    let _ = rf.transmitted().await;
+
+    // Provoke a notice by asking to speak in a channel that is not bridged.
+    rf.heard("SM0ABC-7", Kind::Msg, &["#local", "can you hear me"]);
+    let sent = rf.transmitted().await;
+    for f in sent.iter().filter(|f| f.kind == Kind::Notice || f.kind == Kind::Error) {
+        assert_eq!(
+            f.frag_total, 1,
+            "a courtesy notice must fit one frame, not fragment across several"
+        );
+        assert!(
+            f.flags & flags::ACK_REQ == 0,
+            "an error or notice is not worth up to max_retries transmissions: {f:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn presence_notices_go_out_once_when_enabled() {
+    let mut rf = Rf::new();
+    assert!(rf.server.config.radio.presence_notices, "fixture enables them");
+    let a = rf.client(1, "alice");
+    rf.send(a, "JOIN #rf");
+    rf.heard("SM0ABC-7", Kind::Join, &["#rf"]);
+    rf.drain(a);
+    let _ = rf.transmitted().await;
+
+    let b = rf.client(2, "bob");
+    rf.send(b, "JOIN #rf");
+    let joined = rf.transmitted().await;
+    assert_eq!(
+        joined.iter().filter(|f| f.kind == Kind::Presence).count(),
+        1,
+        "one presence frame for one join: {joined:?}"
+    );
+
+    rf.send(b, "PART #rf");
+    let parted = rf.transmitted().await;
+    let leaving: Vec<_> = parted
+        .iter()
+        .filter(|f| f.kind == Kind::Presence)
+        .filter(|f| f.fields().get(2).map(|s| s == "-").unwrap_or(false))
+        .collect();
+    assert_eq!(leaving.len(), 1, "and one for the part: {parted:?}");
+}
+
+#[tokio::test]
+async fn the_message_limit_follows_the_fragment_budget_not_just_the_character_count() {
+    // A small paclen with a one-frame budget must lower the effective text
+    // limit, whatever `max_rf_text_len` says.
+    let text = CONFIG
+        .replace("paclen = 128", "paclen = 64")
+        .replace("[policy]", "[policy]\nmax_rf_text_len = 250\nmax_rf_fragments = 1");
+    let rf = Rf::with(&text);
+    let effective = rf.server.policy.config.max_rf_text_len;
+    assert!(
+        effective < 250,
+        "one frame at paclen 64 cannot hold 250 characters, but the limit stayed at \
+         {effective}"
+    );
+    assert!(effective > 0, "and it must not collapse to nothing");
 }
