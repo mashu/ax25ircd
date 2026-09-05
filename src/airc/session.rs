@@ -122,6 +122,11 @@ impl Peer {
     pub fn queue_depth(&self) -> usize {
         self.queue.len() + usize::from(self.pending.is_some())
     }
+
+    /// True when a reliable message is on the air or waiting for ACK.
+    pub fn awaiting_ack(&self) -> bool {
+        self.pending.is_some()
+    }
 }
 
 #[derive(Default)]

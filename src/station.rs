@@ -428,16 +428,8 @@ impl Station {
                 ));
             }
             Kind::Error => self.say(format!("!! {}", f.join(" "))),
-            Kind::Pong => {
-                if !self.args.quiet {
-                    self.say("-- pong".into());
-                }
-            }
-            Kind::Id => {
-                if !self.args.quiet {
-                    self.say(format!("-- {}", f.join(" ")));
-                }
-            }
+            Kind::Pong if !self.args.quiet => self.say("-- pong".into()),
+            Kind::Id if !self.args.quiet => self.say(format!("-- {}", f.join(" "))),
             _ => {}
         }
     }

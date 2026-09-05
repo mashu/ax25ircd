@@ -509,6 +509,13 @@ impl Radio {
             self.stats.rf_frames_dropped += 1;
             return;
         }
+        // Airtime admission is in seconds; the TNC queue is in frames.
+        // A burst of fragments can fill the channel after the backlog check
+        // still said yes, and broadcasts are not retried.
+        if chunks.len() > self.tnc.as_ref().map(|t| t.tx_room()).unwrap_or(0) {
+            self.stats.rf_frames_refused += 1;
+            return;
+        }
         let total = chunks.len() as u8;
         let dest: Callsign = self
             .config
@@ -545,6 +552,26 @@ impl Radio {
         if !self.backlog_has_room(self.wire_octets(payload.len()), class) {
             self.stats.rf_frames_refused += 1;
             return false;
+        }
+        // Same hole as broadcast: airtime can still fit when the 64-deep
+        // frame queue cannot. Reliable traffic that would wait behind an
+        // in-flight message does not need a slot yet.
+        let queued_behind = reliable
+            && self
+                .sessions
+                .peer(dst)
+                .is_some_and(|p| p.awaiting_ack());
+        if !queued_behind {
+            let max = self.sessions.config.max_payload();
+            let fragments = if payload.is_empty() {
+                1
+            } else {
+                payload.len().div_ceil(max).max(1)
+            };
+            if fragments > self.tnc.as_ref().map(|t| t.tx_room()).unwrap_or(0) {
+                self.stats.rf_frames_refused += 1;
+                return false;
+            }
         }
         let now = Instant::now();
         let outcome = self.sessions.enqueue(dst, kind, payload, reliable, now);

@@ -261,7 +261,7 @@ mod tests {
             vec!["alice".into(), "#rf".into(), String::new(), "1700".into()],
         );
         let back = Message::parse(&m.to_string()).unwrap();
-        assert_eq!(back.params.len(), 4, "{}", m.to_string());
+        assert_eq!(back.params.len(), 4, "{m}");
         assert_eq!(back.params[3], "1700", "the timestamp kept its position");
     }
 
@@ -296,7 +296,7 @@ mod tests {
             ],
         );
         let back = Message::parse(&m.to_string()).unwrap();
-        assert_eq!(back.params.len(), 8, "{}", m.to_string());
+        assert_eq!(back.params.len(), 8, "{m}");
         assert_eq!(back.params[7], "0 Bob", "the realname kept its position");
         assert!(!back.params[3].starts_with(':'));
     }

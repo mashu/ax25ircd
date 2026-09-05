@@ -367,22 +367,28 @@ impl Server {
                             &["Only a control operator may change +m on an RF channel"],
                         );
                     } else if let Some(ch) = self.state.channel_mut(&target) {
-                        ch.moderated = adding;
-                        push_mode(&mut applied, &mut last_sign, adding, 'm');
+                        if ch.moderated != adding {
+                            ch.moderated = adding;
+                            push_mode(&mut applied, &mut last_sign, adding, 'm');
+                        }
                     }
                 }
                 't' => {
                     if let Some(ch) = self.state.channel_mut(&target) {
-                        ch.topic_locked = adding;
-                        push_mode(&mut applied, &mut last_sign, adding, 't');
+                        if ch.topic_locked != adding {
+                            ch.topic_locked = adding;
+                            push_mode(&mut applied, &mut last_sign, adding, 't');
+                        }
                     }
                 }
                 'r' => {
                     if !is_oper {
                         self.numeric(uid, num::ERR_NOPRIVILEGES, &["Only a control operator may change +r"]);
                     } else if let Some(ch) = self.state.channel_mut(&target) {
-                        ch.rf = adding;
-                        push_mode(&mut applied, &mut last_sign, adding, 'r');
+                        if ch.rf != adding {
+                            ch.rf = adding;
+                            push_mode(&mut applied, &mut last_sign, adding, 'r');
+                        }
                     }
                 }
                 'k' => {
@@ -397,12 +403,17 @@ impl Server {
                         continue;
                     }
                     if let Some(ch) = self.state.channel_mut(&target) {
-                        ch.key = if adding { key.clone() } else { None };
-                        push_mode(&mut applied, &mut last_sign, adding, 'k');
                         if adding {
-                            if let Some(k) = key {
-                                applied_args.push(k);
+                            if ch.key.as_deref() != key.as_deref() {
+                                ch.key = key.clone();
+                                push_mode(&mut applied, &mut last_sign, adding, 'k');
+                                if let Some(k) = key {
+                                    applied_args.push(k);
+                                }
                             }
+                        } else if ch.key.is_some() {
+                            ch.key = None;
+                            push_mode(&mut applied, &mut last_sign, adding, 'k');
                         }
                     }
                 }
@@ -419,13 +430,17 @@ impl Server {
                             continue;
                         };
                         if let Some(ch) = self.state.channel_mut(&target) {
-                            ch.limit = Some(limit);
-                            push_mode(&mut applied, &mut last_sign, adding, 'l');
-                            applied_args.push(limit.to_string());
+                            if ch.limit != Some(limit) {
+                                ch.limit = Some(limit);
+                                push_mode(&mut applied, &mut last_sign, adding, 'l');
+                                applied_args.push(limit.to_string());
+                            }
                         }
                     } else if let Some(ch) = self.state.channel_mut(&target) {
-                        ch.limit = None;
-                        push_mode(&mut applied, &mut last_sign, adding, 'l');
+                        if ch.limit.is_some() {
+                            ch.limit = None;
+                            push_mode(&mut applied, &mut last_sign, adding, 'l');
+                        }
                     }
                 }
                 'o' | 'v' => {
@@ -439,23 +454,46 @@ impl Server {
                         );
                         continue;
                     }
-                    if let Some(target_id) = who.as_deref().and_then(|n| self.find_target(n)) {
-                        if let Some(ch) = self.state.channel_mut(&target) {
-                            if let Some(flags) = ch.members.get_mut(&target_id) {
-                                // Record that this was a decision, not a
-                                // derivation, so recomputing the derived
-                                // flags later does not undo it.
-                                if c == 'o' {
-                                    flags.op = adding;
-                                    flags.op_manual = adding;
-                                } else {
-                                    flags.voice = adding;
-                                    flags.voice_manual = adding;
-                                }
+                    let Some(who) = who else {
+                        self.numeric(
+                            uid,
+                            num::ERR_NEEDMOREPARAMS,
+                            &["MODE", "Not enough parameters"],
+                        );
+                        continue;
+                    };
+                    let Some(target_id) = self.find_target(&who) else {
+                        self.numeric(uid, num::ERR_NOSUCHNICK, &[&who, "No such nick"]);
+                        continue;
+                    };
+                    if !self
+                        .state
+                        .channel(&target)
+                        .is_some_and(|c| c.members.contains_key(&target_id))
+                    {
+                        self.numeric(
+                            uid,
+                            num::ERR_USERNOTINCHANNEL,
+                            &[&who, &chan.name, "They aren't on that channel"],
+                        );
+                        continue;
+                    }
+                    if let Some(ch) = self.state.channel_mut(&target) {
+                        if let Some(flags) = ch.members.get_mut(&target_id) {
+                            let changed = if c == 'o' {
+                                let was = flags.op;
+                                flags.op = adding;
+                                flags.op_manual = adding;
+                                was != flags.op
+                            } else {
+                                let was = flags.voice;
+                                flags.voice = adding;
+                                flags.voice_manual = adding;
+                                was != flags.voice
+                            };
+                            if changed {
                                 push_mode(&mut applied, &mut last_sign, adding, c);
-                                if let Some(n) = who {
-                                    applied_args.push(n);
-                                }
+                                applied_args.push(who);
                             }
                         }
                     }

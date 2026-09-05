@@ -129,10 +129,7 @@ async fn station(stream: TcpStream, id: u64, clients: Clients, monitor: bool) {
 
     let mut decoder = KissDecoder::new(MAX_FRAME);
     let mut buf = vec![0u8; 4096];
-    loop {
-        let Ok(n) = read_half.read(&mut buf).await else {
-            break;
-        };
+    while let Ok(n) = read_half.read(&mut buf).await {
         if n == 0 {
             break;
         }

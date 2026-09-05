@@ -544,6 +544,11 @@ fn channel_and_user_modes() {
     n.drain(a);
     assert!(!n.server.state.channel("#room").unwrap().members[&user_id(b)].op);
 
+    assert!(has_numeric(&n.ask(a, "MODE #room +o"), "461"));
+    assert!(has_numeric(&n.ask(a, "MODE #room +o nobody"), "401"));
+    let _carol = n.client(3, "carol");
+    assert!(has_numeric(&n.ask(a, "MODE #room +o carol"), "441"));
+
     n.send(a, "MODE #room +v bob");
     n.drain(a);
     assert!(n.server.state.channel("#room").unwrap().members[&user_id(b)].voice);
@@ -579,6 +584,15 @@ fn channel_and_user_modes() {
     // Unknown mode letters are ignored rather than fatal.
     n.send(a, "MODE #room +Z");
     n.drain(a);
+
+    // Already-set modes are not re-announced: clients would treat +t as a
+    // change, and on +r that would be a phantom transmission-worthy event.
+    n.send(a, "MODE #room +t");
+    let to_bob = n.drain(b);
+    assert!(
+        !to_bob.iter().any(|l| l.contains("MODE") && l.contains("+t")),
+        "a no-op MODE must not be announced: {to_bob:?}"
+    );
 
     assert!(has_numeric(&n.ask(a, "MODE #nowhere"), "403"));
     assert!(has_numeric(&n.ask(a, "MODE"), "461"));

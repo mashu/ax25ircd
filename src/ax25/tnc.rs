@@ -176,6 +176,12 @@ impl TncHandle {
         self.airtime.eta()
     }
 
+    /// How many ordinary frames `try_send` will still accept. Identification
+    /// uses a separate queue and is not counted here.
+    pub fn tx_room(&self) -> usize {
+        self.tx.capacity()
+    }
+
     /// Queue a frame for transmission. Returns false if the transmit queue is
     /// full, which is a normal condition on a congested channel and must be
     /// handled by the caller (usually: drop, count, and tell the user).
