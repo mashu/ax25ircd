@@ -104,6 +104,7 @@ impl Server {
                 if !self.rf_ctrl_ok(src, now) {
                     return;
                 }
+                self.radio.sessions.lift_ban(src);
                 let created = self.ensure_rf_user(src);
                 let name = self.server_name().to_string();
                 let motd = self
@@ -132,6 +133,7 @@ impl Server {
                 if !self.rf_ctrl_ok(src, now) {
                     return;
                 }
+                self.radio.sessions.lift_ban(src);
                 let Some(channel) = fields.first().cloned() else {
                     return;
                 };
@@ -285,6 +287,7 @@ impl Server {
         }
         if let Some(peer) = self.radio.sessions.peer_mut(call) {
             peer.channels.insert(display.clone());
+            peer.clear_kicked(&display);
         }
         let flags = self
             .state
@@ -350,7 +353,7 @@ impl Server {
     /// transmissions — more airtime than the message that provoked it. If it
     /// is lost, the station simply sees no reply, which is the same
     /// information.
-    fn rf_error(&mut self, dst: &Callsign, code: &str, text: &str) {
+    pub(crate) fn rf_error(&mut self, dst: &Callsign, code: &str, text: &str) {
         self.radio.unicast(
             dst,
             Kind::Error,
@@ -440,6 +443,10 @@ impl Server {
         if text.is_empty() {
             return;
         }
+        if self.radio.sessions.is_banned(src) {
+            self.rf_error(src, "442", "removed by control operator");
+            return;
+        }
         if self.ensure_rf_user(src) {
             self.radio.flush_mailbox(src);
         }
@@ -458,8 +465,19 @@ impl Server {
                 self.rf_error(src, "404", "channel is not bridged to RF");
                 return;
             }
-            // Be forgiving: a lost JOIN must not silently swallow a QSO.
+            // Be forgiving of a lost JOIN, but not of a kick: inventing a JOIN
+            // from a PRIVMSG made both `KICK` and `RADIO KICK` a no-op.
             if !chan.members.contains_key(&uid) {
+                if self
+                    .radio
+                    .sessions
+                    .peer(src)
+                    .map(|p| p.was_kicked_from(&display))
+                    .unwrap_or(false)
+                {
+                    self.rf_error(src, "442", "you're not on that channel");
+                    return;
+                }
                 self.rf_join(src, &display);
             }
             let mut text = text;

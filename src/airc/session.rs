@@ -84,6 +84,9 @@ pub struct Peer {
     queue: VecDeque<Vec<AircFrame>>,
     seen: VecDeque<u16>,
     reasm: HashMap<u16, Reassembly>,
+    /// Channels this station was KICKed from. A following MSG must not
+    /// silently rejoin — that made KICK a no-op on RF.
+    kicked: HashSet<String>,
 }
 
 impl Peer {
@@ -99,7 +102,21 @@ impl Peer {
             queue: VecDeque::new(),
             seen: VecDeque::new(),
             reasm: HashMap::new(),
+            kicked: HashSet::new(),
         }
+    }
+
+    pub fn was_kicked_from(&self, channel: &str) -> bool {
+        self.kicked.contains(channel)
+    }
+
+    pub fn mark_kicked(&mut self, channel: &str) {
+        self.kicked.insert(channel.to_string());
+        self.channels.remove(channel);
+    }
+
+    pub fn clear_kicked(&mut self, channel: &str) {
+        self.kicked.remove(channel);
     }
 
     pub fn queue_depth(&self) -> usize {
@@ -125,6 +142,21 @@ pub struct TickOutcome {
     pub lost: Vec<Callsign>,
 }
 
+/// Result of [`Sessions::enqueue`].
+pub struct SendOutcome {
+    pub frames: Vec<AircFrame>,
+    pub accepted: bool,
+}
+
+impl SendOutcome {
+    fn dropped() -> Self {
+        Self {
+            frames: Vec::new(),
+            accepted: false,
+        }
+    }
+}
+
 pub struct Sessions {
     pub config: SessionConfig,
     peers: HashMap<Callsign, Peer>,
@@ -136,6 +168,13 @@ pub struct Sessions {
     /// sequence number twice and the second message would be silently
     /// discarded as a duplicate.
     next_seq: u16,
+    /// Peers removed by [`Sessions::force_touch`] to make room. The server
+    /// turns these into IRC QUITs; without that, the user stays in channels
+    /// forever because idle expiry only walks the session table.
+    evicted: Vec<Callsign>,
+    /// Callsigns a control operator removed with `RADIO KICK`. Independent of
+    /// the peer table: `forget` would otherwise let the next MSG recreate them.
+    radio_kicked: HashSet<Callsign>,
 }
 
 impl Sessions {
@@ -144,7 +183,28 @@ impl Sessions {
             config,
             peers: HashMap::new(),
             next_seq: 1,
+            evicted: Vec::new(),
+            radio_kicked: HashSet::new(),
         }
+    }
+
+    /// Stations dropped from the table to make room for an outgoing message.
+    pub fn take_evicted(&mut self) -> Vec<Callsign> {
+        std::mem::take(&mut self.evicted)
+    }
+
+    /// `RADIO KICK` removes the station and refuses to invent a JOIN from the
+    /// next PRIVMSG. HELLO or JOIN lets them back.
+    pub fn ban(&mut self, call: &Callsign) {
+        self.radio_kicked.insert(call.clone());
+    }
+
+    pub fn lift_ban(&mut self, call: &Callsign) {
+        self.radio_kicked.remove(call);
+    }
+
+    pub fn is_banned(&self, call: &Callsign) -> bool {
+        self.radio_kicked.contains(call)
     }
 
     /// Allocate the next outgoing sequence number. Public because broadcasts
@@ -193,6 +253,7 @@ impl Sessions {
                 .map(|(c, _)| c.clone())
             {
                 self.peers.remove(&oldest);
+                self.evicted.push(oldest);
             }
         }
         self.touch(call, now).expect("force_touch made room")
@@ -319,6 +380,22 @@ impl Sessions {
         reliable: bool,
         now: Instant,
     ) -> Vec<AircFrame> {
+        self.enqueue(dst, kind, payload, reliable, now).frames
+    }
+
+    /// As [`Sessions::send`], but says whether the message was accepted.
+    ///
+    /// Empty frames used to mean both "queued behind something in flight" and
+    /// "dropped". Held mail needs the difference: only the latter must leave
+    /// the message in the mailbox.
+    pub fn enqueue(
+        &mut self,
+        dst: &Callsign,
+        kind: Kind,
+        payload: Vec<u8>,
+        reliable: bool,
+        now: Instant,
+    ) -> SendOutcome {
         let cfg = self.config.clone();
         let seq = self.next_seq();
         let peer = self.force_touch(dst, now);
@@ -329,7 +406,7 @@ impl Sessions {
         };
         if chunks.len() > u8::MAX as usize {
             peer.dropped += 1;
-            return Vec::new();
+            return SendOutcome::dropped();
         }
         let total = chunks.len() as u8;
         let frames: Vec<AircFrame> = chunks
@@ -347,21 +424,38 @@ impl Sessions {
             .collect();
 
         if !reliable {
-            return frames;
+            return SendOutcome {
+                frames,
+                accepted: true,
+            };
         }
         if peer.pending.is_some() {
             if peer.queue.len() >= cfg.max_queue {
                 peer.dropped += 1;
-                return Vec::new();
+                return SendOutcome::dropped();
             }
             peer.queue.push_back(frames);
-            return Vec::new();
+            return SendOutcome {
+                frames: Vec::new(),
+                accepted: true,
+            };
         }
-        start_pending(peer, frames, now, &cfg)
+        SendOutcome {
+            frames: start_pending(peer, frames, now, &cfg),
+            accepted: true,
+        }
     }
 
     /// Drive timers: retransmissions, reassembly expiry, idle stations.
     pub fn tick(&mut self, now: Instant) -> TickOutcome {
+        self.tick_retries(now, true)
+    }
+
+    /// As [`Sessions::tick`], but when `retry` is false the session does not
+    /// retransmit or give up. Used while the transmitter cannot key up —
+    /// interlock down *or* `RADIO OFF` — because burning ACK attempts against
+    /// a held or purged queue would declare the station lost.
+    pub fn tick_retries(&mut self, now: Instant, retry: bool) -> TickOutcome {
         let cfg = self.config.clone();
         let mut out = TickOutcome::default();
         let mut giving_up = Vec::new();
@@ -372,6 +466,10 @@ impl Sessions {
 
             if now.duration_since(peer.last_heard) > cfg.peer_idle_timeout {
                 out.lost.push(call.clone());
+                continue;
+            }
+
+            if !retry {
                 continue;
             }
 
@@ -519,6 +617,30 @@ mod tests {
     }
 
     #[test]
+    fn a_blocked_transmitter_does_not_burn_retry_attempts() {
+        let cfg = SessionConfig {
+            ack_timeout: Duration::from_secs(10),
+            max_retries: 2,
+            ..Default::default()
+        };
+        let mut s = Sessions::new(cfg);
+        let mut now = Instant::now();
+        assert_eq!(s.send(&call(), Kind::Msg, b"x".to_vec(), true, now).len(), 1);
+
+        // Well past every retry deadline, but the transmitter cannot key up.
+        now += Duration::from_secs(120);
+        let out = s.tick_retries(now, false);
+        assert!(out.transmit.is_empty());
+        assert!(out.lost.is_empty(), "giving up would drop a message still held in the TNC");
+        assert!(s.peer(&call()).is_some(), "the session must still be waiting");
+
+        // Once it can transmit, the first retry is still available.
+        let out = s.tick_retries(now, true);
+        assert_eq!(out.transmit.len(), 1);
+        assert!(out.lost.is_empty());
+    }
+
+    #[test]
     fn ack_releases_the_queue() {
         let mut s = Sessions::new(SessionConfig::default());
         let now = Instant::now();
@@ -612,5 +734,10 @@ mod tests {
         assert!(s.touch(&c, now).is_none(), "a third peer must not grow the table");
         s.force_touch(&c, now);
         assert_eq!(s.peers().count(), 2);
+        assert_eq!(
+            s.take_evicted().len(),
+            1,
+            "the quietest station must be reported so IRC can drop the ghost"
+        );
     }
 }

@@ -291,10 +291,31 @@ impl Server {
             Event::Tick => self.tick(now),
             Event::Shutdown => self.shutdown(),
         }
+        self.reap_evicted_peers();
+    }
+
+    /// [`Sessions::force_touch`] can drop the quietest station to make room.
+    /// Idle expiry will not notice — that station is already gone from the
+    /// session table — so the IRC-side ghost has to be removed here.
+    fn reap_evicted_peers(&mut self) {
+        for call in self.radio.sessions.take_evicted() {
+            let uid = UserId::Rf(call.clone());
+            if self.state.user(&uid).is_some() {
+                info!(%call, "peer table full; dropping the quietest station");
+                self.quit_user(&uid, "Replaced");
+            }
+        }
     }
 
     fn tick(&mut self, now: Instant) {
-        let outcome = self.radio.sessions.tick(now);
+        // Do not burn ACK retries against a transmitter that cannot key up.
+        // The original is held in the TNC until the interlock recovers (or
+        // `max_hold`); counting those seconds as failed attempts would mark
+        // the station lost while its message was still waiting.
+        let outcome = self
+            .radio
+            .sessions
+            .tick_retries(now, self.radio.available() && !self.radio.interlock_down());
         for (call, frame) in outcome.transmit {
             self.radio.transmit_to(&call, frame);
         }
@@ -706,6 +727,12 @@ impl Server {
         if !self.radio.available() {
             return format!(
                 "{channel} is +r (bridged) but the transmitter is OFF. Messages stay on IRC."
+            );
+        }
+        if self.radio.interlock_down() {
+            return format!(
+                "{channel} is +r (bridged) but the safety interlock is holding the transmitter. \
+                 Messages stay on IRC."
             );
         }
         if !chan.has_rf_members() {

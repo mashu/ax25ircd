@@ -268,6 +268,10 @@ struct Link {
     id_queue: mpsc::Receiver<Ax25Frame>,
     rx_sink: mpsc::Sender<Ax25Frame>,
     pending: Option<(Ax25Frame, tokio::time::Instant)>,
+    /// Identification that arrived while the interlock was down. Lives on
+    /// `Link` so a TNC reconnect cannot forget a sign-off that has not keyed
+    /// yet.
+    held_id: Option<Ax25Frame>,
 }
 
 async fn run(
@@ -282,6 +286,7 @@ async fn run(
         id_queue,
         rx_sink,
         pending: None,
+        held_id: None,
     };
     // The governor outlives individual TNC connections on purpose: airtime
     // already radiated does not stop counting because Direwolf restarted.
@@ -319,6 +324,7 @@ async fn pump(
         id_queue,
         rx_sink,
         pending,
+        held_id,
     } = state;
     // Push KISS parameters at connect.
     //
@@ -356,7 +362,13 @@ async fn pump(
         // Discard anything queued while the transmitter is inhibited. This is
         // the operator's kill switch: it must take effect on the frames that
         // are already in flight, not just on the next one.
-        if shared.tx_blocked() {
+        //
+        // The safety interlock is not a kill switch. A failing SWR check
+        // must not throw away the queue — that is traffic already admitted,
+        // and shredding it makes the session layer retry into a void until
+        // it gives the station up for lost. Hold instead; `max_hold` still
+        // drops what has waited too long.
+        if shared.inhibit.load(Ordering::Relaxed) {
             if let Some((frame, _)) = pending.take() {
                 release_queued(shared, governor, frame.encode().len());
                 shared.dropped_inhibited.fetch_add(1, Ordering::Relaxed);
@@ -373,8 +385,29 @@ async fn pump(
         governor.set_duty(shared.duty_limit(config.airtime.max_duty));
         let pacing = shared.pacing(config.tx_pacing);
 
+        if let Some(frame) = held_id.take() {
+            if shared.interlock_failed() {
+                *held_id = Some(frame);
+            } else {
+                let bytes = frame.encode();
+                if bytes.len() <= config.max_frame {
+                    if let Err(e) = write_kiss_bytes(&mut link, config, &frame, &bytes).await {
+                        *held_id = Some(frame);
+                        return Err(e);
+                    }
+                    let now = std::time::Instant::now();
+                    let keyed = governor.record(bytes.len(), now);
+                    governor.publish_with(shared, now, config.max_frame);
+                    next_tx = next_tx.max(tokio::time::Instant::now() + pacing.max(keyed));
+                }
+            }
+        }
+
         let far_future = tokio::time::Instant::now() + Duration::from_secs(3600);
-        let wake = if pending.is_some() { next_tx } else { far_future };
+        let mut wake = if pending.is_some() { next_tx } else { far_future };
+        if held_id.is_some() {
+            wake = wake.min(tokio::time::Instant::now() + Duration::from_millis(200));
+        }
 
         tokio::select! {
             read = link.read(&mut buf) => {
@@ -401,7 +434,7 @@ async fn pump(
                     }
                 }
             }
-            Some(frame) = id_queue.recv() => {
+            Some(frame) = id_queue.recv(), if held_id.is_none() => {
                 // Identification bypasses the pacing gate, the governor and
                 // the operator's inhibit: `RADIO OFF` queues a sign-off ID
                 // precisely so the station can put its callsign to the
@@ -413,11 +446,18 @@ async fn pump(
                 // it is not safe to key up for an ID either. A licence
                 // requires you to identify the transmissions you make, not to
                 // make one.
+                //
+                // Only one ID is held. Receiving the next while `held_id` is
+                // set would overwrite the sign-off that is already waiting.
                 let bytes = frame.encode();
                 if shared.interlock_failed() {
-                    warn!("station ID suppressed: the safety interlock is not satisfied");
+                    warn!("station ID held: the safety interlock is not satisfied");
+                    *held_id = Some(frame);
                 } else if bytes.len() <= config.max_frame {
-                    write_kiss_bytes(&mut link, config, &frame, &bytes).await?;
+                    if let Err(e) = write_kiss_bytes(&mut link, config, &frame, &bytes).await {
+                        *held_id = Some(frame);
+                        return Err(e);
+                    }
                     let now = std::time::Instant::now();
                     let keyed = governor.record(bytes.len(), now);
                     governor.publish_with(shared, now, config.max_frame);
@@ -427,13 +467,28 @@ async fn pump(
             Some(frame) = tx_queue.recv(), if pending.is_none() => {
                 *pending = Some((frame, tokio::time::Instant::now()));
             }
-            _ = tokio::time::sleep_until(wake), if pending.is_some() => {
+            _ = tokio::time::sleep_until(wake), if pending.is_some() || held_id.is_some() => {
                 let Some((frame, queued_at)) = pending.take() else {
                     continue;
                 };
-                if shared.tx_blocked() {
+                if shared.inhibit.load(Ordering::Relaxed) {
                     release_queued(shared, governor, frame.encode().len());
                     shared.dropped_inhibited.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                if shared.interlock_failed() {
+                    let waited = queued_at.elapsed();
+                    if waited > config.airtime.max_hold {
+                        release_queued(shared, governor, frame.encode().len());
+                        shared.dropped_stale.fetch_add(1, Ordering::Relaxed);
+                        warn!(
+                            "dropping a frame held {waited:?} by the safety interlock — stale traffic is worse than no traffic"
+                        );
+                        continue;
+                    }
+                    shared.deferred.fetch_add(1, Ordering::Relaxed);
+                    next_tx = tokio::time::Instant::now() + Duration::from_millis(200);
+                    *pending = Some((frame, queued_at));
                     continue;
                 }
                 let bytes = frame.encode();
@@ -445,7 +500,13 @@ async fn pump(
                 let now = std::time::Instant::now();
                 match governor.check(bytes.len(), now) {
                     TxDecision::Send => {
-                        write_kiss_bytes(&mut link, config, &frame, &bytes).await?;
+                        if let Err(e) = write_kiss_bytes(&mut link, config, &frame, &bytes).await {
+                            // The frame has already reserved airtime. Put it
+                            // back so a reconnect still owes it, rather than
+                            // leaking the reservation and losing the message.
+                            *pending = Some((frame, queued_at));
+                            return Err(e);
+                        }
                         let keyed = governor.record(bytes.len(), now);
                         release_queued(shared, governor, bytes.len());
                         governor.publish_with(shared, now, config.max_frame);

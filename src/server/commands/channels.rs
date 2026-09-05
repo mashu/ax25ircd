@@ -226,6 +226,10 @@ impl Server {
             self.send_topic(uid, &name, true);
             return;
         };
+        if !chan.members.contains_key(uid) {
+            self.numeric(uid, num::ERR_NOTONCHANNEL, &[&chan.name, "You're not on that channel"]);
+            return;
+        }
         let is_op = chan.members.get(uid).map(|f| f.op).unwrap_or(false);
         let is_oper = self.state.user(uid).map(|u| u.oper).unwrap_or(false);
         if chan.topic_locked && !is_op && !is_oper {
@@ -340,6 +344,17 @@ impl Server {
         // decides what gets transmitted under the gateway's licence.
         let mut adding = true;
         let mut arg_index = 2;
+        let mut applied = String::new();
+        let mut applied_args: Vec<String> = Vec::new();
+        let mut last_sign: Option<char> = None;
+        let push_mode = |applied: &mut String, last_sign: &mut Option<char>, adding: bool, letter: char| {
+            let sign = if adding { '+' } else { '-' };
+            if *last_sign != Some(sign) {
+                applied.push(sign);
+                *last_sign = Some(sign);
+            }
+            applied.push(letter);
+        };
         for c in changes.chars() {
             match c {
                 '+' => adding = true,
@@ -353,11 +368,13 @@ impl Server {
                         );
                     } else if let Some(ch) = self.state.channel_mut(&target) {
                         ch.moderated = adding;
+                        push_mode(&mut applied, &mut last_sign, adding, 'm');
                     }
                 }
                 't' => {
                     if let Some(ch) = self.state.channel_mut(&target) {
                         ch.topic_locked = adding;
+                        push_mode(&mut applied, &mut last_sign, adding, 't');
                     }
                 }
                 'r' => {
@@ -365,20 +382,50 @@ impl Server {
                         self.numeric(uid, num::ERR_NOPRIVILEGES, &["Only a control operator may change +r"]);
                     } else if let Some(ch) = self.state.channel_mut(&target) {
                         ch.rf = adding;
+                        push_mode(&mut applied, &mut last_sign, adding, 'r');
                     }
                 }
                 'k' => {
                     let key = msg.param(arg_index).map(|s| s.to_string());
                     arg_index += 1;
+                    if adding && key.as_deref().unwrap_or("").is_empty() {
+                        self.numeric(
+                            uid,
+                            num::ERR_NEEDMOREPARAMS,
+                            &["MODE", "Not enough parameters"],
+                        );
+                        continue;
+                    }
                     if let Some(ch) = self.state.channel_mut(&target) {
-                        ch.key = if adding { key } else { None };
+                        ch.key = if adding { key.clone() } else { None };
+                        push_mode(&mut applied, &mut last_sign, adding, 'k');
+                        if adding {
+                            if let Some(k) = key {
+                                applied_args.push(k);
+                            }
+                        }
                     }
                 }
                 'l' => {
-                    let limit = msg.param(arg_index).and_then(|s| s.parse::<usize>().ok());
+                    let raw = msg.param(arg_index).map(|s| s.to_string());
                     arg_index += 1;
-                    if let Some(ch) = self.state.channel_mut(&target) {
-                        ch.limit = if adding { limit } else { None };
+                    if adding {
+                        let Some(limit) = raw.as_deref().and_then(|s| s.parse::<usize>().ok()).filter(|&n| n > 0) else {
+                            self.numeric(
+                                uid,
+                                num::ERR_NEEDMOREPARAMS,
+                                &["MODE", "Not enough parameters"],
+                            );
+                            continue;
+                        };
+                        if let Some(ch) = self.state.channel_mut(&target) {
+                            ch.limit = Some(limit);
+                            push_mode(&mut applied, &mut last_sign, adding, 'l');
+                            applied_args.push(limit.to_string());
+                        }
+                    } else if let Some(ch) = self.state.channel_mut(&target) {
+                        ch.limit = None;
+                        push_mode(&mut applied, &mut last_sign, adding, 'l');
                     }
                 }
                 'o' | 'v' => {
@@ -405,6 +452,10 @@ impl Server {
                                     flags.voice = adding;
                                     flags.voice_manual = adding;
                                 }
+                                push_mode(&mut applied, &mut last_sign, adding, c);
+                                if let Some(n) = who {
+                                    applied_args.push(n);
+                                }
                             }
                         }
                     }
@@ -412,9 +463,12 @@ impl Server {
                 _ => {}
             }
         }
+        if applied.is_empty() {
+            return;
+        }
         let prefix = self.state.user(uid).map(|u| u.prefix()).unwrap_or_default();
-        let mut params = vec![chan.name.clone(), changes];
-        params.extend(msg.params.iter().skip(2).cloned());
+        let mut params = vec![chan.name.clone(), applied];
+        params.extend(applied_args);
         let line = Message::new("MODE", params).with_prefix(prefix).to_string();
         for member in self.state.members(&chan.name) {
             if let UserId::Ip(id) = member {
@@ -462,8 +516,9 @@ impl Server {
         self.audit.event("kick", &[("channel", &chan.name), ("nick", &who), ("reason", &reason)]);
         if let UserId::Rf(call) = &target {
             if let Some(peer) = self.radio.sessions.peer_mut(call) {
-                peer.channels.remove(&chan.name);
+                peer.mark_kicked(&chan.name);
             }
+            self.rf_error(call, "442", "kicked from channel");
         }
     }
 }

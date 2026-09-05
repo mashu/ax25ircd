@@ -480,6 +480,33 @@ async fn a_retransmission_is_sent_without_a_fresh_admission_check() {
     );
 }
 
+#[tokio::test]
+async fn radio_off_does_not_burn_ack_retries() {
+    let mut h = Harness::new();
+    h.radio.unicast(
+        &station(),
+        Kind::Msg,
+        encode_fields(&["SM0ABC|7", "alice", "answer me"]),
+        true,
+        TxClass::Direct,
+    );
+    let _ = h.transmitted().await;
+    h.radio.enabled = false;
+
+    // Well past every retry deadline. Same condition the server tick uses.
+    let now = Instant::now() + Duration::from_secs(120);
+    let out = h
+        .radio
+        .sessions
+        .tick_retries(now, h.radio.available() && !h.radio.interlock_down());
+    assert!(out.transmit.is_empty());
+    assert!(
+        out.lost.is_empty(),
+        "RADIO OFF must not declare the station lost while the operator may turn it back on"
+    );
+    assert!(h.radio.sessions.peer(&station()).is_some());
+}
+
 // --------------------------------------------------------------------- mailbox
 
 #[tokio::test]

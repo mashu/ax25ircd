@@ -146,6 +146,10 @@ fn registration_sends_the_expected_welcome_burst() {
     }
     assert!(lines.iter().any(|l| l.contains("TESTNET")));
     assert!(
+        lines.iter().any(|l| l.contains(&format!("ax25ircd-{}", env!("CARGO_PKG_VERSION")))),
+        "004 should advertise this build, not a frozen version: {lines:?}"
+    );
+    assert!(
         lines.iter().any(|l| l.contains("CASEMAPPING=rfc1459")),
         "ISUPPORT should tell the client how nicks compare"
     );
@@ -319,6 +323,17 @@ fn channel_keys_limits_and_the_per_user_cap() {
     let c = n.client(3, "carol");
     assert!(has_numeric(&n.ask(c, "JOIN #private hunter2"), "471"));
 
+    // +l 0 is not a lock: it was applying a limit of zero, which made
+    // `members.len() >= 0` refuse every join, including an empty channel.
+    n.send(a, "MODE #private -l");
+    n.drain(a);
+    n.send(a, "MODE #private +l 0");
+    n.drain(a);
+    assert!(
+        n.server.state.channel("#private").unwrap().limit.is_none(),
+        "+l 0 must not lock the channel empty"
+    );
+
     // Three channels each, per the fixture.
     n.send(c, "JOIN #one");
     n.send(c, "JOIN #two");
@@ -357,6 +372,12 @@ fn topic_requires_operator_when_locked() {
     assert!(has_numeric(&n.ask(a, "TOPIC #fresh"), "331"), "no topic set");
     assert!(has_numeric(&n.ask(a, "TOPIC #nowhere :x"), "403"));
     assert!(has_numeric(&n.ask(a, "TOPIC"), "461"));
+
+    let c = n.client(3, "carol");
+    assert!(
+        has_numeric(&n.ask(c, "TOPIC #lobby :from outside"), "442"),
+        "setting a topic requires being on the channel"
+    );
 }
 
 #[test]
@@ -536,6 +557,18 @@ fn channel_and_user_modes() {
         assert_eq!(c.limit, Some(5));
         assert!(c.mode_string().contains('k') && c.mode_string().contains('l'));
     }
+    // A +k or +l with no usable argument must not clear what is already set.
+    n.send(a, "MODE #room +k");
+    n.drain(a);
+    n.send(a, "MODE #room +l");
+    n.drain(a);
+    n.send(a, "MODE #room +l nope");
+    n.drain(a);
+    {
+        let c = n.server.state.channel("#room").unwrap();
+        assert_eq!(c.key.as_deref(), Some("secret"), "+k with no key must not unlock the channel");
+        assert_eq!(c.limit, Some(5), "+l with no number must not lift the limit");
+    }
     n.send(a, "MODE #room -kl");
     n.drain(a);
     {
@@ -584,6 +617,27 @@ fn a_non_oper_cannot_change_r_on_any_channel() {
     assert!(
         has_numeric(&n.ask(a, "MODE #room +r"), "481"),
         "deciding what occupies the air is a control-operator decision"
+    );
+    assert!(!n.server.state.channel("#room").unwrap().rf);
+}
+
+#[test]
+fn a_refused_mode_change_is_not_announced_to_the_channel() {
+    let mut n = Net::new();
+    let a = n.client(1, "alice");
+    let b = n.client(2, "bob");
+    n.send(a, "JOIN #room");
+    n.send(b, "JOIN #room");
+    n.drain(a);
+    n.drain(b);
+
+    n.send(a, "MODE #room +r");
+    let to_alice = n.drain(a);
+    let to_bob = n.drain(b);
+    assert!(has_numeric(&to_alice, "481"), "{to_alice:?}");
+    assert!(
+        !to_bob.iter().any(|l| l.contains("MODE") && l.contains("+r")),
+        "bob must not see a mode change that was refused: {to_bob:?}"
     );
     assert!(!n.server.state.channel("#room").unwrap().rf);
 }

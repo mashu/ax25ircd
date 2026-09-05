@@ -599,6 +599,24 @@ async fn an_operator_can_remove_a_station() {
     assert!(rf.drain(a).iter().any(|l| l.contains("Station removed")));
     assert!(rf.station("SM0ABC-7").is_none());
 
+    rf.heard("SM0ABC-7", Kind::Msg, &["#rf", "back already"]);
+    assert!(
+        rf.station("SM0ABC-7").is_none(),
+        "RADIO KICK must not be undone by the next PRIVMSG"
+    );
+    assert!(
+        !rf.server
+            .state
+            .channel("#rf")
+            .unwrap()
+            .members
+            .contains_key(&UserId::Rf("SM0ABC-7".parse().unwrap()))
+    );
+
+    // HELLO is how they come back.
+    rf.heard("SM0ABC-7", Kind::Hello, &[]);
+    assert!(rf.station("SM0ABC-7").is_some());
+
     // And RADIO HEARD reports what is on frequency.
     rf.heard("SM0XYZ-1", Kind::Hello, &[]);
     rf.drain(a);
@@ -628,6 +646,18 @@ async fn an_operator_can_kick_a_station_from_one_channel() {
         .unwrap()
         .members
         .contains_key(&UserId::Rf("SM0ABC-7".parse().unwrap())));
+
+    // A following channel message must not silently undo the kick.
+    rf.heard("SM0ABC-7", Kind::Msg, &["#rf", "still here"]);
+    assert!(
+        !rf.server
+            .state
+            .channel("#rf")
+            .unwrap()
+            .members
+            .contains_key(&UserId::Rf("SM0ABC-7".parse().unwrap())),
+        "KICK must stick until the station sends JOIN"
+    );
 }
 
 #[tokio::test]

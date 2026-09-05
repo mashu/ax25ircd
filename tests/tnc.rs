@@ -240,6 +240,74 @@ async fn the_safety_interlock_stops_even_identification() {
 }
 
 #[tokio::test]
+async fn a_second_id_during_interlock_does_not_overwrite_the_first() {
+    let (tnc, mut far, _rx) = spawn(fast(), 512);
+    let mut dec = KissDecoder::new(1024);
+    let _ = drain(&mut far, &mut dec).await;
+
+    tnc.airtime().interlock_ok.store(false, Ordering::Relaxed);
+    assert!(tnc.try_send_id(frame("SK0MT-1", b"id-one")));
+    assert!(tnc.try_send_id(frame("SK0MT-1", b"id-two")));
+    let frames = drain(&mut far, &mut dec).await;
+    assert!(
+        frames.iter().all(|f| f.command != kiss::CMD_DATA),
+        "neither ID may key up while the interlock is down"
+    );
+
+    tnc.airtime().interlock_ok.store(true, Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let frames = drain(&mut far, &mut dec).await;
+    let infos: Vec<Vec<u8>> = frames
+        .iter()
+        .filter(|f| f.command == kiss::CMD_DATA)
+        .filter_map(|f| Ax25Frame::decode(&f.payload).ok())
+        .map(|ax| ax.info)
+        .collect();
+    assert!(
+        infos.iter().any(|i| i.windows(6).any(|w| w == b"id-one")),
+        "the first ID must still go out: {infos:?}"
+    );
+    assert!(
+        infos.iter().any(|i| i.windows(6).any(|w| w == b"id-two")),
+        "the second ID must wait, not overwrite: {infos:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_interlock_failure_holds_the_queue_instead_of_purging_it() {
+    let (tnc, mut far, _rx) = spawn(fast(), 512);
+    let mut dec = KissDecoder::new(1024);
+    let _ = drain(&mut far, &mut dec).await;
+
+    tnc.airtime().interlock_ok.store(false, Ordering::Relaxed);
+    assert!(tnc.try_send(frame("SK0MT-1", b"keep-me")));
+    let frames = drain(&mut far, &mut dec).await;
+    assert!(
+        frames.iter().all(|f| f.command != kiss::CMD_DATA),
+        "nothing may be keyed while the interlock is down"
+    );
+    assert_eq!(
+        tnc.airtime().dropped_inhibited.load(Ordering::Relaxed),
+        0,
+        "a failing interlock is not RADIO OFF: the queue must be held, not discarded"
+    );
+
+    tnc.airtime().interlock_ok.store(true, Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let frames = drain(&mut far, &mut dec).await;
+    let sent: Vec<_> = frames
+        .iter()
+        .filter(|f| f.command == kiss::CMD_DATA)
+        .filter_map(|f| Ax25Frame::decode(&f.payload).ok())
+        .collect();
+    assert!(
+        sent.iter()
+            .any(|ax| ax.info.windows(7).any(|w| w == b"keep-me")),
+        "the frame queued while blocked must go out once it is safe: {sent:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_full_transmit_queue_refuses_rather_than_blocking() {
     let (link, _far) = TncConfig::loopback_link();
     let (tnc, _rx) = tnc::spawn(TncConfig {

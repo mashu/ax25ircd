@@ -164,7 +164,16 @@ impl Server {
             )],
         );
         self.numeric(uid, num::RPL_CREATED, &["This server was created at startup"]);
-        self.numeric(uid, num::RPL_MYINFO, &[&server, "ax25ircd-0.1", "iow", "mnrtkl"]);
+        self.numeric(
+            uid,
+            num::RPL_MYINFO,
+            &[
+                &server,
+                &format!("ax25ircd-{}", env!("CARGO_PKG_VERSION")),
+                "iow",
+                "mnrtkl",
+            ],
+        );
 
         let radio = if self.radio.available() { "ON" } else { "OFF" };
         let isupport = format!(

@@ -314,6 +314,14 @@ impl Server {
                 truncated,
             });
         }
+        if self.radio.interlock_down() {
+            self.notice_user(
+                uid,
+                "Not put on the air: the safety interlock is holding the transmitter. \
+                 Your message stayed on IRC.",
+            );
+            return None;
+        }
         let octets = self.radio.wire_octets(screened.len() + 40);
         if !self.radio.backlog_has_room(octets, TxClass::Chat) {
             let queued = self.radio.eta().as_secs();

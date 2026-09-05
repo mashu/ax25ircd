@@ -172,6 +172,13 @@ impl Radio {
         self.enabled && self.tnc.is_some()
     }
 
+    /// The safety interlock is holding the transmitter. Distinct from
+    /// [`Radio::available`]: `RADIO OFF` is an operator decision, this is
+    /// "it is not safe to key up".
+    pub fn interlock_down(&self) -> bool {
+        self.airtime().is_some_and(|a| a.interlock_failed())
+    }
+
     /// Unreliable one-to-many transmission addressed to the protocol's
     /// destination address. Every station in range hears it once.
     pub fn broadcast(&mut self, kind: Kind, payload: Vec<u8>, class: TxClass) {
@@ -187,7 +194,7 @@ impl Radio {
         reliable: bool,
         class: TxClass,
     ) {
-        self.unicast_flagged(dst, kind, payload, reliable, class, 0)
+        self.unicast_flagged(dst, kind, payload, reliable, class, 0);
     }
 
     pub fn transmit_to(&mut self, dst: &Callsign, frame: AircFrame) {
@@ -242,6 +249,11 @@ impl Radio {
             return;
         };
         if !self.enabled {
+            return;
+        }
+        if tnc.airtime().interlock_failed() {
+            // Do not pile retries into a transmitter that cannot key up.
+            // Whatever is already in the TNC queue is being held there.
             return;
         }
         let info = frame.encode();
@@ -324,8 +336,14 @@ impl Radio {
                 debug!(%call, "holding mail back: the station's session queue is full");
                 break;
             }
+            // Hand it to the session layer first. Only then is it safe to
+            // discard the mailbox copy: unicast can still refuse if the
+            // interlock dropped between the checks above and the send.
+            if !self.unicast_flagged(call, Kind::Stored, payload, true, TxClass::Direct, flags) {
+                debug!(%call, "holding mail back: the transmitter refused it");
+                break;
+            }
             self.mailbox.drop_front(call);
-            self.unicast_flagged(call, Kind::Stored, payload, true, TxClass::Direct, flags);
             sent += 1;
         }
         let remaining = depth.saturating_sub(sent);
@@ -335,22 +353,19 @@ impl Radio {
     }
 
     pub fn maybe_identify(&mut self, now: Instant) {
-        if !self.available() {
+        if self.tnc.is_none() {
             return;
         }
-        if now.duration_since(self.last_id) < self.config.id_interval() {
+        if !self.transmitted_since_id {
             return;
         }
-        // Only transmit an ID if we have actually transmitted. Identifying an
-        // idle station just adds QRM.
-        if self.transmitted_since_id {
-            if !self.send_id() {
-                // The obligation still stands; try again on the next tick
-                // rather than waiting another full interval.
-                return;
-            }
+        // Periodic identification waits for the interval. A failed sign-off
+        // (`RADIO OFF` queued an ID that did not fit) retries every tick:
+        // `available()` is now false, so the old guard never tried again.
+        if self.enabled && now.duration_since(self.last_id) < self.config.id_interval() {
+            return;
         }
-        self.last_id = now;
+        let _ = self.send_id();
     }
 
     /// Identify now if we have transmitted since the last ID. Called before
@@ -358,7 +373,7 @@ impl Radio {
     /// automatically controlled station must identify at the end of a series
     /// of transmissions, not only every ten minutes.
     pub fn id_if_needed(&mut self) {
-        if self.transmitted_since_id && self.available() {
+        if self.transmitted_since_id && self.tnc.is_some() {
             self.send_id();
         }
     }
@@ -397,13 +412,10 @@ impl Radio {
         let (Some(tnc), Some(source)) = (self.tnc.as_ref(), self.source.clone()) else {
             return false;
         };
-        // The TNC also suppresses an ID when the interlock fails; checking
-        // here means we do not clear `transmitted_since_id` for a frame that
-        // will never be keyed.
-        if tnc.airtime().interlock_failed() {
-            warn!("station ID not queued: the safety interlock is not satisfied");
-            return false;
-        }
+        // Queue even when the interlock is down: the TNC holds the ID until
+        // it is safe to key up. Refusing here meant `RADIO OFF` during a
+        // failed SWR check never signed off — `enabled` went false and the
+        // obligation was stranded.
         let ax = match Ax25Frame::ui(source, dest.clone(), &self.path, frame.encode()) {
             Ok(f) => f,
             Err(e) => {
@@ -448,7 +460,7 @@ impl Radio {
         if self.airtime().map(|a| a.interlock_failed()).unwrap_or(false) {
             return format!(
                 "Radio gateway: station {call}, transmitter BLOCKED by the safety interlock. \
-                 Nothing is being radiated, including station identification."
+                 Nothing is being radiated. Station identification is held until it is safe."
             );
         }
         let duty = self
@@ -483,7 +495,7 @@ impl Radio {
         class: TxClass,
         flags: u8,
     ) {
-        if !self.available() {
+        if !self.available() || self.interlock_down() {
             return;
         }
         let seq = self.sessions.next_seq();
@@ -521,9 +533,9 @@ impl Radio {
         reliable: bool,
         class: TxClass,
         flags: u8,
-    ) {
-        if !self.available() {
-            return;
+    ) -> bool {
+        if !self.available() || self.interlock_down() {
+            return false;
         }
         // Admission control happens before the session layer sees the message.
         // Once `Sessions::send` accepts it, an ACK timer is running and the
@@ -532,12 +544,16 @@ impl Radio {
         // transmission, it costs four.
         if !self.backlog_has_room(self.wire_octets(payload.len()), class) {
             self.stats.rf_frames_refused += 1;
-            return;
+            return false;
         }
         let now = Instant::now();
-        let frames = self.sessions.send(dst, kind, payload, reliable, now);
-        for f in frames {
+        let outcome = self.sessions.enqueue(dst, kind, payload, reliable, now);
+        if !outcome.accepted {
+            return false;
+        }
+        for f in outcome.frames {
             self.transmit_direct(dst, f.with_flags(flags), class);
         }
+        true
     }
 }

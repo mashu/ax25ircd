@@ -395,6 +395,7 @@ impl Server {
                     self.notice_user(uid, "Usage: RADIO KICK <callsign>");
                     return;
                 };
+                self.radio.sessions.ban(&call);
                 let target = UserId::Rf(call);
                 self.quit_user(&target, "Removed by control operator");
                 self.notice_user(uid, "Station removed.");

@@ -316,10 +316,12 @@ interval_secs = 30
 timeout_secs = 5
 ```
 
-The command runs on a timer. While it fails, **nothing is transmitted**. What
-it measures is your business: SWR from a separate meter, a temperature probe on
-the finals, a GPIO from a hardware interlock, "is the antenna switch on the
-dummy load", or a file somebody touches before climbing the tower.
+The command runs on a timer. While it fails, **nothing is transmitted**.
+Traffic already in the transmit queue is *held* until the check passes again,
+or dropped as stale if it waits longer than `max_hold`. It is not discarded
+the way `RADIO OFF` discards it — a momentary SWR failure must not destroy
+messages already admitted, and must not make the session layer retry into a
+void until it gives a station up for lost.
 
 Two properties make this a safety feature rather than a status light:
 
