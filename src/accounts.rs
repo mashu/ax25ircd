@@ -11,10 +11,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::irc::message::lower;
 
-/// Modest Argon2id parameters: strong enough to store IRC nick passwords,
-/// cheap enough that REGISTER/IDENTIFY does not stall the event loop.
+/// Argon2id at the OWASP baseline: 19 MiB, two passes, one lane.
+///
+/// The old 4 MiB setting was well under that, and memory is the parameter
+/// that actually costs an offline attacker anything. Hashing happens on a
+/// blocking thread pool (see `run_argon2`), never on the event loop, so the
+/// cost is paid by the one connection doing REGISTER or IDENTIFY.
+///
+/// Raising this is backward compatible: a PHC hash string carries the
+/// parameters it was made with, and verification uses those, so existing
+/// entries in the nick file keep working and are re-hashed at the new cost
+/// whenever the password is next set.
 fn hasher() -> Argon2<'static> {
-    let params = Params::new(4096, 2, 1, None).expect("static Argon2 params");
+    let params = Params::new(19 * 1024, 2, 1, None).expect("static Argon2 params");
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
 
@@ -80,58 +89,6 @@ impl Accounts {
 
     pub fn get(&self, nick: &str) -> Option<&NickAccount> {
         self.store.nicks.get(&lower(nick))
-    }
-
-    pub fn register(&mut self, nick: &str, password: &str, min_len: usize) -> Result<(), AccountError> {
-        if password.len() < min_len {
-            return Err(AccountError::TooShort);
-        }
-        if password.len() > 128 {
-            return Err(AccountError::TooLong);
-        }
-        let key = lower(nick);
-        if self.store.nicks.contains_key(&key) {
-            return Err(AccountError::Taken);
-        }
-        let hash = hash_password(password)?;
-        let created_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        self.store.nicks.insert(
-            key,
-            NickAccount {
-                nick: nick.to_string(),
-                password_hash: hash,
-                created_unix,
-                rf_tx: false,
-                callsign: None,
-            },
-        );
-        self.save()
-    }
-
-    pub fn verify(&self, nick: &str, password: &str) -> Result<(), AccountError> {
-        let Some(acc) = self.store.nicks.get(&lower(nick)) else {
-            return Err(AccountError::NotRegistered);
-        };
-        verify_password(password, &acc.password_hash)
-    }
-
-    /// Change the password of an already-registered nick (caller has verified).
-    pub fn set_password(&mut self, nick: &str, password: &str, min_len: usize) -> Result<(), AccountError> {
-        if password.len() < min_len {
-            return Err(AccountError::TooShort);
-        }
-        if password.len() > 128 {
-            return Err(AccountError::TooLong);
-        }
-        let key = lower(nick);
-        let Some(acc) = self.store.nicks.get_mut(&key) else {
-            return Err(AccountError::NotRegistered);
-        };
-        acc.password_hash = hash_password(password)?;
-        self.save()
     }
 
     /// Insert a nick whose password was already hashed off the event loop.
@@ -203,14 +160,45 @@ impl Accounts {
             .map(|a| a.password_hash.clone())
     }
 
+    /// Write the nick database, atomically.
+    ///
+    /// `fs::write` truncates first, so a crash, a full disk or a power cut in
+    /// the middle leaves a half-written file — and since the whole database is
+    /// one JSON document, a half-written file is a *lost* database, not a
+    /// damaged one: every registration and every RF-TX grant is gone. Writing
+    /// a sibling temp file and renaming makes the replacement atomic, so the
+    /// worst case is losing the last change rather than all of them.
     fn save(&self) -> Result<(), AccountError> {
         let text = serde_json::to_string_pretty(&self.store).map_err(|_| AccountError::Io)?;
-        if let Some(parent) = self.path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|_| AccountError::Io)?;
+        let parent = match self.path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => {
+                std::fs::create_dir_all(p).map_err(|_| AccountError::Io)?;
+                p.to_path_buf()
             }
+            // A bare filename: the temp file goes in the current directory,
+            // which is the same filesystem, which is what rename needs.
+            _ => PathBuf::from("."),
+        };
+        let temp = parent.join(format!(
+            ".{}.tmp",
+            self.path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "nicks.json".into())
+        ));
+        // Flush the contents before the rename, or the rename can land while
+        // the data is still only in the page cache.
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::File::create(&temp).map_err(|_| AccountError::Io)?;
+            f.write_all(text.as_bytes()).map_err(|_| AccountError::Io)?;
+            f.sync_all().map_err(|_| AccountError::Io)?;
         }
-        std::fs::write(&self.path, text).map_err(|_| AccountError::Io)
+        std::fs::rename(&temp, &self.path).map_err(|e| {
+            let _ = std::fs::remove_file(&temp);
+            let _ = e;
+            AccountError::Io
+        })
     }
 }
 
@@ -241,15 +229,26 @@ mod tests {
         std::env::temp_dir().join(format!("ax25ircd-nicks-{n}.json"))
     }
 
+    /// Exercise the same path the server uses: hash off the event loop,
+    /// then hand the finished hash to the store.
+    fn add(a: &mut Accounts, nick: &str, password: &str) -> Result<(), AccountError> {
+        let hash = hash_password(password)?;
+        a.insert_hashed(nick, hash)
+    }
+
     #[test]
     fn register_verify_drop() {
         let path = tmp();
         let mut a = Accounts::empty(&path);
-        assert!(a.register("Alice", "secret12", 8).is_ok());
+        add(&mut a, "Alice", "secret12").unwrap();
         assert!(a.is_registered("alice"));
-        assert_eq!(a.verify("ALICE", "secret12"), Ok(()));
-        assert_eq!(a.verify("alice", "wrongwrong"), Err(AccountError::BadPassword));
-        assert_eq!(a.register("alice", "secret12", 8), Err(AccountError::Taken));
+        let hash = a.hash_for("ALICE").expect("case-insensitive lookup");
+        assert_eq!(verify_password("secret12", &hash), Ok(()));
+        assert_eq!(
+            verify_password("wrongwrong", &hash),
+            Err(AccountError::BadPassword)
+        );
+        assert_eq!(add(&mut a, "alice", "secret12"), Err(AccountError::Taken));
         a.drop_nick("alice").unwrap();
         assert!(!a.is_registered("alice"));
         let _ = std::fs::remove_file(path);
@@ -259,19 +258,52 @@ mod tests {
     fn persists_across_load() {
         let path = tmp();
         let mut a = Accounts::empty(&path);
-        a.register("bob", "hunter2x", 8).unwrap();
+        add(&mut a, "bob", "hunter2x").unwrap();
         a.set_rf_tx("bob", true).unwrap();
         a.set_callsign("bob", "SM0XYZ").unwrap();
         let b = Accounts::load(&path).unwrap();
-        assert_eq!(b.verify("bob", "hunter2x"), Ok(()));
+        let hash = b.hash_for("bob").unwrap();
+        assert_eq!(verify_password("hunter2x", &hash), Ok(()));
         assert!(b.grants_rf_tx("bob"));
         assert_eq!(b.get("bob").and_then(|a| a.callsign.as_deref()), Some("SM0XYZ"));
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn rejects_short_passwords() {
-        let mut a = Accounts::empty(tmp());
-        assert_eq!(a.register("x", "short", 8), Err(AccountError::TooShort));
+    fn saving_replaces_the_file_atomically_and_leaves_no_litter() {
+        let path = tmp();
+        let mut a = Accounts::empty(&path);
+        add(&mut a, "alice", "password1").unwrap();
+        add(&mut a, "bob", "password2").unwrap();
+        a.set_rf_tx("bob", true).unwrap();
+
+        // The database reloads, and the temp file is not left behind.
+        let b = Accounts::load(&path).unwrap();
+        assert!(b.is_registered("alice") && b.grants_rf_tx("bob"));
+        let temp = path
+            .parent()
+            .unwrap()
+            .join(format!(".{}.tmp", path.file_name().unwrap().to_string_lossy()));
+        assert!(!temp.exists(), "a temp file was left behind: {temp:?}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_rehash_of_an_old_entry_still_verifies() {
+        // Argon2 parameters live in the PHC string, so raising them must not
+        // lock out anybody who registered under the old cost.
+        let weak = {
+            let params = Params::new(4096, 2, 1, None).unwrap();
+            let salt = SaltString::generate(&mut OsRng);
+            Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+                .hash_password(b"legacypass", &salt)
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(verify_password("legacypass", &weak), Ok(()));
+        assert_eq!(
+            verify_password("wrongpass", &weak),
+            Err(AccountError::BadPassword)
+        );
     }
 }

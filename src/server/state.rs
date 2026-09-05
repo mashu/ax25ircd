@@ -98,6 +98,16 @@ impl User {
 pub struct MemberFlags {
     pub op: bool,
     pub voice: bool,
+    /// Granted explicitly with `MODE`, rather than derived from who the user
+    /// is.
+    ///
+    /// The two have to be told apart. Privileges are recomputed whenever
+    /// something changes about a user — OPER, IDENTIFY, CALLSIGN, a RADIO
+    /// GRANT — and that recomputation used to overwrite the whole flag set,
+    /// so an unrelated IDENTIFY silently took away a `+v` a channel operator
+    /// had just given out.
+    pub op_manual: bool,
+    pub voice_manual: bool,
 }
 
 impl MemberFlags {
@@ -115,6 +125,9 @@ impl MemberFlags {
 #[derive(Clone, Debug)]
 pub struct Channel {
     pub name: String,
+    /// Declared in the configuration file. Configured channels persist while
+    /// empty; channels users create are reaped when the last member leaves.
+    pub configured: bool,
     pub topic: Option<String>,
     pub topic_setter: String,
     pub topic_time: u64,
@@ -133,6 +146,7 @@ impl Channel {
     pub fn new(name: &str, rf: bool) -> Self {
         Self {
             name: name.to_string(),
+            configured: false,
             topic: None,
             topic_setter: String::new(),
             topic_time: 0,
@@ -203,6 +217,12 @@ impl State {
     /// Claim a nickname for a user, releasing the old one. Returns false if it
     /// is already taken by somebody else.
     pub fn set_nick(&mut self, id: &UserId, nick: &str) -> bool {
+        // Claiming a nick for a user that does not exist would leave the
+        // registry pointing at nothing: `remove_user` could never clean it up,
+        // so the nick would be reserved for the life of the process.
+        if !self.users.contains_key(id) {
+            return false;
+        }
         let key = lower(nick);
         if let Some(owner) = self.nicks.get(&key) {
             if owner != id {
@@ -235,6 +255,12 @@ impl State {
     }
 
     pub fn join(&mut self, id: &UserId, channel: &str) -> Option<MemberFlags> {
+        // Same reasoning as `set_nick`: a membership entry for a user that
+        // does not exist is invisible to `names_of` (which looks the user up)
+        // but still counted in `members`, and nothing ever removes it.
+        if !self.users.contains_key(id) {
+            return None;
+        }
         let key = lower(channel);
         let (rf, first, operators) = {
             let chan = self.channels.get(&key)?;
@@ -268,15 +294,22 @@ impl State {
             MemberFlags {
                 op: user.oper || configured_op,
                 voice: user.callsign.is_some() || user.oper,
+                ..Default::default()
             }
         } else {
             MemberFlags {
                 op: (first && !id.is_rf()) || user.oper || configured_op,
                 voice: false,
+                ..Default::default()
             }
         }
     }
 
+    /// Recompute what a user's membership flags *should* be, and apply the
+    /// change. Returns the old and new flags when something moved.
+    ///
+    /// Anything an operator granted by hand is preserved: this only decides
+    /// the derived part.
     pub fn apply_intended_flags(&mut self, id: &UserId, channel: &str) -> Option<(MemberFlags, MemberFlags)> {
         let key = lower(channel);
         let (old, rf, operators) = {
@@ -284,7 +317,13 @@ impl State {
             let old = *chan.members.get(id)?;
             (old, chan.rf, chan.operators.clone())
         };
-        let new = self.flags_for_parts(id, rf, false, &operators);
+        let derived = self.flags_for_parts(id, rf, false, &operators);
+        let new = MemberFlags {
+            op: derived.op || old.op_manual,
+            voice: derived.voice || old.voice_manual,
+            op_manual: old.op_manual,
+            voice_manual: old.voice_manual,
+        };
         if old == new {
             return None;
         }
@@ -296,6 +335,11 @@ impl State {
             *flags = new;
         }
         Some((old, new))
+    }
+
+    /// Connected IP clients, registered or not.
+    pub fn ip_users(&self) -> usize {
+        self.users.values().filter(|u| !u.is_rf()).count()
     }
 
     pub fn ip_count_from_host(&self, host: &str) -> usize {
@@ -314,7 +358,27 @@ impl State {
         if let Some(user) = self.users.get_mut(id) {
             user.channels.remove(&key);
         }
+        self.reap_channel(&key);
         was_member
+    }
+
+    /// Forget a user-created channel once it is empty.
+    ///
+    /// Channels created with `JOIN` used to live forever. Each user may hold
+    /// `max_channels_per_user` of them, so a client that joined twenty
+    /// channels, disconnected and reconnected could grow the channel table
+    /// without limit — cheap for the attacker, permanent for the server.
+    /// Configured channels are exempt: an empty `#rf` still has to exist for
+    /// a station to join it.
+    fn reap_channel(&mut self, key: &str) {
+        let gone = self
+            .channels
+            .get(key)
+            .map(|c| !c.configured && c.members.is_empty())
+            .unwrap_or(false);
+        if gone {
+            self.channels.remove(key);
+        }
     }
 
     /// Remove a user entirely. Returns the channels they were in.
@@ -329,6 +393,7 @@ impl State {
                 chan.members.remove(id);
                 names.push(chan.name.clone());
             }
+            self.reap_channel(&key);
         }
         names
     }
@@ -420,10 +485,75 @@ mod tests {
         let mut s = State::default();
         s.insert_user(user(UserId::Ip(1), "alice"));
         s.set_nick(&UserId::Ip(1), "alice");
-        s.ensure_channel("#a", false);
+        s.ensure_channel("#a", false).configured = true;
         assert!(s.join(&UserId::Ip(1), "#a").is_some());
         assert_eq!(s.remove_user(&UserId::Ip(1)), vec!["#a"]);
         assert!(s.channel("#a").unwrap().members.is_empty());
         assert!(!s.nick_taken("alice"));
+    }
+
+    #[test]
+    fn a_user_that_does_not_exist_cannot_claim_a_nick_or_a_channel() {
+        let mut s = State::default();
+        s.ensure_channel("#a", false).configured = true;
+        let ghost = UserId::Ip(99);
+
+        assert!(!s.set_nick(&ghost, "phantom"));
+        assert!(
+            !s.nick_taken("phantom"),
+            "the nick registry would point at nobody and never be cleaned up"
+        );
+        assert!(s.join(&ghost, "#a").is_none());
+        assert!(
+            s.channel("#a").unwrap().members.is_empty(),
+            "a membership with no user is invisible to NAMES but counted in the member list"
+        );
+    }
+
+    #[test]
+    fn a_manual_grant_outlives_a_recomputation() {
+        let mut s = State::default();
+        s.ensure_channel("#a", false).configured = true;
+        s.insert_user(user(UserId::Ip(1), "alice"));
+        s.set_nick(&UserId::Ip(1), "alice");
+        s.join(&UserId::Ip(1), "#a");
+
+        // An operator hands out +v by hand.
+        if let Some(f) = s
+            .channels
+            .get_mut("#a")
+            .and_then(|c| c.members.get_mut(&UserId::Ip(1)))
+        {
+            f.voice = true;
+            f.voice_manual = true;
+        }
+        // Something unrelated recomputes the derived flags.
+        s.apply_intended_flags(&UserId::Ip(1), "#a");
+        assert!(
+            s.channel("#a").unwrap().members[&UserId::Ip(1)].voice,
+            "a recomputation must not undo what an operator granted"
+        );
+    }
+
+    #[test]
+    fn user_created_channels_are_reaped_but_configured_ones_are_not() {
+        let mut s = State::default();
+        s.ensure_channel("#rf", true).configured = true;
+        s.insert_user(user(UserId::Ip(1), "alice"));
+        s.ensure_channel("#throwaway", false);
+        s.join(&UserId::Ip(1), "#throwaway");
+        s.join(&UserId::Ip(1), "#rf");
+
+        s.part(&UserId::Ip(1), "#throwaway");
+        assert!(
+            s.channel("#throwaway").is_none(),
+            "an empty user-created channel must not outlive its last member"
+        );
+
+        s.remove_user(&UserId::Ip(1));
+        assert!(
+            s.channel("#rf").is_some(),
+            "a configured channel has to exist for a station to join it"
+        );
     }
 }

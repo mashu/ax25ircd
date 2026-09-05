@@ -113,8 +113,12 @@ KILL <nick>          OPER only
 After `OPER`:
 
 ```
-RADIO STATUS              transmitter, frames, stations heard
-RADIO OFF / ON            kill switch; IRC keeps running
+RADIO STATUS              transmitter, frames, stations heard, duty cycle
+RADIO DUTY                airtime spent, backlog, limits in force, PA cooldown
+RADIO QUEUE               everything accepted but not yet transmitted
+RADIO LIMIT DUTY <1-50|off>    lower the duty cycle now, no restart
+RADIO LIMIT PACING <ms|off>    widen the gap between transmissions
+RADIO OFF / ON            kill switch; purges the transmit queue
 RADIO ID                  identify now
 RADIO HEARD               stations, last heard, queue depth
 RADIO MAIL                held private messages (in memory, expires)

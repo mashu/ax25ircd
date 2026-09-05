@@ -59,6 +59,13 @@ pub struct ListenConfig {
     /// Simultaneous IP connections from one host. 0 disables the cap.
     #[serde(default = "default_max_conns_per_host")]
     pub max_conns_per_host: u32,
+    /// Simultaneous IP connections in total. 0 disables the cap.
+    ///
+    /// `max_conns_per_host` alone does not bound anything: an attacker with a
+    /// hundred source addresses is under the per-host limit on every one of
+    /// them. This is the limit that actually caps memory.
+    #[serde(default = "default_max_clients")]
+    pub max_clients: usize,
 }
 
 impl Default for ListenConfig {
@@ -68,6 +75,7 @@ impl Default for ListenConfig {
             ping_interval_secs: default_ping_interval(),
             registration_timeout_secs: default_registration_timeout(),
             max_conns_per_host: default_max_conns_per_host(),
+            max_clients: default_max_clients(),
         }
     }
 }
@@ -121,6 +129,11 @@ pub struct RadioConfig {
     /// Held messages older than this are dropped.
     #[serde(default = "default_mailbox_ttl")]
     pub mailbox_ttl_secs: u64,
+    /// Held messages delivered per exchange with a station. The rest wait for
+    /// the next thing the station sends, so its own activity paces delivery
+    /// rather than one HELLO releasing a minute of transmitting.
+    #[serde(default = "default_mailbox_flush_batch")]
+    pub mailbox_flush_batch: usize,
     /// Re-transmit messages that arrived from RF back onto RF, so that
     /// stations hidden from each other but both audible to the gateway can
     /// hold a conversation. Doubles the airtime of every RF message; leave it
@@ -130,6 +143,138 @@ pub struct RadioConfig {
     /// NOTICE the sender when a channel message is actually put on the air.
     #[serde(default = "default_true")]
     pub notice_air_relay: bool,
+    /// Airtime the transmit queue may hold before new traffic is refused.
+    ///
+    /// This is the backlog limit, and it is deliberately in *seconds of
+    /// airtime* rather than a frame count: sixty short frames and six long
+    /// ones are very different amounts of transmitting. When the backlog is
+    /// full, senders are told so immediately instead of having their message
+    /// accepted and silently dropped at the transmitter minutes later.
+    #[serde(default = "default_max_queued_airtime")]
+    pub max_queued_airtime_secs: u64,
+    /// Most names sent in reply to an explicit `NAMES` from a station.
+    /// Member lists are never sent unasked.
+    #[serde(default = "default_rf_names_max")]
+    pub rf_names_max: usize,
+    /// External transmit interlock: a command that decides whether it is safe
+    /// to key up at all. See [`InterlockConfig`].
+    #[serde(default)]
+    pub interlock: Option<InterlockConfig>,
+    /// Airtime and duty-cycle limits. These protect the transmitter's finals
+    /// and the shared channel; they are not the same thing as the per-user
+    /// rate limits in `[policy]`.
+    #[serde(default)]
+    pub duty: DutyConfig,
+}
+
+/// A command that says whether it is safe to transmit.
+///
+/// ax25ircd cannot see the radio — it speaks KISS to a modem, and KISS carries
+/// frames, not SWR readings — so the check is the operator's to supply. While
+/// it fails, nothing is transmitted, station identification included.
+///
+/// The check fails closed: a command that cannot be run, times out, or has
+/// not run yet counts as a failure.
+///
+/// ```toml
+/// [radio.interlock]
+/// command = "/usr/local/bin/check-swr"
+/// args = ["--max", "2.5"]
+/// interval_secs = 30
+/// timeout_secs = 5
+/// ```
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InterlockConfig {
+    /// Executable to run. Not a shell line: use `sh -c "..."` in `args` if
+    /// you want shell syntax.
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default = "default_interlock_interval")]
+    pub interval_secs: u64,
+    #[serde(default = "default_interlock_timeout")]
+    pub timeout_secs: u64,
+}
+
+/// Transmitter airtime limits. Defaults are sized for a QRP HF station
+/// (a QMX-class radio at 300 baud) because that is the configuration most
+/// likely to be damaged by getting this wrong.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DutyConfig {
+    /// Turn the governor off entirely. Only reasonable into a dummy load.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// On-air symbol rate. 300 for HF SSB packet, 1200 for VHF FM.
+    #[serde(default = "default_duty_baud")]
+    pub baud: u32,
+    /// Keyed-but-idle time either side of the data, in milliseconds.
+    ///
+    /// This is the single source of truth for the station's key-up timing: the
+    /// governor prices every frame with it, *and* it is pushed to the TNC as
+    /// the KISS TXDELAY and TXTAIL parameters at connect, so the model and the
+    /// hardware cannot disagree. At 300 baud these are a significant fraction
+    /// of a short frame. KISS carries them in 10 ms units, so the ceiling is
+    /// 2550 ms.
+    #[serde(default = "default_txdelay_ms")]
+    pub txdelay_ms: u64,
+    #[serde(default = "default_txtail_ms")]
+    pub txtail_ms: u64,
+    /// Sliding window the duty cycle is measured over.
+    #[serde(default = "default_duty_window")]
+    pub window_secs: u64,
+    /// Percentage of that window the station may be keyed for.
+    #[serde(default = "default_max_duty_percent")]
+    pub max_duty_percent: u32,
+    /// Longest unbroken transmit run before the transmitter is forced off to
+    /// let the power amplifier cool.
+    #[serde(default = "default_max_continuous")]
+    pub max_continuous_secs: u64,
+    /// How long that enforced cooldown lasts.
+    #[serde(default = "default_cooldown")]
+    pub cooldown_secs: u64,
+    /// Hard airtime ceiling per rolling hour. 0 disables it.
+    #[serde(default = "default_hourly_airtime")]
+    pub hourly_airtime_secs: u64,
+    /// A frame the governor has held longer than this is dropped instead of
+    /// being transmitted late. Stale traffic costs airtime and says nothing.
+    #[serde(default = "default_max_hold")]
+    pub max_hold_secs: u64,
+}
+
+impl Default for DutyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            baud: default_duty_baud(),
+            txdelay_ms: default_txdelay_ms(),
+            txtail_ms: default_txtail_ms(),
+            window_secs: default_duty_window(),
+            max_duty_percent: default_max_duty_percent(),
+            max_continuous_secs: default_max_continuous(),
+            cooldown_secs: default_cooldown(),
+            hourly_airtime_secs: default_hourly_airtime(),
+            max_hold_secs: default_max_hold(),
+        }
+    }
+}
+
+impl DutyConfig {
+    pub fn to_airtime(&self) -> crate::ax25::AirtimeConfig {
+        crate::ax25::AirtimeConfig {
+            enabled: self.enabled,
+            baud: self.baud.max(1),
+            txdelay: Duration::from_millis(self.txdelay_ms),
+            txtail: Duration::from_millis(self.txtail_ms),
+            window: Duration::from_secs(self.window_secs.max(1)),
+            max_duty: (self.max_duty_percent.min(100) as f64) / 100.0,
+            max_continuous: Duration::from_secs(self.max_continuous_secs.max(1)),
+            cooldown: Duration::from_secs(self.cooldown_secs),
+            hourly_budget: Duration::from_secs(self.hourly_airtime_secs),
+            max_hold: Duration::from_secs(self.max_hold_secs.max(1)),
+        }
+    }
 }
 
 impl Default for RadioConfig {
@@ -156,12 +301,23 @@ pub struct TncSection {
     pub kiss_port: u8,
     #[serde(default = "default_tx_pacing")]
     pub tx_pacing_ms: u64,
-    #[serde(default)]
-    pub txdelay: Option<u8>,
+    /// KISS channel-access parameters, pushed to the TNC at connect.
+    ///
+    /// TXDELAY and TXTAIL are deliberately *not* here: they are key-down time,
+    /// the governor has to know them to price a frame, and two places to write
+    /// the same physical quantity is two places to get it wrong. They live in
+    /// `[radio.duty]` and are pushed from there.
     #[serde(default)]
     pub persistence: Option<u8>,
     #[serde(default)]
     pub slottime: Option<u8>,
+    /// Accepted only so that a configuration written before these moved gets
+    /// an explanation instead of serde's "unknown field `txdelay`". Setting
+    /// either is an error; see [`Config::validate`].
+    #[serde(default)]
+    pub txdelay: Option<u8>,
+    #[serde(default)]
+    pub txtail: Option<u8>,
 }
 
 impl Default for TncSection {
@@ -174,9 +330,10 @@ impl Default for TncSection {
             baud: default_baud(),
             kiss_port: 0,
             tx_pacing_ms: default_tx_pacing(),
-            txdelay: None,
             persistence: None,
             slottime: None,
+            txdelay: None,
+            txtail: None,
         }
     }
 }
@@ -193,9 +350,15 @@ pub struct PolicyConfig {
     pub rf_msgs_per_min: u32,
     #[serde(default = "default_rf_burst")]
     pub rf_burst: u32,
-    /// Same, for IP users sending into an RF-bridged channel.
+    /// Same, for IP users sending into an RF-bridged channel. Keyed on the
+    /// user's host, not their nickname — `/nick` is free.
     #[serde(default = "default_ip_msgs_per_min")]
     pub ip_to_rf_msgs_per_min: u32,
+    /// Burst allowance for the limit above. It used to share `rf_burst` with
+    /// the per-station limiter, which meant raising one silently raised the
+    /// other and neither doc comment said so.
+    #[serde(default = "default_ip_to_rf_burst")]
+    pub ip_to_rf_burst: u32,
     /// Refuse to transmit text that looks like ciphertext or base64. Amateur
     /// rules in most countries forbid obscuring the meaning of a message.
     #[serde(default = "default_true")]
@@ -216,6 +379,14 @@ pub struct PolicyConfig {
     pub ip_cmds_per_min: u32,
     #[serde(default = "default_ip_cmd_burst")]
     pub ip_cmd_burst: u32,
+    /// Most AX.25 frames one radiated message may be split into.
+    ///
+    /// The real limit on message length, and stricter than
+    /// `max_rf_text_len`: fragmentation multiplies both the airtime and the
+    /// chance of loss, and a lost fragment costs the whole message. Two frames
+    /// is a sentence, which is what packet is for.
+    #[serde(default = "default_max_rf_fragments")]
+    pub max_rf_fragments: usize,
     /// IDENTIFY / REGISTER / OPER guesses per minute per host.
     #[serde(default = "default_identify_per_min")]
     pub identify_per_min: u32,
@@ -230,6 +401,7 @@ impl Default for PolicyConfig {
             rf_msgs_per_min: default_rf_msgs_per_min(),
             rf_burst: default_rf_burst(),
             ip_to_rf_msgs_per_min: default_ip_msgs_per_min(),
+            ip_to_rf_burst: default_ip_to_rf_burst(),
             block_apparent_ciphertext: true,
             deny_callsigns: Vec::new(),
             allow_callsigns: Vec::new(),
@@ -237,6 +409,7 @@ impl Default for PolicyConfig {
             rf_channel_burst: default_rf_channel_burst(),
             ip_cmds_per_min: default_ip_cmds_per_min(),
             ip_cmd_burst: default_ip_cmd_burst(),
+            max_rf_fragments: default_max_rf_fragments(),
             identify_per_min: default_identify_per_min(),
             identify_burst: default_identify_burst(),
         }
@@ -313,6 +486,21 @@ impl Config {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        for (old, new) in [
+            (self.radio.tnc.txdelay, "txdelay_ms"),
+            (self.radio.tnc.txtail, "txtail_ms"),
+        ] {
+            if let Some(v) = old {
+                anyhow::bail!(
+                    "radio.tnc.{} has moved to radio.duty.{new}, in milliseconds rather than \
+                     10 ms units: write `{new} = {}` under [radio.duty]. It lives there because \
+                     the airtime governor prices every frame with it and then pushes it to the \
+                     TNC, so the two cannot disagree.",
+                    new.trim_end_matches("_ms"),
+                    u32::from(v) * 10
+                );
+            }
+        }
         if self.server.name.trim().is_empty() {
             anyhow::bail!("server.name must be set");
         }
@@ -324,9 +512,44 @@ impl Config {
         if self.listen.registration_timeout_secs == 0 {
             anyhow::bail!("listen.registration_timeout_secs must be at least 1");
         }
+        // Each of these parses happily and then makes the server unusable in a
+        // way that is hard to diagnose from a client: no nickname is ever
+        // valid, no channel can be joined, every radiated message is an
+        // ellipsis, or any password at all is accepted for a registered nick.
+        if self.server.max_nick_len == 0 {
+            anyhow::bail!("server.max_nick_len must be at least 1, or no nickname is valid");
+        }
+        if self.server.max_channels_per_user == 0 {
+            anyhow::bail!(
+                "server.max_channels_per_user must be at least 1, or nobody can join anything"
+            );
+        }
+        if self.accounts.min_password_len == 0 {
+            anyhow::bail!(
+                "accounts.min_password_len must be at least 1: an empty password on a nick \
+                 that a control operator can grant RF-TX to is not a password"
+            );
+        }
+        if self.policy.max_rf_text_len == 0 {
+            anyhow::bail!(
+                "policy.max_rf_text_len must be at least 1, or every radiated message is \
+                 truncated to nothing"
+            );
+        }
+        let mut seen: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
         for ch in &self.channels {
             if !crate::irc::message::is_channel_name(&ch.name) {
                 anyhow::bail!("invalid channel name: {}", ch.name);
+            }
+            // Channel names are compared case-insensitively, so two entries
+            // that differ only in case are one channel — and the second one's
+            // settings would be silently discarded, `rf = true` included.
+            if let Some(first) = seen.insert(crate::irc::message::lower(&ch.name), &ch.name) {
+                anyhow::bail!(
+                    "channels {first} and {} are the same channel: names are compared \
+                     case-insensitively, so only one of them would exist",
+                    ch.name
+                );
             }
         }
         if !self.radio.enabled {
@@ -360,8 +583,95 @@ impl Config {
         if self.radio.paclen < 32 || self.radio.paclen > 256 {
             anyhow::bail!("radio.paclen must be between 32 and 256");
         }
+        if self.policy.max_rf_fragments == 0 {
+            anyhow::bail!("policy.max_rf_fragments must be at least 1");
+        }
+        if self.radio.max_queued_airtime_secs == 0 {
+            anyhow::bail!("radio.max_queued_airtime_secs must be at least 1");
+        }
+        if let Some(i) = &self.radio.interlock {
+            if i.command.trim().is_empty() {
+                anyhow::bail!("radio.interlock.command must be set");
+            }
+            if i.interval_secs == 0 || i.timeout_secs == 0 {
+                anyhow::bail!("radio.interlock interval_secs and timeout_secs must be at least 1");
+            }
+            if i.timeout_secs >= i.interval_secs {
+                anyhow::bail!(
+                    "radio.interlock.timeout_secs ({}) must be less than interval_secs ({}), \
+                     or checks would overlap",
+                    i.timeout_secs,
+                    i.interval_secs
+                );
+            }
+        }
         if self.channels.iter().all(|c| !c.rf) {
             anyhow::bail!("radio.enabled is true but no channel has rf = true");
+        }
+
+        let duty = &self.radio.duty;
+        if !duty.enabled && self.radio.tnc.kind != "loopback" {
+            anyhow::bail!(
+                "radio.duty.enabled = false with a real transmitter: there would be nothing \
+                 limiting how long the finals are keyed. It is only allowed with \
+                 radio.tnc.kind = \"loopback\"."
+            );
+        }
+        if duty.enabled {
+            let ceiling = (crate::ax25::airtime::HARD_MAX_DUTY * 100.0) as u32;
+            if duty.max_duty_percent == 0 || duty.max_duty_percent > ceiling {
+                anyhow::bail!(
+                    "radio.duty.max_duty_percent must be between 1 and {ceiling}. \
+                     A transceiver keyed for more than half the time cooks its finals, \
+                     and an automatically controlled station has nobody watching it."
+                );
+            }
+            if duty.window_secs == 0 {
+                anyhow::bail!("radio.duty.window_secs must be at least 1");
+            }
+            if duty.max_continuous_secs == 0 {
+                anyhow::bail!("radio.duty.max_continuous_secs must be at least 1");
+            }
+            if duty.baud == 0 {
+                anyhow::bail!("radio.duty.baud must be at least 1");
+            }
+            // These are pushed to the TNC as KISS parameters, which carry them
+            // in 10 ms units in a single octet.
+            for (name, v) in [
+                ("txdelay_ms", duty.txdelay_ms),
+                ("txtail_ms", duty.txtail_ms),
+            ] {
+                if v > 2550 {
+                    anyhow::bail!(
+                        "radio.duty.{name} is {v} ms; KISS carries it in 10 ms units in one \
+                         octet, so the maximum is 2550"
+                    );
+                }
+            }
+            let air = duty.to_airtime();
+            // The window average is only half the story: the run and cooldown
+            // settings are an independent way to hold the transmitter keyed.
+            air.check_hardware_safe().map_err(|e| anyhow::anyhow!("radio.duty: {e}"))?;
+            // A frame the governor can never fit inside its own allowance
+            // would be deferred until `max_hold` and then dropped, forever.
+            let biggest = crate::ax25::Governor::new(air.clone())
+                .airtime_for(self.radio.paclen + 64);
+            let allowance = air.window.mul_f64(air.effective_duty());
+            if biggest > allowance {
+                anyhow::bail!(
+                    "radio.duty: a full-length frame is {:.1}s of airtime but the duty allowance \
+                     is only {:.1}s per {}s window; raise max_duty_percent or window_secs, or \
+                     lower paclen — otherwise nothing would ever be transmitted",
+                    biggest.as_secs_f64(),
+                    allowance.as_secs_f64(),
+                    air.window.as_secs()
+                );
+            }
+            if !air.hourly_budget.is_zero() && biggest > air.hourly_budget {
+                anyhow::bail!(
+                    "radio.duty.hourly_airtime_secs is smaller than a single full-length frame"
+                );
+            }
         }
         for c in self
             .policy
@@ -463,11 +773,17 @@ fn default_rf_burst() -> u32 {
 fn default_ip_msgs_per_min() -> u32 {
     10
 }
+fn default_ip_to_rf_burst() -> u32 {
+    4
+}
 fn default_true() -> bool {
     true
 }
 fn default_max_conns_per_host() -> u32 {
     8
+}
+fn default_max_clients() -> usize {
+    256
 }
 fn default_rf_channel_msgs() -> u32 {
     10
@@ -495,6 +811,51 @@ fn default_identify_per_min() -> u32 {
 }
 fn default_identify_burst() -> u32 {
     3
+}
+fn default_duty_baud() -> u32 {
+    300
+}
+fn default_txdelay_ms() -> u64 {
+    400
+}
+fn default_txtail_ms() -> u64 {
+    300
+}
+fn default_duty_window() -> u64 {
+    600
+}
+fn default_max_duty_percent() -> u32 {
+    25
+}
+fn default_max_continuous() -> u64 {
+    30
+}
+fn default_cooldown() -> u64 {
+    60
+}
+fn default_hourly_airtime() -> u64 {
+    900
+}
+fn default_max_hold() -> u64 {
+    120
+}
+fn default_max_queued_airtime() -> u64 {
+    60
+}
+fn default_rf_names_max() -> usize {
+    8
+}
+fn default_mailbox_flush_batch() -> usize {
+    1
+}
+fn default_interlock_interval() -> u64 {
+    30
+}
+fn default_interlock_timeout() -> u64 {
+    5
+}
+fn default_max_rf_fragments() -> usize {
+    2
 }
 
 #[cfg(test)]

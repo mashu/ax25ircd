@@ -1,10 +1,12 @@
 //! The server actor: one task, one state, one ordering of events.
 
 pub mod commands;
+pub mod bridge;
+pub mod clients;
 pub mod mailbox;
+pub mod radio;
 pub mod state;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -12,15 +14,16 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::accounts::Accounts;
-use crate::airc::{encode_fields, AircFrame, Kind, SessionConfig, Sessions};
+use crate::airc::{encode_fields, Kind};
 use crate::audit::Audit;
 use crate::ax25::{Ax25Frame, TncHandle};
 use crate::callsign::Callsign;
 use crate::config::Config;
-use crate::irc::message::{lower, Message};
+use crate::irc::message::{is_channel_name, lower, Message};
 use crate::policy::Policy;
 
-use mailbox::Mailbox;
+pub use clients::Clients;
+pub use radio::{Radio, Stats, TxClass};
 use state::{ClientId, State, User, UserId};
 
 /// Everything that can happen to the server, from any source.
@@ -29,7 +32,7 @@ pub enum Event {
     Connected {
         id: ClientId,
         host: String,
-        out: mpsc::UnboundedSender<String>,
+        out: mpsc::Sender<String>,
         /// Fired by the server when it drops the user (QUIT/KILL/timeout)
         /// so the connection task actually closes the socket.
         hangup: Option<oneshot::Sender<()>>,
@@ -64,10 +67,7 @@ pub enum AuthKind {
     Unregister,
 }
 
-struct IpLink {
-    out: mpsc::UnboundedSender<String>,
-    hangup: Option<oneshot::Sender<()>>,
-}
+
 
 /// A thing that happened, in a form that can be rendered either as IRC text or
 /// as an on-air AIRC frame. Keeping these separate from the wire formats is
@@ -81,6 +81,10 @@ pub enum Delivery {
         target: String,
         text: String,
         notice: bool,
+        /// The text was shortened by a policy limit before transmission. IRC
+        /// clients see the ellipsis; RF stations get the protocol's
+        /// `TRUNCATED` flag as well, so a station can render it distinctly.
+        truncated: bool,
     },
     Join {
         nick: String,
@@ -111,67 +115,70 @@ pub enum Delivery {
     },
 }
 
-#[derive(Default, Debug, Clone)]
-pub struct Stats {
-    pub rf_frames_rx: u64,
-    pub rf_frames_tx: u64,
-    pub rf_frames_dropped: u64,
-    pub rf_bytes_tx: u64,
-    pub ip_connections: u64,
-}
-
+/// The server actor.
+///
+/// It owns no radio and no socket of its own: it coordinates subsystems that
+/// each own their own data and enforce their own invariants.
+///
+/// * [`State`] — users, nicks, channels. Who exists and where.
+/// * [`Radio`] — everything about putting something on the air, including the
+///   airtime budget and the obligation to identify. Nothing else transmits.
+/// * [`Policy`] — rate limits and what may be radiated at all.
+/// * [`Accounts`] — registered nicknames.
+///
+/// Keeping them separate is what stops "may this be transmitted?" from being
+/// answered in four places with four slightly different answers.
 pub struct Server {
     pub config: Arc<Config>,
     pub state: State,
     pub policy: Policy,
-    pub sessions: Sessions,
-    /// Messages held for stations that are out of range.
-    pub mailbox: Mailbox,
-    pub stats: Stats,
+    pub radio: Radio,
     pub accounts: Accounts,
     pub audit: Audit,
-    tnc: Option<TncHandle>,
-    outputs: HashMap<ClientId, IpLink>,
+    clients: Clients,
     /// Used to run Argon2 off this task. Tests leave it unset and hash inline.
     events: Option<mpsc::Sender<Event>>,
-    /// Runtime kill switch for the transmitter (`RADIO OFF`). The control
-    /// operator must be able to stop the station radiating, immediately,
-    /// without killing the IRC side.
-    pub rf_enabled: bool,
-    last_id: Instant,
-    transmitted_since_id: bool,
     started: SystemTime,
 }
 
 impl Server {
     pub fn new(config: Arc<Config>, tnc: Option<TncHandle>) -> Self {
-        let sessions = Sessions::new(SessionConfig {
-            paclen: config.radio.paclen,
-            ack_timeout: Duration::from_secs(config.radio.ack_timeout_secs),
-            max_retries: config.radio.max_retries,
-            peer_idle_timeout: Duration::from_secs(config.radio.peer_idle_timeout_secs),
-            ..Default::default()
-        });
+        let audit = Audit::open(config.logging.audit_file.as_deref());
+        let radio = Radio::new(config.clone(), tnc, audit.clone());
+
         let mut state = State::default();
         for ch in &config.channels {
             let chan = state.ensure_channel(&ch.name, ch.rf);
+            chan.configured = true;
             if !ch.topic.is_empty() {
                 chan.topic = Some(ch.topic.clone());
                 chan.topic_setter = config.server.name.clone();
             }
-            chan.operators = ch
-                .operators
-                .iter()
-                .map(|n| lower(n))
-                .collect();
+            chan.operators = ch.operators.iter().map(|n| lower(n)).collect();
         }
-        let policy = Policy::new(config.policy.clone());
-        let mailbox = Mailbox::new(
-            config.radio.mailbox_enabled,
-            config.radio.mailbox_per_station,
-            config.radio.mailbox_total,
-            Duration::from_secs(config.radio.mailbox_ttl_secs),
-        );
+
+        // The configured text length is only an upper bound. What actually
+        // decides the airtime is how many AX.25 frames the message becomes,
+        // so clamp the text limit to whatever fits in `max_rf_fragments`
+        // frames at this paclen. Fragmentation multiplies the airtime *and*
+        // the loss rate — a message is only delivered if every fragment
+        // arrives, and a retry resends all of them.
+        let mut policy_config = config.policy.clone();
+        // Leave room for the AIRC field separators and the target/sender
+        // fields that ride along with the text.
+        let fragment_cap = radio
+            .max_payload()
+            .saturating_mul(policy_config.max_rf_fragments.max(1))
+            .saturating_sub(48);
+        if fragment_cap > 0 && fragment_cap < policy_config.max_rf_text_len {
+            info!(
+                "capping RF message length to {fragment_cap} characters: \
+                 policy.max_rf_fragments = {} at paclen {}",
+                policy_config.max_rf_fragments, config.radio.paclen
+            );
+            policy_config.max_rf_text_len = fragment_cap;
+        }
+
         let accounts = match Accounts::load(&config.accounts.file) {
             Ok(a) => a,
             Err(e) => {
@@ -182,22 +189,16 @@ impl Server {
                 Accounts::empty(&config.accounts.file)
             }
         };
-        let audit = Audit::open(config.logging.audit_file.as_deref());
+
         Self {
-            rf_enabled: config.radio.enabled && tnc.is_some(),
             config,
             state,
-            policy,
-            sessions,
-            mailbox,
-            stats: Stats::default(),
+            policy: Policy::new(policy_config),
+            radio,
             accounts,
+            clients: Clients::new(audit.clone()),
             audit,
-            tnc,
-            outputs: HashMap::new(),
             events: None,
-            last_id: Instant::now(),
-            transmitted_since_id: false,
             started: SystemTime::now(),
         }
     }
@@ -225,22 +226,34 @@ impl Server {
                 out,
                 hangup,
             } => {
-                let cap = self.config.listen.max_conns_per_host;
-                if cap > 0 && self.state.ip_count_from_host(&host) >= cap as usize {
-                    let _ = out.send(format!(
-                        "ERROR :Too many connections from {host} (max {cap})"
-                    ));
+                // Two caps, because the per-host one bounds nothing on its
+                // own: an attacker with a hundred source addresses is under it
+                // on every one of them.
+                let total = self.config.listen.max_clients;
+                let per_host = self.config.listen.max_conns_per_host;
+                let refuse = if total > 0 && self.state.ip_users() >= total {
+                    Some(("max_clients", format!("ERROR :Server is full (max {total} clients)")))
+                } else if per_host > 0
+                    && self.state.ip_count_from_host(&host) >= per_host as usize
+                {
+                    Some((
+                        "max_conns_per_host",
+                        format!("ERROR :Too many connections from {host} (max {per_host})"),
+                    ))
+                } else {
+                    None
+                };
+                if let Some((reason, message)) = refuse {
+                    let _ = out.try_send(message);
                     if let Some(h) = hangup {
                         let _ = h.send(());
                     }
-                    self.audit.event(
-                        "connect_denied",
-                        &[("host", &host), ("reason", "max_conns_per_host")],
-                    );
+                    self.audit
+                        .event("connect_denied", &[("host", &host), ("reason", reason)]);
                     return;
                 }
-                self.outputs.insert(id, IpLink { out, hangup });
-                self.stats.ip_connections += 1;
+                self.clients.insert(id, out, hangup);
+                self.radio.stats.ip_connections += 1;
                 let id_s = id.to_string();
                 self.audit.event("connect", &[("id", &id_s), ("host", &host)]);
                 let user = User::new(UserId::Ip(id), host, now);
@@ -281,9 +294,9 @@ impl Server {
     }
 
     fn tick(&mut self, now: Instant) {
-        let outcome = self.sessions.tick(now);
+        let outcome = self.radio.sessions.tick(now);
         for (call, frame) in outcome.transmit {
-            self.transmit_to(&call, frame);
+            self.radio.transmit_to(&call, frame);
         }
         for call in outcome.lost {
             let uid = UserId::Rf(call.clone());
@@ -293,11 +306,11 @@ impl Server {
             }
         }
         self.policy.expire(now);
-        let dropped = self.mailbox.expire(now);
+        let dropped = self.radio.mailbox.expire(now);
         if dropped > 0 {
             debug!("{dropped} held messages expired");
         }
-        self.maybe_identify(now);
+        self.radio.maybe_identify(now);
         self.expire_unregistered(now);
         self.expire_unidentified(now);
     }
@@ -341,10 +354,13 @@ impl Server {
                 .user(&uid)
                 .map(|u| u.nick.clone())
                 .unwrap_or_default();
-            let guest = format!("Guest{}", match uid {
-                UserId::Ip(id) => id,
-                UserId::Rf(_) => 0,
-            });
+            let guest = guest_nick(
+                match uid {
+                    UserId::Ip(id) => id,
+                    UserId::Rf(_) => 0,
+                },
+                self.config.server.max_nick_len,
+            );
             if let Some(u) = self.state.user_mut(&uid) {
                 u.identify_by = None;
             }
@@ -379,43 +395,27 @@ impl Server {
     fn shutdown(&mut self) {
         // Identify at the end of a transmission series, as required of an
         // automatically controlled station.
-        if self.transmitted_since_id {
-            self.send_id();
-        }
-        for id in self.outputs.keys().copied().collect::<Vec<_>>() {
-            self.send_raw(id, format!("ERROR :Server shutting down"));
+        self.radio.id_if_needed();
+        for id in self.clients.ids() {
+            self.send_raw(id, "ERROR :Server shutting down".to_string());
         }
     }
 
     // ------------------------------------------------------------- IP output
 
-    pub fn send_raw(&mut self, id: ClientId, line: String) {
-        if let Some(link) = self.outputs.get(&id) {
-            if link.out.send(line).is_err() {
-                self.drop_ip_link(id);
-            }
-        }
-    }
 
-    /// Close the TCP connection. Dropping the output channel stops the writer;
-    /// firing `hangup` stops the reader, so the socket is not left as a zombie
-    /// that no longer counts toward `max_conns_per_host`.
-    fn drop_ip_link(&mut self, id: ClientId) {
-        if let Some(link) = self.outputs.remove(&id) {
-            if let Some(h) = link.hangup {
-                let _ = h.send(());
-            }
-        }
-    }
 
-    pub fn send_to(&mut self, uid: &UserId, msg: Message) {
-        if let UserId::Ip(id) = uid {
-            self.send_raw(*id, msg.to_string());
-        }
-    }
 
     /// Send a numeric reply. RF users never receive numerics: they are pure
     /// airtime with no information a small screen needs.
+    /// Write one line to an IP client.
+    ///
+    /// Delegates to [`Clients`], which owns the bounded-queue rule. Kept here
+    /// because it is the primitive every command path uses.
+    pub fn send_raw(&mut self, id: ClientId, line: String) {
+        self.clients.send(id, line);
+    }
+
     pub fn numeric(&mut self, uid: &UserId, code: &str, params: &[&str]) {
         let UserId::Ip(id) = uid else { return };
         let nick = self
@@ -442,9 +442,13 @@ impl Server {
                 self.send_raw(*id, msg.to_string());
             }
             UserId::Rf(call) => {
+                // A server notice to a station is a courtesy, not a message
+                // somebody sent. Keep it to one frame and do not retry it:
+                // "your message was shortened" is not worth four transmissions.
                 let call = call.clone();
-                let payload = encode_fields(&["*", text]);
-                self.unicast(&call, Kind::Notice, payload, true);
+                let text: String = text.chars().take(80).collect();
+                let payload = encode_fields(&["*", &text]);
+                self.radio.unicast(&call, Kind::Notice, payload, false, TxClass::Control);
             }
         }
     }
@@ -469,25 +473,33 @@ impl Server {
                 target,
                 text,
                 notice,
+                truncated,
                 ..
             } => {
                 let kind = if *notice { Kind::Notice } else { Kind::Msg };
                 let payload = encode_fields(&[target, from_nick, text]);
+                let flags = if *truncated {
+                    crate::airc::frame::flags::TRUNCATED
+                } else {
+                    0
+                };
                 // Channel traffic goes out once as a broadcast; a private
                 // message is unicast and acknowledged.
-                if target.starts_with('#') || target.starts_with('&') {
-                    self.broadcast(kind, payload);
+                if is_channel_name(target) {
+                    self.radio.broadcast_flagged(kind, payload, TxClass::Chat, flags);
                 } else {
-                    self.unicast(call, kind, payload, true);
+                    self.radio.unicast_flagged(call, kind, payload, true, TxClass::Direct, flags);
                 }
             }
+            // Presence is off by default and is the lowest-value traffic
+            // there is: a transmission to say somebody opened a window.
             Delivery::Join { nick, channel, .. } if self.config.radio.presence_notices => {
                 let payload = encode_fields(&[channel, nick, "+"]);
-                self.broadcast(Kind::Presence, payload);
+                self.radio.broadcast(Kind::Presence, payload, TxClass::Chat);
             }
             Delivery::Part { nick, channel, .. } if self.config.radio.presence_notices => {
                 let payload = encode_fields(&[channel, nick, "-"]);
-                self.broadcast(Kind::Presence, payload);
+                self.radio.broadcast(Kind::Presence, payload, TxClass::Chat);
             }
             Delivery::Topic {
                 nick,
@@ -495,8 +507,9 @@ impl Server {
                 topic,
                 ..
             } => {
-                let payload = encode_fields(&[channel, nick, topic]);
-                self.broadcast(Kind::Notice, payload);
+                let topic: String = topic.chars().take(64).collect();
+                let payload = encode_fields(&[channel, nick, &topic]);
+                self.radio.broadcast(Kind::Notice, payload, TxClass::Chat);
             }
             // Quits, nick changes and (by default) presence are not worth the
             // airtime.
@@ -556,135 +569,23 @@ impl Server {
 
     // ------------------------------------------------------------------- RF
 
-    pub fn rf_available(&self) -> bool {
-        self.rf_enabled && self.tnc.is_some()
-    }
 
-    /// Unreliable one-to-many transmission addressed to the protocol's
-    /// destination address. Every station in range hears it once.
-    pub fn broadcast(&mut self, kind: Kind, payload: Vec<u8>) {
-        if !self.rf_available() {
-            return;
-        }
-        let seq = self.sessions.next_seq();
-        let max = self.sessions.config.max_payload();
-        let chunks: Vec<Vec<u8>> = if payload.is_empty() {
-            vec![Vec::new()]
-        } else {
-            payload.chunks(max).map(|c| c.to_vec()).collect()
-        };
-        if chunks.len() > u8::MAX as usize {
-            self.stats.rf_frames_dropped += 1;
-            return;
-        }
-        let total = chunks.len() as u8;
-        let dest: Callsign = self
-            .config
-            .radio
-            .destination
-            .parse()
-            .unwrap_or_else(|_| "AIRC".parse().unwrap());
-        for (i, chunk) in chunks.into_iter().enumerate() {
-            let mut f = AircFrame::new(kind, seq, chunk);
-            f.frag_index = i as u8;
-            f.frag_total = total;
-            self.transmit_direct(&dest, f);
-        }
-    }
 
-    /// Reliable one-to-one transmission with ACK and retry.
-    pub fn unicast(&mut self, dst: &Callsign, kind: Kind, payload: Vec<u8>, reliable: bool) {
-        if !self.rf_available() {
-            return;
-        }
-        let now = Instant::now();
-        let frames = self.sessions.send(dst, kind, payload, reliable, now);
-        for f in frames {
-            self.transmit_direct(dst, f);
-        }
-    }
 
-    fn transmit_to(&mut self, dst: &Callsign, frame: AircFrame) {
-        self.transmit_direct(dst, frame);
-    }
 
-    pub(crate) fn transmit_direct(&mut self, dest: &Callsign, frame: AircFrame) {
-        let (Some(tnc), Some(source)) = (self.tnc.as_ref(), self.config.gateway_callsign()) else {
-            return;
-        };
-        if !self.rf_enabled {
-            return;
-        }
-        let info = frame.encode();
-        let ax = match Ax25Frame::ui(source, dest.clone(), &self.config.rf_path(), info) {
-            Ok(f) => f,
-            Err(e) => {
-                warn!("cannot build AX.25 frame: {e}");
-                return;
-            }
-        };
-        let len = ax.encode().len();
-        if tnc.try_send(ax) {
-            self.stats.rf_frames_tx += 1;
-            self.stats.rf_bytes_tx += len as u64;
-            self.transmitted_since_id = true;
-            let kind = format!("{:?}", frame.kind);
-            let n = len.to_string();
-            let dest_s = dest.to_string();
-            self.audit.event(
-                "rf_tx",
-                &[("dest", &dest_s), ("kind", &kind), ("bytes", &n)],
-            );
-        } else {
-            self.stats.rf_frames_dropped += 1;
-        }
-    }
 
-    /// Deliver anything that was held for a station we have just heard from.
-    /// Held messages are sent reliably, oldest first, and carry their age so
-    /// the operator knows they are not fresh.
-    pub(crate) fn flush_mailbox(&mut self, call: &Callsign) {
-        if self.mailbox.depth(call) == 0 {
-            return;
-        }
-        let now = Instant::now();
-        let nick = call.to_nick();
-        for m in self.mailbox.take(call) {
-            let age = m.age(now).as_secs().to_string();
-            let payload = encode_fields(&[&nick, &m.from, &m.text, &age]);
-            self.unicast(call, Kind::Stored, payload, true);
-        }
-    }
 
-    fn maybe_identify(&mut self, now: Instant) {
-        if !self.rf_available() {
-            return;
-        }
-        if now.duration_since(self.last_id) < self.config.id_interval() {
-            return;
-        }
-        // Only transmit an ID if we have actually transmitted. Identifying an
-        // idle station just adds QRM.
-        if self.transmitted_since_id {
-            self.send_id();
-        }
-        self.last_id = now;
-    }
 
-    fn send_id(&mut self) {
-        let text = format!(
-            "{} {}",
-            self.config.radio.callsign, self.config.radio.id_text
-        );
-        let payload = encode_fields(&[&text]);
-        let dest: Callsign = "ID".parse().unwrap();
-        let seq = self.sessions.next_seq();
-        let frame = AircFrame::new(Kind::Id, seq, payload);
-        self.transmit_direct(&dest, frame);
-        self.transmitted_since_id = false;
-        self.last_id = Instant::now();
-        debug!("station identification transmitted");
-    }
+
+
+
+
+
+
+
+
+
+
 
     // --------------------------------------------------------------- helpers
 
@@ -718,10 +619,10 @@ impl Server {
         };
         self.state.remove_user(uid);
         if let UserId::Ip(id) = uid {
-            self.drop_ip_link(*id);
+            self.clients.disconnect(*id);
         }
         if let UserId::Rf(call) = uid {
-            self.sessions.forget(call);
+            self.radio.sessions.forget(call);
         }
         for ch in rf_channels {
             if !self
@@ -749,9 +650,6 @@ impl Server {
         self.state.by_nick(name).map(|u| u.id.clone())
     }
 
-    pub fn is_rf_channel(&self, name: &str) -> bool {
-        self.state.channel(name).map(|c| c.rf).unwrap_or(false)
-    }
 
     /// May this IP user have a message radiated? RF stations always may:
     /// they are already on the air. An IP user needs RF-TX (OPER, or IDENTIFY
@@ -785,9 +683,6 @@ impl Server {
         }
     }
 
-    pub fn channel_key(&self, name: &str) -> String {
-        lower(name)
-    }
 
     pub fn is_chanop(&self, uid: &UserId, channel: &str) -> bool {
         if self.state.user(uid).map(|u| u.oper).unwrap_or(false) {
@@ -800,28 +695,6 @@ impl Server {
             .unwrap_or(false)
     }
 
-    pub fn radio_status_line(&self) -> String {
-        if !self.config.radio.enabled {
-            return "Radio gateway is disabled. This is a plain IRC server; nothing is radiated."
-                .into();
-        }
-        let call = &self.config.radio.callsign;
-        if !self.rf_enabled {
-            return format!(
-                "Radio gateway: transmitter OFF. Station {call}. Nothing is being radiated."
-            );
-        }
-        if !self.tnc.is_some() {
-            return format!("Radio gateway: no TNC. Station {call}. Nothing is being radiated.");
-        }
-        format!(
-            "Radio gateway: transmitter ON, station {call}, {} RF station(s) heard, {} frames TX / {} RX ({} bytes on air).",
-            self.sessions.peers().count(),
-            self.stats.rf_frames_tx,
-            self.stats.rf_frames_rx,
-            self.stats.rf_bytes_tx
-        )
-    }
 
     pub fn channel_air_line(&self, channel: &str) -> String {
         let Some(chan) = self.state.channel(channel) else {
@@ -830,7 +703,7 @@ impl Server {
         if !chan.rf {
             return format!("{channel} is Internet-only. Nothing here goes on the air.");
         }
-        if !self.rf_available() {
+        if !self.radio.available() {
             return format!(
                 "{channel} is +r (bridged) but the transmitter is OFF. Messages stay on IRC."
             );
@@ -912,7 +785,7 @@ impl Server {
                  everyone else is heard on IRC only."
             ),
         );
-        let status = self.radio_status_line();
+        let status = self.radio.status_line();
         self.notice_user(uid, &status);
         let air = self.channel_air_line(channel);
         if !air.is_empty() {
@@ -927,6 +800,29 @@ impl Server {
             }
         }
     }
+}
+
+/// The replacement name for a client that has to give up a registered nick.
+///
+/// `Guest_1`, not `Guest1`: the latter parses as a plausible callsign (letters
+/// and a digit), so it would sit in the namespace reserved for RF stations —
+/// the server would be handing out a nick it refuses when a client asks for
+/// one. The underscore is a legal nickname character and is never legal in a
+/// callsign.
+///
+/// It is also kept within `max_nick_len`, for the same reason: a name the
+/// server assigns must be a name the server would accept.
+pub fn guest_nick(id: u64, max_nick_len: usize) -> String {
+    let full = format!("Guest_{id}");
+    if full.len() <= max_nick_len {
+        return full;
+    }
+    // Keep the tail of the number: the low digits are what differ between
+    // nearby connection ids, so they are what keeps the name unique.
+    let room = max_nick_len.saturating_sub("Guest_".len());
+    let digits = id.to_string();
+    let tail = &digits[digits.len().saturating_sub(room)..];
+    format!("Guest_{tail}")
 }
 
 /// Render a delivery as an IRC protocol line.

@@ -16,18 +16,32 @@ use crate::server::Event;
 /// RFC 1459 line limit, including CRLF.
 const MAX_LINE: usize = 512;
 
+/// Lines buffered for one client before the server gives up on it. At 512
+/// bytes a line this is a ~0.5 MB ceiling per connection, which is enough to
+/// ride out a NAMES burst on a busy channel and far short of a client that has
+/// simply stopped reading.
+const OUTPUT_QUEUE: usize = 1024;
+
 #[derive(Clone)]
 pub struct ListenerOptions {
     pub ping_interval: Duration,
 }
 
+/// Accept IRC clients on an already-bound listener.
+///
+/// Binding is the caller's job so that a failure to bind is an error at
+/// startup rather than a line in a log nobody is reading, and so a test can
+/// ask the OS for a port.
 pub async fn listen(
-    addr: String,
+    listener: TcpListener,
     events: mpsc::Sender<Event>,
     ids: Arc<AtomicU64>,
     opts: ListenerOptions,
 ) -> std::io::Result<()> {
-    let listener = TcpListener::bind(&addr).await?;
+    let addr = listener
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| "?".into());
     info!(%addr, "listening for IRC clients");
     loop {
         let (stream, peer) = match listener.accept().await {
@@ -41,7 +55,7 @@ pub async fn listen(
         let events = events.clone();
         let opts = opts.clone();
         tokio::spawn(async move {
-            let host = peer.ip().to_string();
+            let host = display_host(peer.ip());
             if let Err(e) = serve(stream, id, host, events, opts).await {
                 debug!(client = id, "connection ended: {e}");
             }
@@ -58,7 +72,7 @@ async fn serve(
 ) -> std::io::Result<()> {
     stream.set_nodelay(true).ok();
     let (read_half, mut write_half) = stream.into_split();
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
+    let (out_tx, mut out_rx) = mpsc::channel::<String>(OUTPUT_QUEUE);
     let pinger = out_tx.clone();
     let (hangup_tx, mut hangup_rx) = oneshot::channel();
 
@@ -78,8 +92,7 @@ async fn serve(
     // Writer task.
     let writer = tokio::spawn(async move {
         while let Some(line) = out_rx.recv().await {
-            let mut buf = line.into_bytes();
-            buf.truncate(MAX_LINE - 2);
+            let mut buf = truncate_utf8(line, MAX_LINE - 2).into_bytes();
             buf.extend_from_slice(b"\r\n");
             if write_half.write_all(&buf).await.is_err() {
                 break;
@@ -131,7 +144,7 @@ async fn serve(
                     break;
                 }
                 awaiting_pong = true;
-                if pinger.send("PING :keepalive".to_string()).is_err() {
+                if pinger.try_send("PING :keepalive".to_string()).is_err() {
                     break;
                 }
             }
@@ -145,6 +158,37 @@ async fn serve(
     let _ = events.send(Event::Disconnected { id, reason }).await;
     writer.abort();
     Ok(())
+}
+
+/// How a peer address is shown to IRC clients.
+///
+/// IPv6 addresses are bracketed, as in a URI. An IRC middle parameter may not
+/// begin with a colon — that is what marks the trailing parameter — and the
+/// host appears in a middle position in `RPL_WHOREPLY`, so a raw `::1` would
+/// make the parser treat the rest of the line as one trailing field and every
+/// value after it would shift.
+pub fn display_host(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+    }
+}
+
+/// Cut a line to `max` bytes on a character boundary.
+///
+/// `Vec::truncate` on the raw bytes can split a multi-byte character, and RF
+/// traffic is UTF-8: a long message from the air would then reach every client
+/// in the channel as a broken sequence.
+fn truncate_utf8(mut line: String, max: usize) -> String {
+    if line.len() <= max {
+        return line;
+    }
+    let mut cut = max;
+    while cut > 0 && !line.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    line.truncate(cut);
+    line
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -208,6 +252,26 @@ mod tests {
             .unwrap();
         assert_eq!(result, LineRead::TooLong);
         assert!(line.len() <= 512);
+    }
+
+    #[test]
+    fn ipv6_hosts_are_bracketed_so_they_cannot_start_with_a_colon() {
+        use std::net::IpAddr;
+        assert_eq!(display_host("127.0.0.1".parse::<IpAddr>().unwrap()), "127.0.0.1");
+        assert_eq!(display_host("::1".parse::<IpAddr>().unwrap()), "[::1]");
+        let shown = display_host("2001:db8::42".parse::<IpAddr>().unwrap());
+        assert!(!shown.starts_with(':'), "{shown}");
+        assert_eq!(shown, "[2001:db8::42]");
+    }
+
+    #[test]
+    fn truncation_lands_on_a_character_boundary() {
+        // Three-byte characters straddling the limit.
+        let line = "\u{4e00}".repeat(300);
+        let cut = truncate_utf8(line, 510);
+        assert!(cut.len() <= 510);
+        assert_eq!(cut.len() % 3, 0, "cut mid-character");
+        assert!(std::str::from_utf8(cut.as_bytes()).is_ok());
     }
 
     #[tokio::test]

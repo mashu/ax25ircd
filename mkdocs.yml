@@ -65,6 +65,7 @@ nav:
       - QMX on Debian: qmx.md
   - Using:
       - IRC and privileges: usage.md
+      - Airtime and duty cycle: airtime.md
       - Station and kisshub: station.md
   - Reference:
       - Design: design.md

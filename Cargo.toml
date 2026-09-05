@@ -19,7 +19,7 @@ categories = ["network-programming", "command-line-utilities"]
 # Cargo discovers those paths by convention.
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "io-std", "rt"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "io-std", "rt", "process"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 tracing = "0.1"

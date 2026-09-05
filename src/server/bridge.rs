@@ -17,12 +17,12 @@ use crate::ax25::{frame::PID_NO_L3, Ax25Frame};
 use crate::callsign::Callsign;
 use crate::irc::message::is_channel_name;
 use crate::policy::{sanitize, Verdict};
-use crate::server::state::{User, UserId};
-use crate::server::{Delivery, Server};
+use super::state::{User, UserId};
+use super::{Delivery, Server, TxClass};
 
 impl Server {
     pub(crate) fn handle_rf_frame(&mut self, frame: Ax25Frame, now: Instant) {
-        self.stats.rf_frames_rx += 1;
+        self.radio.stats.rf_frames_rx += 1;
 
         if !frame.is_ui() || frame.pid != Some(PID_NO_L3) {
             debug!(target: "rf::monitor", "{}", frame.to_monitor_line());
@@ -32,6 +32,28 @@ impl Server {
 
         // Our own transmission coming back through a digipeater.
         if self.config.gateway_callsign().as_ref() == Some(&src) {
+            return;
+        }
+
+        // PROTOCOL.md §3.1: a receiver must check the AX.25 destination before
+        // processing a frame. We only act on traffic addressed to this
+        // gateway's callsign.
+        //
+        // This is not politeness. Downlink MSG carries [target, from, text]
+        // and uplink MSG carries [target, text] — the same `kind`, different
+        // shape. Without this check, two gateways sharing a frequency read
+        // each other's downlink broadcasts as uplink traffic from a station,
+        // relay them, and transmit again: a feedback loop between two
+        // automatically controlled stations, bounded only by the rate limiter,
+        // that neither operator is watching. The same check also stops us
+        // consuming another station's unicast sequence numbers, which would
+        // make traffic genuinely meant for us look like duplicates.
+        if !self.frame_is_for_us(&frame) {
+            debug!(
+                target: "rf::monitor",
+                "not addressed to us: {}",
+                frame.to_monitor_line()
+            );
             return;
         }
 
@@ -54,13 +76,25 @@ impl Server {
             return;
         }
 
-        let outcome = self.sessions.on_receive(&src, airc, now);
+        let outcome = self.radio.sessions.on_receive(&src, airc, now);
         for f in outcome.transmit {
             self.transmit_airc(&src, f);
         }
         if let Some(msg) = outcome.deliver {
             self.handle_airc_message(&src, msg, now);
         }
+    }
+
+    /// True when an AX.25 frame is addressed to this gateway.
+    ///
+    /// Stations always unicast to the gateway callsign (see
+    /// `ax25irc-station`), so that is the only address we act on. Frames
+    /// addressed to a protocol address such as `AIRC` or `ID` are broadcasts
+    /// — ours to *hear*, never ours to answer.
+    fn frame_is_for_us(&self, frame: &Ax25Frame) -> bool {
+        self.config
+            .gateway_callsign()
+            .is_some_and(|call| call == frame.destination.call)
     }
 
     fn handle_airc_message(&mut self, src: &Callsign, msg: AircFrame, now: Instant) {
@@ -79,11 +113,20 @@ impl Server {
                     .first()
                     .cloned()
                     .unwrap_or_else(|| "welcome".into());
-                self.unicast(src, Kind::Welcome, encode_fields(&[&name, &motd]), true);
+                // One MOTD line, hard-capped. A gateway's welcome banner is
+                // the operator's prose; the air does not have room for it.
+                let motd: String = motd.chars().take(48).collect();
+                self.radio.unicast(
+                    src,
+                    Kind::Welcome,
+                    encode_fields(&[&name, &motd]),
+                    true,
+                    TxClass::Control,
+                );
                 if created {
                     info!(%src, "station registered");
                 }
-                self.flush_mailbox(src);
+                self.radio.flush_mailbox(src);
             }
             Kind::Join => {
                 if !self.rf_ctrl_ok(src, now) {
@@ -93,7 +136,7 @@ impl Server {
                     return;
                 };
                 if self.ensure_rf_user(src) {
-                    self.flush_mailbox(src);
+                    self.radio.flush_mailbox(src);
                 }
                 self.rf_join(src, &channel);
             }
@@ -109,7 +152,7 @@ impl Server {
                 if self.state.user(&uid).is_some() {
                     self.rf_part(&uid, &display, reason);
                 }
-                if let Some(peer) = self.sessions.peer_mut(src) {
+                if let Some(peer) = self.radio.sessions.peer_mut(src) {
                     peer.channels.remove(&display);
                 }
             }
@@ -144,30 +187,38 @@ impl Server {
                 if !self.rf_ctrl_ok(src, now) {
                     return;
                 }
-                if !self.sessions.peer(src).map(|p| p.registered).unwrap_or(false) {
+                if !self.radio.sessions.peer(src).map(|p| p.registered).unwrap_or(false) {
                     return;
                 }
                 let Some(channel) = fields.first().cloned() else {
                     return;
                 };
                 let display = self.channel_display_name(&channel);
-                let names = self.state.names_of(&display).join(",");
-                self.unicast(
+                let names = self.names_for_air(&display);
+                self.radio.unicast(
                     src,
                     Kind::NamesReply,
                     encode_fields(&[&display, &names]),
                     false,
+                    TxClass::Control,
                 );
             }
             Kind::Ping => {
                 if !self.rf_ctrl_ok(src, now) {
                     return;
                 }
-                if !self.sessions.peer(src).map(|p| p.registered).unwrap_or(false) {
+                if !self.radio.sessions.peer(src).map(|p| p.registered).unwrap_or(false) {
                     return;
                 }
-                let token = fields.first().cloned().unwrap_or_default();
-                self.unicast(src, Kind::Pong, encode_fields(&[&token]), false);
+                let token: String = fields.first().cloned().unwrap_or_default();
+                let token: String = token.chars().take(8).collect();
+                self.radio.unicast(
+                    src,
+                    Kind::Pong,
+                    encode_fields(&[&token]),
+                    false,
+                    TxClass::Control,
+                );
             }
             Kind::Id => {
                 info!(target: "rf::monitor", %src, "identification: {}", fields.join(" "));
@@ -210,44 +261,29 @@ impl Server {
                 return false;
             }
         }
-        self.sessions.force_touch(call, Instant::now()).registered = true;
+        self.radio.sessions.force_touch(call, Instant::now()).registered = true;
         true
     }
 
     fn rf_join(&mut self, call: &Callsign, channel: &str) {
         let uid = UserId::Rf(call.clone());
         if !is_channel_name(channel) {
-            self.unicast(
-                call,
-                Kind::Error,
-                encode_fields(&["403", "no such channel"]),
-                true,
-            );
+            self.rf_error(call, "403", "no such channel");
             return;
         }
         let display = self.channel_display_name(channel);
         let Some(chan) = self.state.channel(&display).cloned() else {
-            self.unicast(
-                call,
-                Kind::Error,
-                encode_fields(&["403", "no such channel"]),
-                true,
-            );
+            self.rf_error(call, "403", "no such channel");
             return;
         };
         if !chan.rf {
-            self.unicast(
-                call,
-                Kind::Error,
-                encode_fields(&["404", "channel is not bridged to RF"]),
-                true,
-            );
+            self.rf_error(call, "404", "channel is not bridged to RF");
             return;
         }
         if self.state.join(&uid, &display).is_none() {
             return;
         }
-        if let Some(peer) = self.sessions.peer_mut(call) {
+        if let Some(peer) = self.radio.sessions.peer_mut(call) {
             peer.channels.insert(display.clone());
         }
         let flags = self
@@ -279,18 +315,78 @@ impl Server {
             );
         }
 
-        let names = self.state.names_of(&display).join(",");
-        let topic = self
+        // Deliberately *not* the member list. A station that joins wants to
+        // know it is in; it did not ask who else is here, and on a 300 baud
+        // channel a roll call is seconds of airtime nobody requested. The
+        // count is one field and answers the question people actually have.
+        // `NAMES` gets the list, capped, when it is asked for.
+        let count = self
+            .state
+            .channel(&display)
+            .map(|c| c.members.len())
+            .unwrap_or(0)
+            .to_string();
+        let topic: String = self
             .state
             .channel(&display)
             .and_then(|c| c.topic.clone())
-            .unwrap_or_default();
-        self.unicast(
+            .unwrap_or_default()
+            .chars()
+            .take(64)
+            .collect();
+        self.radio.unicast(
             call,
             Kind::NamesReply,
-            encode_fields(&[&display, &names, &topic]),
+            encode_fields(&[&display, &format!("{count} here"), &topic]),
             true,
+            TxClass::Control,
         );
+    }
+
+    /// A short error back to a station.
+    ///
+    /// Unreliable on purpose. A reliable error is ACK-requested and retried up
+    /// to `max_retries` times, so "no such channel" would cost four
+    /// transmissions — more airtime than the message that provoked it. If it
+    /// is lost, the station simply sees no reply, which is the same
+    /// information.
+    fn rf_error(&mut self, dst: &Callsign, code: &str, text: &str) {
+        self.radio.unicast(
+            dst,
+            Kind::Error,
+            encode_fields(&[code, text]),
+            false,
+            TxClass::Control,
+        );
+    }
+
+    /// Member list trimmed to something a 300 baud channel can afford.
+    ///
+    /// Two caps, because either alone can be defeated: at most
+    /// `radio.rf_names_max` names, and at most 160 octets. `names_of` is
+    /// otherwise unbounded — a hundred IRC users is over a kilobyte, which
+    /// fragments into a long reliable exchange with retries.
+    /// Only ever sent in reply to an explicit `NAMES`.
+    fn names_for_air(&self, channel: &str) -> String {
+        const BUDGET: usize = 160;
+        let limit = self.config.radio.rf_names_max;
+        let all = self.state.names_of(channel);
+        let mut out = String::new();
+        let mut shown = 0usize;
+        for n in &all {
+            if shown >= limit || out.len() + n.len() + 1 > BUDGET {
+                break;
+            }
+            if !out.is_empty() {
+                out.push(',');
+            }
+            out.push_str(n);
+            shown += 1;
+        }
+        if shown < all.len() {
+            out.push_str(&format!(",+{} more", all.len() - shown));
+        }
+        out
     }
 
     fn rf_part(&mut self, uid: &UserId, channel: &str, reason: String) {
@@ -335,7 +431,7 @@ impl Server {
             // Do not answer a flood with more transmissions; just drop it and
             // let the operator see it in the log.
             warn!(%src, "rate limit exceeded, dropping message");
-            if let Some(peer) = self.sessions.peer_mut(src) {
+            if let Some(peer) = self.radio.sessions.peer_mut(src) {
                 peer.dropped += 1;
             }
             return;
@@ -345,7 +441,7 @@ impl Server {
             return;
         }
         if self.ensure_rf_user(src) {
-            self.flush_mailbox(src);
+            self.radio.flush_mailbox(src);
         }
         let uid = UserId::Rf(src.clone());
         let Some(user) = self.state.user(&uid).cloned() else {
@@ -355,21 +451,11 @@ impl Server {
         if is_channel_name(target) {
             let display = self.channel_display_name(target);
             let Some(chan) = self.state.channel(&display).cloned() else {
-                self.unicast(
-                    src,
-                    Kind::Error,
-                    encode_fields(&["403", "no such channel"]),
-                    true,
-                );
+                self.rf_error(src, "403", "no such channel");
                 return;
             };
             if !chan.rf {
-                self.unicast(
-                    src,
-                    Kind::Error,
-                    encode_fields(&["404", "channel is not bridged to RF"]),
-                    true,
-                );
+                self.rf_error(src, "404", "channel is not bridged to RF");
                 return;
             }
             // Be forgiving: a lost JOIN must not silently swallow a QSO.
@@ -377,10 +463,15 @@ impl Server {
                 self.rf_join(src, &display);
             }
             let mut text = text;
+            let mut truncated = false;
             let mut repeat = self.config.radio.repeat_rf_traffic;
             if repeat {
                 match self.policy.screen_outbound(&text) {
-                    Verdict::Allow(t) | Verdict::Truncated(t) => text = t,
+                    Verdict::Allow(t) => text = t,
+                    Verdict::Truncated(t) => {
+                        text = t;
+                        truncated = true;
+                    }
                     Verdict::Deny(_) => repeat = false,
                 }
             }
@@ -390,6 +481,7 @@ impl Server {
                 target: display.clone(),
                 text,
                 notice,
+                truncated,
             };
             // Every station in range already heard this transmission. We only
             // repeat it if the operator has enabled store-and-forward for
@@ -401,16 +493,16 @@ impl Server {
 
         // Private message to a nickname.
         let Some(target_id) = self.find_target(target) else {
-            self.unicast(
-                src,
-                Kind::Error,
-                encode_fields(&["401", "no such nick"]),
-                true,
-            );
+            self.rf_error(src, "401", "no such nick");
             return;
         };
+        let mut truncated = false;
         let text = match self.policy.screen_outbound(&text) {
-            Verdict::Allow(t) | Verdict::Truncated(t) => t,
+            Verdict::Allow(t) => t,
+            Verdict::Truncated(t) => {
+                truncated = true;
+                t
+            }
             Verdict::Deny(_) => {
                 if target_id.is_rf() {
                     return;
@@ -424,6 +516,7 @@ impl Server {
             target: target.to_string(),
             text,
             notice,
+            truncated,
         };
         self.deliver(&target_id, &d);
     }
@@ -440,6 +533,8 @@ impl Server {
     /// Transmit a single AIRC frame to one station (used for ACKs, which must
     /// not go through the session queue).
     fn transmit_airc(&mut self, dst: &Callsign, frame: AircFrame) {
-        self.transmit_direct(dst, frame);
+        // ACKs are the cheapest airtime there is: one short frame that stops
+        // the sender retransmitting a long one. They are never rationed.
+        self.radio.transmit_direct(dst, frame, TxClass::Ack);
     }
 }

@@ -32,6 +32,12 @@ struct Bucket {
     last: Instant,
 }
 
+/// Distinct keys one limiter will track. A limiter is keyed by host or
+/// callsign, so this is generous for real traffic — but it has to be bounded:
+/// without a cap, anything that can present an unbounded supply of keys turns
+/// the limiter itself into the memory leak it exists to prevent.
+const MAX_BUCKETS: usize = 4096;
+
 pub struct RateLimiter {
     per_minute: f64,
     burst: f64,
@@ -50,6 +56,19 @@ impl RateLimiter {
     pub fn check(&mut self, key: &str, now: Instant) -> bool {
         let burst = self.burst;
         let rate = self.per_minute / 60.0;
+        if !self.buckets.contains_key(key) && self.buckets.len() >= MAX_BUCKETS {
+            // Drop the least recently used key to make room. Evicting one
+            // idle bucket is a smaller mistake than growing without limit,
+            // and refusing outright would let a flood lock out real users.
+            if let Some(oldest) = self
+                .buckets
+                .iter()
+                .min_by_key(|(_, b)| b.last)
+                .map(|(k, _)| k.clone())
+            {
+                self.buckets.remove(&oldest);
+            }
+        }
         let bucket = self.buckets.entry(key.to_string()).or_insert(Bucket {
             tokens: burst,
             last: now,
@@ -69,6 +88,11 @@ impl RateLimiter {
         self.buckets
             .retain(|_, b| now.saturating_duration_since(b.last) < idle);
     }
+
+    #[cfg(test)]
+    fn bucket_count(&self) -> usize {
+        self.buckets.len()
+    }
 }
 
 pub struct Policy {
@@ -83,7 +107,7 @@ pub struct Policy {
 impl Policy {
     pub fn new(config: PolicyConfig) -> Self {
         let rf_out = RateLimiter::new(config.rf_msgs_per_min, config.rf_burst);
-        let ip_to_rf = RateLimiter::new(config.ip_to_rf_msgs_per_min, config.rf_burst);
+        let ip_to_rf = RateLimiter::new(config.ip_to_rf_msgs_per_min, config.ip_to_rf_burst);
         let rf_channel = RateLimiter::new(config.rf_channel_msgs_per_min, config.rf_channel_burst);
         let ip_cmds = RateLimiter::new(config.ip_cmds_per_min, config.ip_cmd_burst);
         let identify = RateLimiter::new(config.identify_per_min, config.identify_burst);
@@ -285,9 +309,10 @@ mod tests {
 
     #[test]
     fn truncation_and_rejection() {
-        let mut cfg = PolicyConfig::default();
-        cfg.max_rf_text_len = 10;
-        let p = Policy::new(cfg);
+        let p = Policy::new(PolicyConfig {
+            max_rf_text_len: 10,
+            ..Default::default()
+        });
         assert_eq!(p.screen_outbound("short"), Verdict::Allow("short".into()));
         assert!(matches!(
             p.screen_outbound("this one is definitely too long"),
@@ -307,10 +332,25 @@ mod tests {
     }
 
     #[test]
+    fn bucket_table_is_bounded() {
+        let mut rl = RateLimiter::new(60, 2);
+        let now = Instant::now();
+        for i in 0..(MAX_BUCKETS * 2) {
+            rl.check(&format!("host-{i}"), now + Duration::from_millis(i as u64));
+        }
+        assert!(
+            rl.bucket_count() <= MAX_BUCKETS,
+            "{} buckets",
+            rl.bucket_count()
+        );
+    }
+
+    #[test]
     fn allow_and_deny_lists() {
-        let mut cfg = PolicyConfig::default();
-        cfg.deny_callsigns = vec!["SM0BAD".into()];
-        let p = Policy::new(cfg);
+        let p = Policy::new(PolicyConfig {
+            deny_callsigns: vec!["SM0BAD".into()],
+            ..Default::default()
+        });
         // SSID 0 in the deny list bans the whole station.
         assert!(!p.station_allowed(&"SM0BAD-7".parse().unwrap()));
         assert!(p.station_allowed(&"SM0ABC".parse().unwrap()));

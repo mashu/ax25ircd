@@ -18,6 +18,28 @@ and requests are ACKed and retried.
 
 Serial TNCs need a build with `--features serial`.
 
+### Airtime
+
+The station client runs the same airtime governor as the gateway, with the same
+50 % duty ceiling and the same refusal to accept a run/cooldown pair that would
+exceed it. You are a human typing rather than an automatic service, but it is
+the same QRP radio at the same baud rate, and the finals do not know the
+difference.
+
+```sh
+ax25irc-station --call SM0ABC-7 --gateway SK0MT-1 \
+                --baud 300 --txdelay 400 --txtail 300 \
+                --duty 25 --max-continuous 30 --cooldown 60
+```
+
+Those are the defaults, and they assume HF: 300 baud, a QMX-class radio. For
+1200 baud VHF FM with a heatsink, `--baud 1200 --duty 40`. `--txdelay` and
+`--txtail` are pushed to the TNC as the KISS parameters as well as being used
+to price each frame, so the modem and the model cannot disagree.
+
+See [Airtime](airtime.md) for what the limits mean and why they are shaped the
+way they are.
+
 ## ax25irc-kisshub
 
 A virtual channel: every TCP client that connects is a station on the same

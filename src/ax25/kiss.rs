@@ -20,16 +20,26 @@ pub const CMD_FULLDUPLEX: u8 = 0x05;
 pub fn encode(port: u8, command: u8, payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(payload.len() + 4);
     out.push(FEND);
-    out.push(((port & 0x0F) << 4) | (command & 0x0F));
+    // The type octet is stuffed like any other. It is not payload, but it is
+    // inside the frame, and it can collide: port 12 with command 0 is 0xC0,
+    // which is FEND, and port 13 with command 11 is 0xDB, which is FESC. Left
+    // unescaped, every frame on those ports is silently mis-framed — the
+    // receiver reads the type octet as a delimiter and the first payload
+    // octet as the type.
+    stuff(((port & 0x0F) << 4) | (command & 0x0F), &mut out);
     for &b in payload {
-        match b {
-            FEND => out.extend_from_slice(&[FESC, TFEND]),
-            FESC => out.extend_from_slice(&[FESC, TFESC]),
-            other => out.push(other),
-        }
+        stuff(b, &mut out);
     }
     out.push(FEND);
     out
+}
+
+fn stuff(b: u8, out: &mut Vec<u8>) {
+    match b {
+        FEND => out.extend_from_slice(&[FESC, TFEND]),
+        FESC => out.extend_from_slice(&[FESC, TFESC]),
+        other => out.push(other),
+    }
 }
 
 /// One decoded KISS frame.
@@ -140,9 +150,28 @@ mod tests {
         assert_eq!(frames[0].payload, b"hello world");
     }
 
+    /// Port 12 command 0 is 0xC0 — the frame delimiter — and port 13 command
+    /// 11 is 0xDB, the escape. Both must survive.
+    #[test]
+    fn a_type_octet_that_collides_with_a_delimiter_is_escaped() {
+        for (port, command) in [(12, CMD_DATA), (13, 0x0B), (12, 0x0C), (13, 0x0D)] {
+            let payload = vec![0x8D, 0x01, 0x02];
+            let wire = encode(port, command, &payload);
+            let mut dec = KissDecoder::new(1024);
+            let frames = dec.push(&wire);
+            assert_eq!(frames.len(), 1, "port {port} command {command}: {wire:02x?}");
+            assert_eq!(frames[0].port, port, "port {port} command {command}");
+            assert_eq!(frames[0].command, command);
+            assert_eq!(
+                frames[0].payload, payload,
+                "port {port} command {command}: the payload lost its first octet"
+            );
+        }
+    }
+
     #[test]
     fn oversized_frames_are_dropped() {
-        let wire = encode(0, CMD_DATA, &vec![0x41; 100]);
+        let wire = encode(0, CMD_DATA, &[0x41; 100]);
         let mut dec = KissDecoder::new(16);
         assert!(dec.push(&wire).is_empty());
         // Decoder resynchronises on the next good frame.
