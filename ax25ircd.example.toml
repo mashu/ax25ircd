@@ -200,6 +200,7 @@ max_rf_fragments = 2
 rf_msgs_per_min = 6
 rf_burst = 4
 ip_to_rf_msgs_per_min = 10
+ip_to_rf_burst = 4
 rf_channel_msgs_per_min = 10
 rf_channel_burst = 4
 ip_cmds_per_min = 90

@@ -222,6 +222,31 @@ Two starting points:
 than the whole duty allowance — otherwise nothing would ever be transmitted and
 you would be left guessing why.
 
+## The order things are refused in
+
+Four independent mechanisms can stop a message reaching the air, and they fire
+in this order. When something does not go out, this is the list to walk:
+
+1. **IRC-side flood cap** (`[policy]`: `rf_channel_msgs_per_min`,
+   `ip_to_rf_msgs_per_min`) — counts *messages*, per host. Cheap, and it stops
+   a runaway client before anything else has to think about it.
+2. **Privilege and content** — RF-TX granted, a callsign claimed, the text
+   screened and length-capped.
+3. **Airtime admission** (`radio.max_queued_airtime_secs`, per class) — is
+   there room in the backlog for the seconds this will cost? This is the last
+   point at which the sender can be told, so it is where the refusal happens.
+4. **The governor** — duty cycle, continuous run, hourly budget. Defers what
+   was already admitted, and drops it after `max_hold_secs` rather than
+   transmitting it stale.
+
+They are not redundant: the first counts messages and knows nothing about
+length, the third counts seconds and knows nothing about who is talking, and
+the fourth is the only one that knows what the transmitter has actually been
+doing.
+
+The station client (`ax25irc-station`) runs the same governor with the same
+ceiling — see [Station](station.md).
+
 ## Watching it
 
 ```

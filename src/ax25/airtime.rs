@@ -643,10 +643,13 @@ impl AirtimeConfig {
             return Ok(());
         }
         if self.burst_duty() > HARD_MAX_DUTY {
+            // Worded without naming config keys: the same check runs behind
+            // `[radio.duty]` in the server and behind `--max-continuous` on
+            // the station client.
             return Err(format!(
-                "max_continuous_secs {} with cooldown_secs {} is a {:.0}% burst duty cycle; \
-                 the ceiling is {:.0}%. Raise cooldown_secs to at least {} s, or lower \
-                 max_continuous_secs.",
+                "a {} s transmit run with a {} s cooldown is a {:.0}% burst duty cycle; \
+                 the ceiling is {:.0}%. Give it a cooldown of at least {} s, or shorten \
+                 the run.",
                 self.max_continuous.as_secs(),
                 self.cooldown.as_secs(),
                 self.burst_duty() * 100.0,

@@ -311,6 +311,13 @@ pub struct TncSection {
     pub persistence: Option<u8>,
     #[serde(default)]
     pub slottime: Option<u8>,
+    /// Accepted only so that a configuration written before these moved gets
+    /// an explanation instead of serde's "unknown field `txdelay`". Setting
+    /// either is an error; see [`Config::validate`].
+    #[serde(default)]
+    pub txdelay: Option<u8>,
+    #[serde(default)]
+    pub txtail: Option<u8>,
 }
 
 impl Default for TncSection {
@@ -325,6 +332,8 @@ impl Default for TncSection {
             tx_pacing_ms: default_tx_pacing(),
             persistence: None,
             slottime: None,
+            txdelay: None,
+            txtail: None,
         }
     }
 }
@@ -341,9 +350,15 @@ pub struct PolicyConfig {
     pub rf_msgs_per_min: u32,
     #[serde(default = "default_rf_burst")]
     pub rf_burst: u32,
-    /// Same, for IP users sending into an RF-bridged channel.
+    /// Same, for IP users sending into an RF-bridged channel. Keyed on the
+    /// user's host, not their nickname — `/nick` is free.
     #[serde(default = "default_ip_msgs_per_min")]
     pub ip_to_rf_msgs_per_min: u32,
+    /// Burst allowance for the limit above. It used to share `rf_burst` with
+    /// the per-station limiter, which meant raising one silently raised the
+    /// other and neither doc comment said so.
+    #[serde(default = "default_ip_to_rf_burst")]
+    pub ip_to_rf_burst: u32,
     /// Refuse to transmit text that looks like ciphertext or base64. Amateur
     /// rules in most countries forbid obscuring the meaning of a message.
     #[serde(default = "default_true")]
@@ -386,6 +401,7 @@ impl Default for PolicyConfig {
             rf_msgs_per_min: default_rf_msgs_per_min(),
             rf_burst: default_rf_burst(),
             ip_to_rf_msgs_per_min: default_ip_msgs_per_min(),
+            ip_to_rf_burst: default_ip_to_rf_burst(),
             block_apparent_ciphertext: true,
             deny_callsigns: Vec::new(),
             allow_callsigns: Vec::new(),
@@ -470,6 +486,21 @@ impl Config {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        for (old, new) in [
+            (self.radio.tnc.txdelay, "txdelay_ms"),
+            (self.radio.tnc.txtail, "txtail_ms"),
+        ] {
+            if let Some(v) = old {
+                anyhow::bail!(
+                    "radio.tnc.{} has moved to radio.duty.{new}, in milliseconds rather than \
+                     10 ms units: write `{new} = {}` under [radio.duty]. It lives there because \
+                     the airtime governor prices every frame with it and then pushes it to the \
+                     TNC, so the two cannot disagree.",
+                    new.trim_end_matches("_ms"),
+                    u32::from(v) * 10
+                );
+            }
+        }
         if self.server.name.trim().is_empty() {
             anyhow::bail!("server.name must be set");
         }
@@ -706,6 +737,9 @@ fn default_rf_burst() -> u32 {
 }
 fn default_ip_msgs_per_min() -> u32 {
     10
+}
+fn default_ip_to_rf_burst() -> u32 {
+    4
 }
 fn default_true() -> bool {
     true

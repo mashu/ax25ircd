@@ -102,24 +102,11 @@ QMX on Debian: https://mashu.github.io/ax25ircd/
             }
             "loopback" => {
                 warn!("TNC kind is 'loopback': nothing will be transmitted");
-                TncConfig::loopback().0.link
+                TncConfig::loopback_link().0
             }
             other => anyhow::bail!("unknown radio.tnc.kind: {other}"),
         };
-        let cfg = TncConfig {
-            link,
-            kiss_port: section.kiss_port,
-            // paclen is the *information* field. A full AX.25 header with
-            // eight digipeaters is 58 octets on top of it; +32 silently
-            // discarded long-path frames we were perfectly able to decode.
-            max_frame: config.radio.paclen + 64,
-            tx_pacing: Duration::from_millis(section.tx_pacing_ms),
-            tx_queue_depth: 64,
-            persistence: section.persistence,
-            slottime: section.slottime,
-            airtime: config.radio.duty.to_airtime(),
-        };
-        let (handle, rx) = tnc::spawn(cfg);
+        let (handle, rx) = tnc::spawn(TncConfig::from_config(&config, link));
         if let Some(interlock) = config.radio.interlock.clone() {
             ax25ircd::interlock::spawn(interlock, handle.airtime().clone());
         }

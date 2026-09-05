@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use ax25ircd::airc::frame::flags;
 use ax25ircd::airc::{encode_fields, AircFrame, Kind, SessionConfig, Sessions};
 use ax25ircd::ax25::tnc::{self, TncConfig, TncLink};
+use ax25ircd::ax25::AirtimeConfig;
 use ax25ircd::ax25::Ax25Frame;
 use ax25ircd::callsign::Callsign;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -31,6 +32,11 @@ struct Args {
     paclen: usize,
     path: Vec<Callsign>,
     quiet: bool,
+    /// Same airtime limits the gateway applies to itself. A station is a
+    /// human typing rather than an automatic service, but the finals do not
+    /// know the difference, and on HF the operator is running the same QRP
+    /// radio at the same 300 baud.
+    airtime: AirtimeConfig,
 }
 
 fn usage() -> ! {
@@ -44,7 +50,15 @@ options:
   --path <A,B>        digipeater path, at most two hops
   --paclen <n>        AX.25 information field limit (default 128)
   --quiet             do not print protocol chatter
-  --help"
+  --help
+
+airtime (protects your finals and the channel; see docs/airtime.md):
+  --baud <n>          on-air symbol rate, 300 for HF, 1200 for VHF (default 300)
+  --txdelay <ms>      key-up before data, pushed to the TNC (default 400)
+  --txtail <ms>       key-down after data, pushed to the TNC (default 300)
+  --duty <percent>    duty cycle ceiling, 1-50 (default 25)
+  --max-continuous <s>  longest unbroken transmit run (default 30)
+  --cooldown <s>      forced key-up after that run (default 60)"
     );
     std::process::exit(2)
 }
@@ -57,6 +71,7 @@ fn parse_args() -> anyhow::Result<Args> {
     let mut paclen = 128usize;
     let mut path = Vec::new();
     let mut quiet = false;
+    let mut airtime = AirtimeConfig::default();
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -74,6 +89,36 @@ fn parse_args() -> anyhow::Result<Args> {
                 }
             }
             "--quiet" => quiet = true,
+            "--baud" => {
+                if let Some(v) = args.next().and_then(|v| v.parse().ok()) {
+                    airtime.baud = v;
+                }
+            }
+            "--txdelay" => {
+                if let Some(v) = args.next().and_then(|v| v.parse().ok()) {
+                    airtime.txdelay = Duration::from_millis(v);
+                }
+            }
+            "--txtail" => {
+                if let Some(v) = args.next().and_then(|v| v.parse().ok()) {
+                    airtime.txtail = Duration::from_millis(v);
+                }
+            }
+            "--duty" => {
+                if let Some(v) = args.next().and_then(|v| v.parse::<u32>().ok()) {
+                    airtime.max_duty = f64::from(v) / 100.0;
+                }
+            }
+            "--max-continuous" => {
+                if let Some(v) = args.next().and_then(|v| v.parse().ok()) {
+                    airtime.max_continuous = Duration::from_secs(v);
+                }
+            }
+            "--cooldown" => {
+                if let Some(v) = args.next().and_then(|v| v.parse().ok()) {
+                    airtime.cooldown = Duration::from_secs(v);
+                }
+            }
             "--help" | "-h" => usage(),
             other => {
                 eprintln!("unknown argument: {other}");
@@ -87,6 +132,20 @@ fn parse_args() -> anyhow::Result<Args> {
     };
     if path.len() > 2 {
         anyhow::bail!("more than two digipeater hops is antisocial");
+    }
+    // The same check the gateway makes on itself: the duty ceiling is clamped
+    // in the governor, but the run/cooldown pair is a second, independent way
+    // to hold the transmitter keyed.
+    airtime
+        .check_hardware_safe()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    for (name, ms) in [
+        ("--txdelay", airtime.txdelay.as_millis()),
+        ("--txtail", airtime.txtail.as_millis()),
+    ] {
+        if ms > 2550 {
+            anyhow::bail!("{name} is {ms} ms; KISS carries it in 10 ms units, so 2550 is the max");
+        }
     }
 
     let link = if let Some(rest) = tnc_spec.strip_prefix("tcp://") {
@@ -121,6 +180,7 @@ fn parse_args() -> anyhow::Result<Args> {
         paclen,
         path,
         quiet,
+        airtime,
     })
 }
 
@@ -344,9 +404,7 @@ async fn main() -> anyhow::Result<()> {
         tx_queue_depth: 32,
         persistence: None,
         slottime: None,
-        // A station client is a human typing, not an automatically
-        // controlled gateway, but the finals do not know the difference.
-        airtime: ax25ircd::ax25::AirtimeConfig::default(),
+        airtime: args.airtime.clone(),
     };
     let (tnc, mut rf_rx) = tnc::spawn(cfg);
     let sessions = Sessions::new(SessionConfig {

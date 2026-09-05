@@ -1107,10 +1107,15 @@ impl Server {
             }
         }
         if !self.policy.ip_rate_ok(&self.rate_key(uid), Instant::now()) {
+            // Quote the actual link speed. "1200 bits per second" was
+            // hardcoded, which is wrong on every HF gateway.
+            let baud = self.config.radio.duty.baud;
             self.notice_user(
                 uid,
-                "Not relayed to RF: you are sending faster than the channel can carry. \
-                 Slow down; the radio side is 1200 bits per second.",
+                &format!(
+                    "Not relayed to RF: you are sending faster than the channel can carry. \
+                     Slow down; the radio side is {baud} bits per second."
+                ),
             );
             return None;
         }

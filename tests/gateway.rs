@@ -15,6 +15,52 @@ use ax25ircd::server::{Event, Server};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::mpsc;
 
+/// A fast link with the airtime governor ON.
+///
+/// Every fixture in this file includes it. The governor stays enabled in tests
+/// on purpose — it once stopped being wired to the TNC at all and the tests
+/// could not tell — but these are 9600 baud with a short key-up, so a frame is
+/// about 150 ms and the limits do not dominate tests that are about something
+/// else. Tests that *are* about the governor override these with tighter ones.
+const FAST_LINK: &str = r##"
+tx_pacing_ms = 0
+
+[radio.duty]
+enabled = true
+baud = 9600
+txdelay_ms = 10
+txtail_ms = 10
+window_secs = 600
+max_duty_percent = 50
+max_continuous_secs = 60
+cooldown_secs = 60
+hourly_airtime_secs = 0
+max_hold_secs = 120
+"##;
+
+/// Policy limits raised out of the way, so a test can isolate the airtime
+/// layer beneath them.
+///
+/// Four independent things can stop a message reaching the air, and they fire
+/// in this order: the IRC-side flood cap (`[policy]`), the RF-TX privilege and
+/// content screen, airtime admission control, and finally the governor
+/// deferring at the transmitter. A test that wants to prove the fourth has to
+/// get past the first.
+const NO_FLOOD_CAP: &str = r##"
+rf_channel_msgs_per_min = 6000
+rf_channel_burst = 200
+ip_to_rf_msgs_per_min = 6000
+ip_to_rf_burst = 200
+ip_cmds_per_min = 6000
+ip_cmd_burst = 500
+"##;
+
+/// Expand the `__FAST_LINK__` placeholder. Call this before customising a
+/// fixture, so a test edits the settings it can actually see.
+fn config_text(base: &str) -> String {
+    base.replace("__FAST_LINK__", FAST_LINK)
+}
+
 const CONFIG: &str = r##"
 [server]
 name = "test.gateway"
@@ -32,6 +78,7 @@ paclen = 128
 
 [radio.tnc]
 kind = "loopback"
+__FAST_LINK__
 
 [policy]
 
@@ -68,10 +115,13 @@ impl Harness {
     }
 
     async fn from_toml(text: &str) -> Self {
-        let config = Arc::new(Config::from_toml(text).unwrap());
-        let (mut tnc_cfg, far) = TncConfig::loopback();
-        tnc_cfg.max_frame = 512;
-        let (handle, rf_rx) = tnc::spawn(tnc_cfg);
+        let config = Arc::new(Config::from_toml(&config_text(text)).unwrap());
+        // The same TncConfig the server builds, with a loopback link
+        // substituted. Anything derived from the configuration file — paclen,
+        // pacing, and the whole `[radio.duty]` section — therefore reaches the
+        // TNC in tests exactly as it does in production.
+        let (link, far) = TncConfig::loopback_link();
+        let (handle, rf_rx) = tnc::spawn(TncConfig::from_config(&config, link));
         let mut server = Server::new(config, Some(handle));
 
         let (out, client_rx) = mpsc::channel(1024);
@@ -565,6 +615,7 @@ destination = "AIRC"
 id_interval_secs = 60
 [radio.tnc]
 kind = "loopback"
+__FAST_LINK__
 [accounts]
 file = "target/test-nicks-grant.json"
 [[channels]]
@@ -750,43 +801,151 @@ async fn names_reply_to_rf_is_bounded() {
 }
 
 
+/// A realistic QRP HF gateway: 300 baud, a 5 % duty limit, a 60 s backlog.
+/// A busy channel must not be able to commit the transmitter to more than the
+/// backlog holds, and the senders whose messages do not fit must be told.
 #[tokio::test]
-async fn the_duty_governor_holds_the_transmitter_back() {
-    // A real 300-baud HF station: a tight duty allowance and a short run
-    // limit. The gateway must refuse to key up past them however much the
-    // IRC side wants to talk.
-    let toml = CONFIG.replace(
-        "[radio.tnc]\nkind = \"loopback\"",
-        "[radio.tnc]\nkind = \"loopback\"\n\n[radio.duty]\nenabled = true\nbaud = 300\nwindow_secs = 600\nmax_duty_percent = 5\nmax_continuous_secs = 10\ncooldown_secs = 300\nhourly_airtime_secs = 60\nmax_hold_secs = 5",
-    );
+async fn a_busy_channel_fills_the_backlog_and_then_is_refused() {
+    let toml = config_text(CONFIG)
+        .replace("baud = 9600", "baud = 300")
+        .replace("max_duty_percent = 50", "max_duty_percent = 5")
+        .replace("max_continuous_secs = 60", "max_continuous_secs = 10")
+        .replace("cooldown_secs = 60", "cooldown_secs = 300")
+        // Raise the IRC-side flood cap out of the way: this test is about the
+        // airtime layer underneath it.
+        .replace("[policy]", &format!("[policy]{NO_FLOOD_CAP}"));
     let mut h = Harness::from_toml(&toml).await;
     h.oper_and_callsign();
     h.send("JOIN #rf");
     h.station_transmits("SM0ABC-7", AircFrame::new(Kind::Hello, 1, Vec::new()))
         .await;
+    h.station_transmits(
+        "SM0ABC-7",
+        AircFrame::new(Kind::Join, 2, encode_fields(&["#rf"])),
+    )
+    .await;
+    assert!(
+        h.server.state.channel("#rf").unwrap().has_rf_members(),
+        "test setup: without a station on frequency nothing is bound for the air"
+    );
     h.drain_client();
     let _ = h.transmitted().await;
 
-    // Twenty full-length messages. At 300 baud each is seconds of airtime,
-    // so the 5 % / 600 s allowance is 30 s: only a handful can go out.
     let body = "x".repeat(150);
     for _ in 0..20 {
         h.send(&format!("PRIVMSG #rf :{body}"));
     }
-    let sent = h.transmitted().await;
-    let msgs = sent.iter().filter(|(_, a)| a.kind == Kind::Msg).count();
+    let notices: Vec<String> = h.drain_client();
+
+    let queued = notices.iter().filter(|l| l.contains("Queued for RF")).count();
+    let refused = notices
+        .iter()
+        .filter(|l| l.contains("transmit queue is"))
+        .count();
+    assert!(queued > 0, "nothing was accepted at all: {notices:?}");
     assert!(
-        msgs < 20,
-        "the governor let all {msgs} messages straight onto the air"
+        refused > 0,
+        "20 full-length messages at 300 baud is far more than a 60s backlog holds, \
+         but none was refused: {notices:?}"
+    );
+    assert_eq!(
+        queued + refused,
+        20,
+        "every message should have got one answer or the other"
+    );
+    assert!(
+        h.server.stats.rf_frames_refused as usize == refused,
+        "the counter and the notices should agree"
     );
 
-    // And the operator can see why.
+    // The backlog is bounded by airtime, and by the share a chat message may
+    // occupy — half of the 60 s budget.
+    let air = h.server.airtime().unwrap();
+    assert!(
+        air.queued() <= Duration::from_secs(31),
+        "the transmit queue holds {:?}, past the chat share of the 60s budget",
+        air.queued()
+    );
+    assert!(
+        air.duty_percent() > 0.0,
+        "the governor recorded no airtime — is [radio.duty] reaching the TNC?"
+    );
+
+    // And the operator can see all of it.
     h.drain_client();
-    h.send("RADIO DUTY");
+    h.send("RADIO QUEUE");
     let lines = h.drain_client();
     assert!(
-        lines.iter().any(|l| l.contains("duty")),
-        "RADIO DUTY told the operator nothing: {lines:?}"
+        lines.iter().any(|l| l.contains("transmit queue")),
+        "{lines:?}"
+    );
+}
+
+/// The asymmetry, stated as a test: an IRC user sees their message instantly,
+/// and is told honestly that the radio side is behind — with an estimate that
+/// grows as the queue does.
+#[tokio::test]
+async fn senders_are_given_a_growing_and_honest_estimate() {
+    let toml = config_text(CONFIG)
+        .replace("baud = 9600", "baud = 300")
+        .replace(
+            "id_interval_secs = 60",
+            "id_interval_secs = 60\nmax_queued_airtime_secs = 600",
+        )
+        .replace("[policy]", &format!("[policy]{NO_FLOOD_CAP}"));
+    let mut h = Harness::from_toml(&toml).await;
+    h.oper_and_callsign();
+    h.send("JOIN #rf");
+    h.station_transmits("SM0ABC-7", AircFrame::new(Kind::Hello, 1, Vec::new()))
+        .await;
+    h.station_transmits(
+        "SM0ABC-7",
+        AircFrame::new(Kind::Join, 2, encode_fields(&["#rf"])),
+    )
+    .await;
+    h.drain_client();
+    let _ = h.transmitted().await;
+
+    let body = "y".repeat(140);
+    for _ in 0..8 {
+        h.send(&format!("PRIVMSG #rf :{body}"));
+    }
+    let notices = h.drain_client();
+
+    // Every message reached IRC immediately — that side is free.
+    assert_eq!(
+        notices
+            .iter()
+            .filter(|l| l.contains("PRIVMSG #rf") && l.contains(&body))
+            .count(),
+        0,
+        "the sender does not get their own message echoed back"
+    );
+    assert_eq!(
+        h.server.stats.rf_frames_refused, 0,
+        "a 600s backlog should admit all eight"
+    );
+
+    // The estimate they were quoted grows with the queue rather than
+    // claiming each one is going out now.
+    let etas: Vec<u64> = notices
+        .iter()
+        .filter_map(|l| l.split("about ").nth(1))
+        .filter_map(|rest| rest.split('s').next())
+        .filter_map(|n| n.parse().ok())
+        .collect();
+    assert!(etas.len() >= 4, "expected queue estimates: {notices:?}");
+    assert!(
+        etas.windows(2).all(|w| w[1] >= w[0]),
+        "the estimate must not go backwards as the queue grows: {etas:?}"
+    );
+    assert!(
+        etas.last().unwrap() > etas.first().unwrap(),
+        "eight full-length messages at 300 baud is a real queue: {etas:?}"
+    );
+    assert!(
+        h.server.airtime().unwrap().queued() > Duration::from_secs(1),
+        "the queued airtime should reflect what was accepted"
     );
 }
 
@@ -795,10 +954,10 @@ async fn config_rejects_a_duty_budget_that_can_never_pass_a_frame() {
     // 1 % of 60 s is 600 ms; a 128-octet frame at 300 baud is several
     // seconds. Nothing would ever be transmitted, and the operator would be
     // left wondering why. Catch it at startup instead.
-    let toml = CONFIG.replace(
-        "[radio.tnc]\nkind = \"loopback\"",
-        "[radio.tnc]\nkind = \"loopback\"\n\n[radio.duty]\nwindow_secs = 60\nmax_duty_percent = 1",
-    );
+    let toml = config_text(CONFIG)
+        .replace("baud = 9600", "baud = 300")
+        .replace("window_secs = 600", "window_secs = 60")
+        .replace("max_duty_percent = 50", "max_duty_percent = 1");
     let err = Config::from_toml(&toml).unwrap_err().to_string();
     assert!(err.contains("duty"), "{err}");
 }
@@ -899,7 +1058,7 @@ async fn held_mail_is_delivered_a_little_at_a_time() {
 #[tokio::test]
 async fn a_full_backlog_is_refused_out_loud_not_dropped_silently() {
     // One second of queue: the second message has nowhere to go.
-    let toml = CONFIG.replace(
+    let toml = config_text(CONFIG).replace(
         "id_interval_secs = 60",
         "id_interval_secs = 60\nmax_queued_airtime_secs = 1",
     );
@@ -1053,7 +1212,7 @@ async fn user_created_channels_do_not_accumulate() {
 
 #[tokio::test]
 async fn the_server_is_capped_in_total_not_just_per_host() {
-    let toml = CONFIG.replace("bind = []", "bind = []\nmax_clients = 4");
+    let toml = config_text(CONFIG).replace("bind = []", "bind = []\nmax_clients = 4");
     let mut h = Harness::from_toml(&toml).await;
     h.drain_client();
     // Each from a different host, so only the global cap can stop them.
@@ -1068,5 +1227,84 @@ async fn the_server_is_capped_in_total_not_just_per_host() {
     assert!(
         accepted < 10,
         "a distributed connection flood is under the per-host limit on every host"
+    );
+}
+
+
+#[tokio::test]
+async fn kiss_timing_parameters_are_pushed_to_the_tnc() {
+    // The governor prices every frame using txdelay/txtail, so the modem had
+    // better be using the same numbers. Check the bytes, not the intent.
+    let toml = config_text(CONFIG)
+        .replace("tx_pacing_ms = 0", "tx_pacing_ms = 0\nslottime = 10")
+        .replace("txdelay_ms = 10", "txdelay_ms = 400")
+        .replace("txtail_ms = 10", "txtail_ms = 250");
+    let mut h = Harness::from_toml(&toml).await;
+
+    // Read whatever the TNC task wrote at connect, before any traffic.
+    let mut buf = [0u8; 512];
+    let mut params: Vec<(u8, Vec<u8>)> = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline && params.len() < 4 {
+        match tokio::time::timeout(Duration::from_millis(200), h.far.read(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => {
+                for kf in h.decoder.push(&buf[..n]) {
+                    if kf.command != kiss::CMD_DATA {
+                        params.push((kf.command, kf.payload));
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+
+    let get = |cmd: u8| {
+        params
+            .iter()
+            .find(|(c, _)| *c == cmd)
+            .map(|(_, p)| p.clone())
+    };
+    // KISS carries these in 10 ms units.
+    assert_eq!(
+        get(kiss::CMD_TXDELAY),
+        Some(vec![40]),
+        "TXDELAY was not pushed: the modem and the airtime model would disagree. Got {params:?}"
+    );
+    assert_eq!(get(kiss::CMD_TXTAIL), Some(vec![25]), "{params:?}");
+    assert_eq!(
+        get(kiss::CMD_FULLDUPLEX),
+        Some(vec![0]),
+        "full duplex must be explicitly forced off: {params:?}"
+    );
+    assert_eq!(get(kiss::CMD_SLOTTIME), Some(vec![10]), "{params:?}");
+}
+
+
+#[tokio::test]
+async fn a_config_using_the_old_txdelay_key_is_told_where_it_went() {
+    let toml = config_text(CONFIG).replace("tx_pacing_ms = 0", "tx_pacing_ms = 0\ntxdelay = 30");
+    let err = Config::from_toml(&toml).unwrap_err().to_string();
+    assert!(
+        err.contains("radio.duty.txdelay_ms") && err.contains("300"),
+        "an operator upgrading needs to be told where the setting went and in \
+         what units, not just that the key is unknown: {err}"
+    );
+}
+
+#[tokio::test]
+async fn the_station_client_shares_the_gateways_airtime_limits() {
+    // The station is a human typing rather than an automatic service, but it
+    // is the same QRP radio at the same baud rate, so the same check applies.
+    use ax25ircd::ax25::AirtimeConfig;
+    let bad = AirtimeConfig {
+        max_continuous: Duration::from_secs(60),
+        cooldown: Duration::from_secs(5),
+        ..AirtimeConfig::default()
+    };
+    let err = bad.check_hardware_safe().unwrap_err();
+    assert!(err.contains("burst duty cycle"), "{err}");
+    assert!(
+        AirtimeConfig::default().check_hardware_safe().is_ok(),
+        "the shipped defaults must pass their own check"
     );
 }

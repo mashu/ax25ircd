@@ -74,21 +74,42 @@ impl Default for TncConfig {
 }
 
 impl TncConfig {
+    /// Everything the TNC task needs, derived from the parsed configuration.
+    ///
+    /// One constructor, used by the server and by the tests alike. When these
+    /// were two pieces of code the test harness quietly stopped passing
+    /// `[radio.duty]` through, so the airtime governor was disabled in every
+    /// integration test while the unit tests said it worked.
+    ///
+    /// `link` is a parameter rather than derived here because choosing it is
+    /// the one part that differs: the server resolves `radio.tnc.kind`, and a
+    /// test substitutes a loopback whose far end it keeps.
+    pub fn from_config(config: &crate::config::Config, link: TncLink) -> Self {
+        let section = &config.radio.tnc;
+        Self {
+            link,
+            kiss_port: section.kiss_port,
+            // paclen is the *information* field. A full AX.25 header with
+            // eight digipeaters is 58 octets on top of it; +32 silently
+            // discarded long-path frames we were perfectly able to decode.
+            max_frame: config.radio.paclen + 64,
+            tx_pacing: Duration::from_millis(section.tx_pacing_ms),
+            tx_queue_depth: 64,
+            persistence: section.persistence,
+            slottime: section.slottime,
+            airtime: config.radio.duty.to_airtime(),
+        }
+    }
+
     /// Build a loopback link and return the far end, which behaves like a TNC:
     /// write KISS frames into it to simulate reception, read to see what the
     /// server transmitted.
-    pub fn loopback() -> (Self, DuplexStream) {
+    ///
+    /// The link only. Pair it with [`TncConfig::from_config`] to get a TNC
+    /// configured exactly as the server would configure it.
+    pub fn loopback_link() -> (TncLink, DuplexStream) {
         let (near, far) = tokio::io::duplex(64 * 1024);
-        let cfg = Self {
-            link: TncLink::Loopback(Arc::new(Mutex::new(Some(near)))),
-            tx_pacing: Duration::from_millis(0),
-            airtime: AirtimeConfig {
-                enabled: false,
-                ..AirtimeConfig::default()
-            },
-            ..Default::default()
-        };
-        (cfg, far)
+        (TncLink::Loopback(Arc::new(Mutex::new(Some(near)))), far)
     }
 }
 
