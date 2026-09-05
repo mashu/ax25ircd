@@ -21,7 +21,6 @@ mod registration;
 
 use std::time::Instant;
 
-
 use crate::irc::message::{lower, Message};
 use crate::irc::numerics as num;
 
@@ -58,7 +57,11 @@ impl Server {
             return;
         }
 
-        if !registered && !matches!(cmd, "PASS" | "NICK" | "USER" | "QUIT" | "PING" | "PONG" | "CAP")
+        if !registered
+            && !matches!(
+                cmd,
+                "PASS" | "NICK" | "USER" | "QUIT" | "PING" | "PONG" | "CAP"
+            )
         {
             self.numeric(&uid, num::ERR_NOTREGISTERED, &["You have not registered"]);
             return;
@@ -67,7 +70,11 @@ impl Server {
         match cmd {
             "CAP" => {
                 // Minimal IRCv3 handshake: acknowledge nothing, end negotiation.
-                if msg.param(0).map(|s| s.eq_ignore_ascii_case("LS")).unwrap_or(false) {
+                if msg
+                    .param(0)
+                    .map(|s| s.eq_ignore_ascii_case("LS"))
+                    .unwrap_or(false)
+                {
                     let name = self.server_name().to_string();
                     self.send_raw(
                         id,
@@ -114,7 +121,10 @@ impl Server {
             "MOTD" => self.send_motd(&uid),
             "LUSERS" => self.send_lusers(&uid),
             "AWAY" => {
-                let away = msg.param(0).map(|s| s.to_string()).filter(|s| !s.is_empty());
+                let away = msg
+                    .param(0)
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty());
                 if let Some(u) = self.state.user_mut(&uid) {
                     u.away = away;
                 }
@@ -135,25 +145,7 @@ impl Server {
 
     // ------------------------------------------------------- registration
 
-
-
-
-
-
-
     // ------------------------------------------------------------ channels
-
-
-
-
-
-
-
-
-
-
-
-
 
     /// The key an airtime rate limiter should count against.
     ///
@@ -175,23 +167,7 @@ impl Server {
 
     // ------------------------------------------------------------ messaging
 
-
-
-
     // ------------------------------------------------------------ extensions
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     pub(crate) fn channel_display_name(&self, name: &str) -> String {
         self.state

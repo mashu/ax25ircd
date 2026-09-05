@@ -7,7 +7,6 @@
 
 use std::time::{Duration, Instant};
 
-
 use crate::callsign::Callsign;
 use crate::irc::message::{is_valid_nick, Message};
 use crate::irc::numerics as num;
@@ -19,7 +18,11 @@ use super::constant_time_eq;
 impl Server {
     pub(super) fn cmd_pass(&mut self, uid: &UserId, msg: &Message) {
         let Some(given) = msg.param(0) else {
-            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["PASS", "Not enough parameters"]);
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["PASS", "Not enough parameters"],
+            );
             return;
         };
         let ok = self
@@ -40,7 +43,11 @@ impl Server {
             return;
         };
         if !is_valid_nick(&nick, self.config.server.max_nick_len) {
-            self.numeric(uid, num::ERR_ERRONEUSNICKNAME, &[&nick, "Erroneous nickname"]);
+            self.numeric(
+                uid,
+                num::ERR_ERRONEUSNICKNAME,
+                &[&nick, "Erroneous nickname"],
+            );
             return;
         }
         // Callsign-shaped nicks belong to RF stations. RFC 1459 casemapping
@@ -58,15 +65,27 @@ impl Server {
             return;
         }
         if self.state.nick_taken(&nick) {
-            self.numeric(uid, num::ERR_NICKNAMEINUSE, &[&nick, "Nickname is already in use"]);
+            self.numeric(
+                uid,
+                num::ERR_NICKNAMEINUSE,
+                &[&nick, "Nickname is already in use"],
+            );
             return;
         }
 
         let was_registered = self.state.user(uid).map(|u| u.registered).unwrap_or(false);
-        let old = self.state.user(uid).map(|u| u.nick.clone()).unwrap_or_default();
+        let old = self
+            .state
+            .user(uid)
+            .map(|u| u.nick.clone())
+            .unwrap_or_default();
         let prefix = self.state.user(uid).map(|u| u.prefix()).unwrap_or_default();
         if !self.state.set_nick(uid, &nick) {
-            self.numeric(uid, num::ERR_NICKNAMEINUSE, &[&nick, "Nickname is already in use"]);
+            self.numeric(
+                uid,
+                num::ERR_NICKNAMEINUSE,
+                &[&nick, "Nickname is already in use"],
+            );
             return;
         }
         let claimed = self.accounts.is_registered(&nick);
@@ -109,7 +128,11 @@ impl Server {
             return;
         }
         if msg.params.len() < 4 {
-            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["USER", "Not enough parameters"]);
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["USER", "Not enough parameters"],
+            );
             return;
         }
         if let Some(u) = self.state.user_mut(uid) {
@@ -163,7 +186,11 @@ impl Server {
                 env!("CARGO_PKG_VERSION")
             )],
         );
-        self.numeric(uid, num::RPL_CREATED, &["This server was created at startup"]);
+        self.numeric(
+            uid,
+            num::RPL_CREATED,
+            &["This server was created at startup"],
+        );
         self.numeric(
             uid,
             num::RPL_MYINFO,
@@ -179,12 +206,13 @@ impl Server {
         let isupport = format!(
             "CHANTYPES=#& PREFIX=(ov)@+ NICKLEN={} CHANNELLEN=50 CASEMAPPING=rfc1459 \
              NETWORK={} MAXTARGETS=1 TOPICLEN=200 CHANMODES=k,l,r,mnt RADIO={} RFCALL={}",
-            self.config.server.max_nick_len,
-            network,
-            radio,
-            self.config.radio.callsign
+            self.config.server.max_nick_len, network, radio, self.config.radio.callsign
         );
-        self.numeric(uid, num::RPL_ISUPPORT, &[&isupport, "are supported by this server"]);
+        self.numeric(
+            uid,
+            num::RPL_ISUPPORT,
+            &[&isupport, "are supported by this server"],
+        );
 
         self.send_lusers(uid);
         self.send_motd(uid);
@@ -223,7 +251,11 @@ impl Server {
             return;
         }
         let server = self.server_name().to_string();
-        self.numeric(uid, num::RPL_MOTDSTART, &[&format!("- {server} Message of the day -")]);
+        self.numeric(
+            uid,
+            num::RPL_MOTDSTART,
+            &[&format!("- {server} Message of the day -")],
+        );
         for line in self.config.server.motd.clone() {
             self.numeric(uid, num::RPL_MOTD, &[&format!("- {line}")]);
         }

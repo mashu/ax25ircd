@@ -317,7 +317,10 @@ mod tests {
     fn serialises_trailing_correctly() {
         let m = Message::new("PRIVMSG", vec!["#ham".into(), "hello world".into()])
             .with_prefix("SM0ABC|7!rf@radio");
-        assert_eq!(m.to_string(), ":SM0ABC|7!rf@radio PRIVMSG #ham :hello world");
+        assert_eq!(
+            m.to_string(),
+            ":SM0ABC|7!rf@radio PRIVMSG #ham :hello world"
+        );
 
         let m = Message::new("PART", vec!["#ham".into()]);
         assert_eq!(m.to_string(), "PART #ham");

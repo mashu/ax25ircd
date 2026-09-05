@@ -5,8 +5,6 @@
 //! packet channel "is that station still there?" is the question people
 //! actually have.
 
-
-
 use crate::irc::message::{is_channel_name, Message};
 use crate::irc::numerics as num;
 
@@ -51,7 +49,13 @@ impl Server {
         self.numeric(
             uid,
             num::RPL_WHOISUSER,
-            &[&target.nick, &target.username, &target.host, "*", &target.realname],
+            &[
+                &target.nick,
+                &target.username,
+                &target.host,
+                "*",
+                &target.realname,
+            ],
         );
         let desc = match &target.callsign {
             Some(c) if target.is_rf() => format!("Radio station {c}, heard via the gateway"),
@@ -60,7 +64,11 @@ impl Server {
         };
         self.numeric(uid, num::RPL_WHOISSERVER, &[&target.nick, &server, &desc]);
         if target.oper {
-            self.numeric(uid, num::RPL_WHOISOPERATOR, &[&target.nick, "is a control operator"]);
+            self.numeric(
+                uid,
+                num::RPL_WHOISOPERATOR,
+                &[&target.nick, "is a control operator"],
+            );
         }
         if target.nick_identified {
             self.numeric(
@@ -73,7 +81,10 @@ impl Server {
             self.numeric(
                 uid,
                 num::RPL_WHOISOPERATOR,
-                &[&target.nick, "has RF-TX privilege (messages may be radiated)"],
+                &[
+                    &target.nick,
+                    "has RF-TX privilege (messages may be radiated)",
+                ],
             );
         }
         if let (UserId::Rf(call), Some(peer)) = (&target.id, {
@@ -86,7 +97,11 @@ impl Server {
                 peer.queue_depth(),
                 peer.dropped
             );
-            self.numeric(uid, num::RPL_WHOISIDLE, &[&call.to_string(), &idle.to_string(), &info]);
+            self.numeric(
+                uid,
+                num::RPL_WHOISIDLE,
+                &[&call.to_string(), &idle.to_string(), &info],
+            );
         }
         let channels: Vec<String> = target
             .channels
@@ -100,6 +115,10 @@ impl Server {
         if let Some(away) = &target.away {
             self.numeric(uid, num::RPL_AWAY, &[&target.nick, away]);
         }
-        self.numeric(uid, num::RPL_ENDOFWHOIS, &[&target.nick, "End of /WHOIS list"]);
+        self.numeric(
+            uid,
+            num::RPL_ENDOFWHOIS,
+            &[&target.nick, "End of /WHOIS list"],
+        );
     }
 }

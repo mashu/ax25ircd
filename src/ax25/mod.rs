@@ -6,8 +6,8 @@ pub mod frame;
 pub mod kiss;
 pub mod tnc;
 
-pub use airtime::{AirtimeConfig, AirtimeShared, DeferReason, Governor, TxDecision};
 pub use address::Address;
+pub use airtime::{AirtimeConfig, AirtimeShared, DeferReason, Governor, TxDecision};
 pub use frame::{Ax25Frame, CONTROL_UI, PID_NO_L3};
 pub use tnc::{TncConfig, TncHandle, TncLink};
 

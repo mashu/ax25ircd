@@ -55,9 +55,9 @@ impl Ax25Frame {
         self.control & 0xEF == CONTROL_UI
     }
 
-
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(ADDRESS_LEN * (2 + self.digipeaters.len()) + 2 + self.info.len());
+        let mut out =
+            Vec::with_capacity(ADDRESS_LEN * (2 + self.digipeaters.len()) + 2 + self.info.len());
         let mut dest = self.destination.clone();
         dest.last = false;
         dest.encode(&mut out);

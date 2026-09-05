@@ -247,9 +247,7 @@ mod tests {
         let huge = vec![b'A'; 10_000];
         let mut reader = BufReader::new(huge.as_slice());
         let mut line = Vec::new();
-        let result = read_line_capped(&mut reader, &mut line, 512)
-            .await
-            .unwrap();
+        let result = read_line_capped(&mut reader, &mut line, 512).await.unwrap();
         assert_eq!(result, LineRead::TooLong);
         assert!(line.len() <= 512);
     }
@@ -257,7 +255,10 @@ mod tests {
     #[test]
     fn ipv6_hosts_are_bracketed_so_they_cannot_start_with_a_colon() {
         use std::net::IpAddr;
-        assert_eq!(display_host("127.0.0.1".parse::<IpAddr>().unwrap()), "127.0.0.1");
+        assert_eq!(
+            display_host("127.0.0.1".parse::<IpAddr>().unwrap()),
+            "127.0.0.1"
+        );
         assert_eq!(display_host("::1".parse::<IpAddr>().unwrap()), "[::1]");
         let shown = display_host("2001:db8::42".parse::<IpAddr>().unwrap());
         assert!(!shown.starts_with(':'), "{shown}");

@@ -107,7 +107,17 @@ mod tests {
         let a = Address::new("N0X".parse().unwrap());
         let mut buf = Vec::new();
         a.encode(&mut buf);
-        assert_eq!(&buf[..6], &[b'N' << 1, b'0' << 1, b'X' << 1, b' ' << 1, b' ' << 1, b' ' << 1]);
+        assert_eq!(
+            &buf[..6],
+            &[
+                b'N' << 1,
+                b'0' << 1,
+                b'X' << 1,
+                b' ' << 1,
+                b' ' << 1,
+                b' ' << 1
+            ]
+        );
         assert_eq!(Address::decode(&buf).unwrap().call.base(), "N0X");
     }
 }

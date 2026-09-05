@@ -224,7 +224,10 @@ mod tests {
         let bytes = encode_fields(&["bye\r\nNOTICE alice :x"]);
         assert!(!bytes.contains(&b'\r'));
         assert!(!bytes.contains(&b'\n'));
-        assert_eq!(AircFrame::new(Kind::Quit, 1, bytes).fields(), vec!["byeNOTICE alice :x"]);
+        assert_eq!(
+            AircFrame::new(Kind::Quit, 1, bytes).fields(),
+            vec!["byeNOTICE alice :x"]
+        );
     }
 
     #[test]
@@ -241,6 +244,9 @@ mod tests {
     fn rejects_impossible_fragments() {
         let mut bytes = AircFrame::new(Kind::Msg, 1, vec![]).encode();
         bytes[6] = 3; // index 3 of 1
-        assert_eq!(AircFrame::decode(&bytes).unwrap_err(), AircError::BadFragment);
+        assert_eq!(
+            AircFrame::decode(&bytes).unwrap_err(),
+            AircError::BadFragment
+        );
     }
 }

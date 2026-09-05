@@ -4,8 +4,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
-use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::{
+    rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
+};
 use argon2::{Algorithm, Argon2, Params, Version};
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +53,9 @@ struct Store {
 pub struct Accounts {
     path: PathBuf,
     store: Store,
+    persist_lock: Arc<Mutex<()>>,
+    persist_gen: Arc<AtomicU64>,
+    async_persist: AtomicBool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -67,7 +74,17 @@ impl Accounts {
         Self {
             path: path.into(),
             store: Store::default(),
+            persist_lock: Arc::new(Mutex::new(())),
+            persist_gen: Arc::new(AtomicU64::new(0)),
+            async_persist: AtomicBool::new(false),
         }
+    }
+
+    /// Write the nick file from a background thread so fsync does not stall
+    /// the server actor. In-memory updates still happen first; tests leave
+    /// this off so they can read the file immediately.
+    pub fn enable_async_persist(&self) {
+        self.async_persist.store(true, Ordering::Release);
     }
 
     pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Self> {
@@ -75,11 +92,26 @@ impl Accounts {
         if !path.exists() {
             return Ok(Self::empty(path.to_path_buf()));
         }
-        let text = std::fs::read_to_string(path)?;
-        let store: Store = serde_json::from_str(&text)?;
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            anyhow::anyhow!(
+                "nick accounts file {} exists but cannot be read ({e}); \
+                 refusing to start with an empty store that would overwrite it",
+                path.display()
+            )
+        })?;
+        let store: Store = serde_json::from_str(&text).map_err(|e| {
+            anyhow::anyhow!(
+                "nick accounts file {} is unreadable JSON ({e}); \
+                 refusing to start with an empty store that would overwrite it",
+                path.display()
+            )
+        })?;
         Ok(Self {
             path: path.to_path_buf(),
             store,
+            persist_lock: Arc::new(Mutex::new(())),
+            persist_gen: Arc::new(AtomicU64::new(0)),
+            async_persist: AtomicBool::new(false),
         })
     }
 
@@ -114,7 +146,11 @@ impl Accounts {
         self.save()
     }
 
-    pub fn set_password_hash(&mut self, nick: &str, password_hash: String) -> Result<(), AccountError> {
+    pub fn set_password_hash(
+        &mut self,
+        nick: &str,
+        password_hash: String,
+    ) -> Result<(), AccountError> {
         let Some(acc) = self.store.nicks.get_mut(&lower(nick)) else {
             return Err(AccountError::NotRegistered);
         };
@@ -170,39 +206,86 @@ impl Accounts {
     /// worst case is losing the last change rather than all of them.
     fn save(&self) -> Result<(), AccountError> {
         let text = serde_json::to_string_pretty(&self.store).map_err(|_| AccountError::Io)?;
-        let parent = match self.path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => {
-                std::fs::create_dir_all(p).map_err(|_| AccountError::Io)?;
-                p.to_path_buf()
-            }
-            // A bare filename: the temp file goes in the current directory,
-            // which is the same filesystem, which is what rename needs.
-            _ => PathBuf::from("."),
-        };
-        let temp = parent.join(format!(
-            ".{}.tmp",
-            self.path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "nicks.json".into())
-        ));
-        // Flush the contents before the rename, or the rename can land while
-        // the data is still only in the page cache.
-        {
-            use std::io::Write as _;
-            let mut f = std::fs::File::create(&temp).map_err(|_| AccountError::Io)?;
-            f.write_all(text.as_bytes()).map_err(|_| AccountError::Io)?;
-            f.sync_all().map_err(|_| AccountError::Io)?;
+        let path = self.path.clone();
+        if self.async_persist.load(Ordering::Acquire) {
+            let gen = self.persist_gen.fetch_add(1, Ordering::AcqRel) + 1;
+            let persist_gen = self.persist_gen.clone();
+            let persist_lock = self.persist_lock.clone();
+            std::thread::spawn(move || {
+                let _g = persist_lock.lock().unwrap_or_else(|e| e.into_inner());
+                if persist_gen.load(Ordering::Acquire) != gen {
+                    return;
+                }
+                if let Err(e) = write_atomic(&path, &text) {
+                    tracing::error!(path = %path.display(), "nick database write failed: {e:?}");
+                }
+            });
+            return Ok(());
         }
-        std::fs::rename(&temp, &self.path).map_err(|e| {
-            let _ = std::fs::remove_file(&temp);
-            let _ = e;
-            AccountError::Io
-        })
+        let _g = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
+        write_atomic(&path, &text)
     }
 }
 
-pub(crate) fn hash_password(password: &str) -> Result<String, AccountError> {
+/// True if `s` is an Argon2 PHC string, not a plaintext OPER password.
+pub fn is_phc_hash(s: &str) -> bool {
+    PasswordHash::new(s).is_ok()
+}
+
+fn write_atomic(path: &Path, text: &str) -> Result<(), AccountError> {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => {
+            std::fs::create_dir_all(p).map_err(|_| AccountError::Io)?;
+            p.to_path_buf()
+        }
+        _ => PathBuf::from("."),
+    };
+    let temp = parent.join(format!(
+        ".{}.tmp",
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "nicks.json".into())
+    ));
+    {
+        use std::io::Write as _;
+        #[cfg(unix)]
+        let mut f = {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&temp)
+                .map_err(|_| AccountError::Io)?;
+            let mut perms = f.metadata().map_err(|_| AccountError::Io)?.permissions();
+            perms.set_mode(0o600);
+            f.set_permissions(perms).map_err(|_| AccountError::Io)?;
+            f
+        };
+        #[cfg(not(unix))]
+        let mut f = std::fs::File::create(&temp).map_err(|_| AccountError::Io)?;
+        f.write_all(text.as_bytes()).map_err(|_| AccountError::Io)?;
+        f.sync_all().map_err(|_| AccountError::Io)?;
+    }
+    std::fs::rename(&temp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        let _ = e;
+        AccountError::Io
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path)
+            .map_err(|_| AccountError::Io)?
+            .permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(path, perms).map_err(|_| AccountError::Io)?;
+    }
+    Ok(())
+}
+
+pub fn hash_password(password: &str) -> Result<String, AccountError> {
     let salt = SaltString::generate(&mut OsRng);
     hasher()
         .hash_password(password.as_bytes(), &salt)
@@ -265,7 +348,10 @@ mod tests {
         let hash = b.hash_for("bob").unwrap();
         assert_eq!(verify_password("hunter2x", &hash), Ok(()));
         assert!(b.grants_rf_tx("bob"));
-        assert_eq!(b.get("bob").and_then(|a| a.callsign.as_deref()), Some("SM0XYZ"));
+        assert_eq!(
+            b.get("bob").and_then(|a| a.callsign.as_deref()),
+            Some("SM0XYZ")
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -280,10 +366,10 @@ mod tests {
         // The database reloads, and the temp file is not left behind.
         let b = Accounts::load(&path).unwrap();
         assert!(b.is_registered("alice") && b.grants_rf_tx("bob"));
-        let temp = path
-            .parent()
-            .unwrap()
-            .join(format!(".{}.tmp", path.file_name().unwrap().to_string_lossy()));
+        let temp = path.parent().unwrap().join(format!(
+            ".{}.tmp",
+            path.file_name().unwrap().to_string_lossy()
+        ));
         assert!(!temp.exists(), "a temp file was left behind: {temp:?}");
         let _ = std::fs::remove_file(path);
     }
@@ -305,5 +391,31 @@ mod tests {
             verify_password("wrongpass", &weak),
             Err(AccountError::BadPassword)
         );
+        assert!(is_phc_hash(&weak));
+        assert!(!is_phc_hash("operpass1"));
+    }
+
+    #[test]
+    fn a_corrupt_nick_file_is_not_silently_replaced() {
+        let path = tmp();
+        std::fs::write(&path, "{").unwrap();
+        let err = match Accounts::load(&path) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("corrupt nick file loaded as an empty store"),
+        };
+        assert!(err.contains("overwrite") || err.contains("JSON"), "{err}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nick_file_is_mode_600() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = tmp();
+        let mut a = Accounts::empty(&path);
+        add(&mut a, "alice", "password1").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "nick database was {mode:o}");
+        let _ = std::fs::remove_file(path);
     }
 }

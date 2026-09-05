@@ -27,9 +27,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> ReadWrite for T {}
 /// How to reach the TNC.
 #[derive(Clone, Debug)]
 pub enum TncLink {
-    Tcp { host: String, port: u16 },
+    Tcp {
+        host: String,
+        port: u16,
+    },
     #[cfg(feature = "serial")]
-    Serial { path: String, baud: u32 },
+    Serial {
+        path: String,
+        baud: u32,
+    },
     /// In-process loopback. The far end of the duplex stream is handed to the
     /// test harness (see `TncConfig::loopback`).
     Loopback(Arc<Mutex<Option<DuplexStream>>>),
@@ -140,16 +146,16 @@ impl TncHandle {
     /// than radiated later: an operator who says "off" means off, not
     /// "off once the backlog has drained".
     pub fn set_inhibit(&self, inhibit: bool) {
-        self.airtime.inhibit.store(inhibit, Ordering::Relaxed);
+        self.airtime.inhibit.store(inhibit, Ordering::Release);
     }
 
     pub fn inhibited(&self) -> bool {
-        self.airtime.inhibit.load(Ordering::Relaxed)
+        self.airtime.inhibit.load(Ordering::Acquire)
     }
 
-    /// Queue a station identification. Jumps the transmit queue and is not
-    /// subject to the inhibit or the duty governor: identifying is a legal
-    /// obligation, and it is one short frame.
+    /// Queue a station identification. Jumps the *data* queue so a sign-off
+    /// is not stuck behind chat, but still waits for the airtime clock and
+    /// the governor — an ID is key-down time like anything else.
     pub fn try_send_id(&self, frame: Ax25Frame) -> bool {
         match self.priority.try_send(frame) {
             Ok(()) => true,
@@ -339,8 +345,14 @@ async fn pump(
     // TNC had better be using the same ones. In 10 ms units, hence the /10.
     let ms_to_kiss = |ms: u128| -> u8 { (ms / 10).min(255) as u8 };
     let mut params: Vec<(u8, u8)> = vec![
-        (kiss::CMD_TXDELAY, ms_to_kiss(config.airtime.txdelay.as_millis())),
-        (kiss::CMD_TXTAIL, ms_to_kiss(config.airtime.txtail.as_millis())),
+        (
+            kiss::CMD_TXDELAY,
+            ms_to_kiss(config.airtime.txdelay.as_millis()),
+        ),
+        (
+            kiss::CMD_TXTAIL,
+            ms_to_kiss(config.airtime.txtail.as_millis()),
+        ),
         // Half duplex, always. A TNC in full-duplex mode transmits without
         // listening first, which on a shared channel is precisely the
         // behaviour this whole module exists to prevent.
@@ -355,7 +367,8 @@ async fn pump(
         }
     }
     for (cmd, v) in params {
-        link.write_all(&kiss::encode(config.kiss_port, cmd, &[v])).await?;
+        link.write_all(&kiss::encode(config.kiss_port, cmd, &[v]))
+            .await?;
     }
 
     let mut decoder = KissDecoder::new(config.max_frame);
@@ -374,7 +387,7 @@ async fn pump(
         // and shredding it makes the session layer retry into a void until
         // it gives the station up for lost. Hold instead; `max_hold` still
         // drops what has waited too long.
-        if shared.inhibit.load(Ordering::Relaxed) {
+        if shared.inhibit.load(Ordering::Acquire) {
             if let Some((frame, _)) = pending.take() {
                 release_queued(shared, governor, frame.encode().len());
                 shared.dropped_inhibited.fetch_add(1, Ordering::Relaxed);
@@ -391,28 +404,22 @@ async fn pump(
         governor.set_duty(shared.duty_limit(config.airtime.max_duty));
         let pacing = shared.pacing(config.tx_pacing);
 
-        if let Some(frame) = held_id.take() {
-            if shared.interlock_failed() {
-                *held_id = Some(frame);
-            } else {
-                let bytes = frame.encode();
-                if bytes.len() <= config.max_frame {
-                    if let Err(e) = write_kiss_bytes(&mut link, config, &frame, &bytes).await {
-                        *held_id = Some(frame);
-                        return Err(e);
-                    }
-                    let now = std::time::Instant::now();
-                    let keyed = governor.record(bytes.len(), now);
-                    governor.publish_with(shared, now, config.max_frame);
-                    next_tx = next_tx.max(tokio::time::Instant::now() + pacing.max(keyed));
-                }
-            }
+        let now_tx = tokio::time::Instant::now();
+        let far_future = now_tx + Duration::from_secs(3600);
+        let mut wake = far_future;
+        if pending.is_some() {
+            wake = next_tx;
         }
-
-        let far_future = tokio::time::Instant::now() + Duration::from_secs(3600);
-        let mut wake = if pending.is_some() { next_tx } else { far_future };
+        if let Some((_, queued_at)) = pending.as_ref() {
+            // Wake to drop stale data even when an ID owns the transmitter.
+            wake = wake.min(*queued_at + config.airtime.max_hold);
+        }
         if held_id.is_some() {
-            wake = wake.min(tokio::time::Instant::now() + Duration::from_millis(200));
+            if shared.interlock_failed() {
+                wake = wake.min(now_tx + Duration::from_millis(200));
+            } else {
+                wake = wake.min(next_tx);
+            }
         }
 
         tokio::select! {
@@ -441,43 +448,61 @@ async fn pump(
                 }
             }
             Some(frame) = id_queue.recv(), if held_id.is_none() => {
-                // Identification bypasses the pacing gate, the governor and
-                // the operator's inhibit: `RADIO OFF` queues a sign-off ID
-                // precisely so the station can put its callsign to the
-                // transmissions it has already made, and dropping that would
-                // defeat the purpose.
-                //
-                // It does not bypass the safety interlock. If it is not safe
-                // to key up — high SWR, a hot PA, someone on the tower — then
-                // it is not safe to key up for an ID either. A licence
-                // requires you to identify the transmissions you make, not to
-                // make one.
-                //
-                // Only one ID is held. Receiving the next while `held_id` is
-                // set would overwrite the sign-off that is already waiting.
-                let bytes = frame.encode();
+                // Identification jumps the data queue so RADIO OFF can sign
+                // off without waiting for chat to drain. It does not jump
+                // the airtime clock: the pump keys it through the same
+                // `next_tx` gate and governor as data. The safety interlock
+                // still holds it. Only one ID is held; a second waits in
+                // the channel so it cannot overwrite a sign-off.
                 if shared.interlock_failed() {
                     warn!("station ID held: the safety interlock is not satisfied");
-                    *held_id = Some(frame);
-                } else if bytes.len() <= config.max_frame {
-                    if let Err(e) = write_kiss_bytes(&mut link, config, &frame, &bytes).await {
-                        *held_id = Some(frame);
-                        return Err(e);
-                    }
-                    let now = std::time::Instant::now();
-                    let keyed = governor.record(bytes.len(), now);
-                    governor.publish_with(shared, now, config.max_frame);
-                    next_tx = next_tx.max(tokio::time::Instant::now() + pacing.max(keyed));
                 }
+                *held_id = Some(frame);
             }
             Some(frame) = tx_queue.recv(), if pending.is_none() => {
                 *pending = Some((frame, tokio::time::Instant::now()));
             }
             _ = tokio::time::sleep_until(wake), if pending.is_some() || held_id.is_some() => {
+                if held_id.is_some() {
+                    // An ID waiting for the airtime clock still owns the
+                    // transmitter: data must not slip out in front of it.
+                    // It must still be dropped as stale — otherwise an ID
+                    // held by the interlock would keep a two-minute-old
+                    // chat line until it was safe, then radiate it.
+                    if let Some((_, queued_at)) = pending.as_ref() {
+                        if queued_at.elapsed() > config.airtime.max_hold {
+                            let (frame, queued_at) = pending.take().expect("pending");
+                            let waited = queued_at.elapsed();
+                            release_queued(shared, governor, frame.encode().len());
+                            shared.dropped_stale.fetch_add(1, Ordering::Relaxed);
+                            warn!(
+                                "dropping a frame held {waited:?} behind station ID — stale traffic is worse than no traffic"
+                            );
+                        }
+                    }
+                    if !shared.interlock_failed()
+                        && tokio::time::Instant::now() >= next_tx
+                    {
+                        if let Some(frame) = held_id.take() {
+                            key_id(
+                                &mut link,
+                                config,
+                                governor,
+                                shared,
+                                frame,
+                                &mut next_tx,
+                                pacing,
+                                held_id,
+                            )
+                            .await?;
+                        }
+                    }
+                    continue;
+                }
                 let Some((frame, queued_at)) = pending.take() else {
                     continue;
                 };
-                if shared.inhibit.load(Ordering::Relaxed) {
+                if shared.inhibit.load(Ordering::Acquire) {
                     release_queued(shared, governor, frame.encode().len());
                     shared.dropped_inhibited.fetch_add(1, Ordering::Relaxed);
                     continue;
@@ -545,6 +570,56 @@ async fn pump(
             else => return Ok(()),
         }
     }
+}
+
+/// Key an identification frame. Jumps the data queue, not the airtime clock:
+/// waits for `next_tx`, asks the governor, records the burst. Never dropped
+/// as stale, and not discarded by the operator inhibit.
+async fn key_id(
+    link: &mut Box<dyn ReadWrite>,
+    config: &TncConfig,
+    governor: &mut Governor,
+    shared: &AirtimeShared,
+    frame: Ax25Frame,
+    next_tx: &mut tokio::time::Instant,
+    pacing: Duration,
+    held_id: &mut Option<Ax25Frame>,
+) -> io::Result<()> {
+    if shared.interlock_failed() {
+        *held_id = Some(frame);
+        return Ok(());
+    }
+    if tokio::time::Instant::now() < *next_tx {
+        *held_id = Some(frame);
+        return Ok(());
+    }
+    let bytes = frame.encode();
+    if bytes.len() > config.max_frame {
+        warn!(
+            "refusing to transmit oversized station ID ({} bytes)",
+            bytes.len()
+        );
+        return Ok(());
+    }
+    let now = std::time::Instant::now();
+    match governor.check(bytes.len(), now) {
+        TxDecision::Send => {
+            if let Err(e) = write_kiss_bytes(link, config, &frame, &bytes).await {
+                *held_id = Some(frame);
+                return Err(e);
+            }
+            let keyed = governor.record(bytes.len(), now);
+            governor.publish_with(shared, now, config.max_frame);
+            *next_tx = tokio::time::Instant::now() + pacing.max(keyed);
+        }
+        TxDecision::Defer(delay, reason) => {
+            debug!("holding station ID for {:?} ({})", delay, reason.as_str());
+            shared.deferred.fetch_add(1, Ordering::Relaxed);
+            *next_tx = tokio::time::Instant::now() + delay;
+            *held_id = Some(frame);
+        }
+    }
+    Ok(())
 }
 
 async fn write_kiss_bytes(

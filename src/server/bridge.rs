@@ -12,13 +12,13 @@ use std::time::Instant;
 
 use tracing::{debug, info, warn};
 
+use super::state::{User, UserId};
+use super::{Delivery, Server, TxClass};
 use crate::airc::{encode_fields, AircFrame, Kind};
 use crate::ax25::{frame::PID_NO_L3, Ax25Frame};
 use crate::callsign::Callsign;
 use crate::irc::message::is_channel_name;
 use crate::policy::{sanitize, Verdict};
-use super::state::{User, UserId};
-use super::{Delivery, Server, TxClass};
 
 impl Server {
     pub(crate) fn handle_rf_frame(&mut self, frame: Ax25Frame, now: Instant) {
@@ -148,9 +148,7 @@ impl Server {
                 };
                 let uid = UserId::Rf(src.clone());
                 let display = self.channel_display_name(&channel);
-                let reason = crate::policy::sanitize(
-                    &fields.get(1).cloned().unwrap_or_default(),
-                );
+                let reason = crate::policy::sanitize(&fields.get(1).cloned().unwrap_or_default());
                 if self.state.user(&uid).is_some() {
                     self.rf_part(&uid, &display, reason);
                 }
@@ -189,7 +187,13 @@ impl Server {
                 if !self.rf_ctrl_ok(src, now) {
                     return;
                 }
-                if !self.radio.sessions.peer(src).map(|p| p.registered).unwrap_or(false) {
+                if !self
+                    .radio
+                    .sessions
+                    .peer(src)
+                    .map(|p| p.registered)
+                    .unwrap_or(false)
+                {
                     return;
                 }
                 let Some(channel) = fields.first().cloned() else {
@@ -209,7 +213,13 @@ impl Server {
                 if !self.rf_ctrl_ok(src, now) {
                     return;
                 }
-                if !self.radio.sessions.peer(src).map(|p| p.registered).unwrap_or(false) {
+                if !self
+                    .radio
+                    .sessions
+                    .peer(src)
+                    .map(|p| p.registered)
+                    .unwrap_or(false)
+                {
                     return;
                 }
                 let token: String = fields.first().cloned().unwrap_or_default();
@@ -263,7 +273,10 @@ impl Server {
                 return false;
             }
         }
-        self.radio.sessions.force_touch(call, Instant::now()).registered = true;
+        self.radio
+            .sessions
+            .force_touch(call, Instant::now())
+            .registered = true;
         true
     }
 
@@ -310,11 +323,18 @@ impl Server {
             let server = self.server_name().to_string();
             self.announce_mode(&display, &server, "+v", &[&nick]);
         }
-        if self.state.channel(&display).map(|c| c.has_rf_members()).unwrap_or(false) {
+        if self
+            .state
+            .channel(&display)
+            .map(|c| c.has_rf_members())
+            .unwrap_or(false)
+        {
             let call_s = call.to_string();
             self.notice_rf_audience(
                 &display,
-                &format!("RF station {call_s} is on frequency. Messages from +v users will be radiated."),
+                &format!(
+                    "RF station {call_s} is on frequency. Messages from +v users will be radiated."
+                ),
             );
         }
 

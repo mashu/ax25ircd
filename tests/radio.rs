@@ -15,7 +15,7 @@ use ax25ircd::ax25::tnc::{self, TncConfig};
 use ax25ircd::ax25::Ax25Frame;
 use ax25ircd::callsign::Callsign;
 use ax25ircd::config::Config;
-use ax25ircd::server::{Radio, TxClass};
+use ax25ircd::server::{IdentifyResult, Radio, TxClass};
 use tokio::io::{AsyncReadExt, DuplexStream};
 
 const CONFIG: &str = r##"
@@ -219,7 +219,10 @@ async fn a_full_transmit_queue_is_counted_not_hidden() {
         h.radio.stats.rf_frames_dropped > 0,
         "frames the TNC could not take should be counted so RADIO QUEUE shows them"
     );
-    assert!(h.radio.stats.rf_frames_tx > 0, "and some should have got through");
+    assert!(
+        h.radio.stats.rf_frames_tx > 0,
+        "and some should have got through"
+    );
 }
 
 #[tokio::test]
@@ -332,6 +335,18 @@ async fn identification_is_addressed_to_id() {
 }
 
 #[tokio::test]
+async fn radio_id_is_rate_limited_unless_the_station_owes_one() {
+    let mut h = Harness::new();
+    assert_eq!(h.radio.identify_now(), IdentifyResult::Sent);
+    let _ = h.transmitted().await;
+    assert_eq!(
+        h.radio.identify_now(),
+        IdentifyResult::RateLimited,
+        "a second RADIO ID inside the interval is how an OPER cooks a QMX"
+    );
+}
+
+#[tokio::test]
 async fn held_mail_is_not_destroyed_when_the_transmitter_is_off() {
     use ax25ircd::server::mailbox::StoredMessage;
 
@@ -403,13 +418,20 @@ async fn held_mail_is_not_destroyed_when_the_session_queue_is_full() {
 async fn the_status_line_says_which_of_the_several_reasons_applies() {
     // No radio configured at all.
     let off = Harness::headless(&CONFIG.replace("enabled = true", "enabled = false"));
-    assert!(off.status_line().contains("disabled"), "{}", off.status_line());
+    assert!(
+        off.status_line().contains("disabled"),
+        "{}",
+        off.status_line()
+    );
 
     // Configured, but no TNC attached.
     let headless = Harness::headless(CONFIG);
     let line = headless.status_line();
     assert!(line.contains("no TNC attached"), "{line}");
-    assert!(line.contains("SK0MT-1"), "the operator needs the callsign: {line}");
+    assert!(
+        line.contains("SK0MT-1"),
+        "the operator needs the callsign: {line}"
+    );
 
     // Attached, but the operator turned it off.
     let mut h = Harness::new();
@@ -469,8 +491,14 @@ async fn a_retransmission_is_sent_without_a_fresh_admission_check() {
     }
     let _ = h.transmitted().await;
 
-    let outcome = h.radio.sessions.tick(Instant::now() + Duration::from_secs(5));
-    assert!(!outcome.transmit.is_empty(), "the session layer wants a retry");
+    let outcome = h
+        .radio
+        .sessions
+        .tick(Instant::now() + Duration::from_secs(5));
+    assert!(
+        !outcome.transmit.is_empty(),
+        "the session layer wants a retry"
+    );
     for (call, frame) in outcome.transmit {
         h.radio.transmit_to(&call, frame);
     }

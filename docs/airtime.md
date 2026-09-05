@@ -178,9 +178,12 @@ when enough old airtime falls out of the window. A frame held longer than
 old chat line costs the same airtime as a fresh one and carries less
 information.
 
-Station identification bypasses all of this. It is one short frame, it is a
-legal obligation, and it goes out on a separate priority path that neither the
-duty limits nor the operator's inhibit can hold back.
+Station identification **jumps the data queue** so `RADIO OFF` can sign off
+without waiting for chat to drain, but it uses the **same airtime clock** as
+every other frame: it waits for the previous transmission to finish, asks the
+governor, and counts toward the continuous run and cooldown. `RADIO ID` is
+limited to once per `id_interval_secs` unless the station currently owes an
+identification. The safety interlock still holds it, including at sign-off.
 
 ## Configuration
 
@@ -220,7 +223,11 @@ Two starting points:
 
 `ax25ircd --check` refuses a configuration where a full-length frame is longer
 than the whole duty allowance — otherwise nothing would ever be transmitted and
-you would be left guessing why.
+you would be left guessing why. It also refuses a `baud` that is not 300, 1200
+or 9600 unless `allow_nonstandard_baud = true`: a 1200-baud governor in front
+of Direwolf `MODEM 300` under-counts key-down by a factor of four. Set
+`radio.tnc.direwolf_conf` so `--check` compares MODEM, TXDELAY and TXTAIL to
+this block.
 
 ## The order things are refused in
 
@@ -296,8 +303,10 @@ it:
 Both are audited, both take effect on the next frame, and neither is written
 back to the configuration file — a restart returns to what is on disk. The
 duty override is clamped to the same 50 % ceiling as everything else: asking
-for 90 gets you 50 and a notice saying so. Pacing can only ever slow the
-station down; it cannot buy airtime the duty limit has not released.
+for 90 gets you 50 and a notice saying so. Pacing can only ever *slow* the
+station: a `RADIO LIMIT PACING` below `tx_pacing_ms` is raised to that floor
+and the operator is told. It cannot buy airtime the duty limit has not
+released.
 
 ## When it is not safe to transmit at all
 
@@ -328,10 +337,10 @@ Two properties make this a safety feature rather than a status light:
 * **It fails closed.** A command that cannot be run, times out, or has not run
   yet counts as a failure. The failure mode of an unreadable SWR meter is not
   "assume it is fine".
-* **It blocks station identification too.** Identification otherwise bypasses
-  the inhibit, the pacing gate and the governor — but if it is not safe to key
-  up, it is not safe to key up for an ID either. A licence requires you to
-  identify the transmissions you make, not to make one.
+* **It blocks station identification too.** Identification jumps the data
+  queue, not the airtime clock — but if it is not safe to key up, it is not
+  safe to key up for an ID either. A licence requires you to identify the
+  transmissions you make, not to make one.
 
 `RADIO STATUS` says so plainly when it is the interlock holding the station
 down, so it is never confused with `RADIO OFF`.

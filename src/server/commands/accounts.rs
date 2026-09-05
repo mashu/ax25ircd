@@ -9,7 +9,6 @@
 
 use std::time::Instant;
 
-
 use crate::accounts::{hash_password, verify_password, AccountError};
 use crate::callsign::Callsign;
 use crate::irc::message::{lower, Message};
@@ -21,7 +20,11 @@ use super::super::{AuthKind, Event, Server};
 impl Server {
     pub(super) fn cmd_register(&mut self, uid: &UserId, msg: &Message) {
         let Some(password) = msg.param(0) else {
-            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["REGISTER", "Not enough parameters"]);
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["REGISTER", "Not enough parameters"],
+            );
             return;
         };
         if !self.auth_rate_ok(uid) {
@@ -31,7 +34,10 @@ impl Server {
             return;
         };
         if Callsign::reserved_from_nick(&user.nick).is_some() {
-            self.notice_user(uid, "Callsign nicks cannot be registered; they belong to RF stations.");
+            self.notice_user(
+                uid,
+                "Callsign nicks cannot be registered; they belong to RF stations.",
+            );
             return;
         }
         if password.len() < self.config.accounts.min_password_len {
@@ -54,7 +60,11 @@ impl Server {
 
     pub(super) fn cmd_identify(&mut self, uid: &UserId, msg: &Message) {
         let Some(password) = msg.param(0) else {
-            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["IDENTIFY", "Not enough parameters"]);
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["IDENTIFY", "Not enough parameters"],
+            );
             return;
         };
         if !self.auth_rate_ok(uid) {
@@ -75,7 +85,11 @@ impl Server {
 
     pub(super) fn cmd_unregister(&mut self, uid: &UserId, msg: &Message) {
         let Some(password) = msg.param(0) else {
-            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["UNREGISTER", "Not enough parameters"]);
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["UNREGISTER", "Not enough parameters"],
+            );
             return;
         };
         if !self.auth_rate_ok(uid) {
@@ -101,10 +115,7 @@ impl Server {
             .map(|u| u.host.clone())
             .unwrap_or_default();
         if !self.policy.identify_rate_ok(&host, Instant::now()) {
-            self.notice_user(
-                uid,
-                "Slow down: too many password attempts from your host.",
-            );
+            self.notice_user(uid, "Slow down: too many password attempts from your host.");
             self.audit.event("auth_throttle", &[("host", &host)]);
             return false;
         }
@@ -165,6 +176,12 @@ impl Server {
             return;
         }
         if let Err(e) = result {
+            if kind == AuthKind::Oper {
+                self.numeric(&uid, num::ERR_PASSWDMISMATCH, &["Password incorrect"]);
+                self.audit
+                    .event("oper_fail", &[("nick", &user.nick), ("host", &user.host)]);
+                return;
+            }
             self.notice_account_error(&uid, e);
             return;
         }
@@ -174,8 +191,12 @@ impl Server {
                     u.nick_identified = true;
                     u.identify_by = None;
                 }
-                self.notice_user(&uid, "Password accepted. You own this nick for this session.");
-                self.audit.event("identify", &[("nick", &user.nick), ("host", &user.host)]);
+                self.notice_user(
+                    &uid,
+                    "Password accepted. You own this nick for this session.",
+                );
+                self.audit
+                    .event("identify", &[("nick", &user.nick), ("host", &user.host)]);
                 self.refresh_privileges(&uid);
             }
             AuthKind::Register => {
@@ -206,23 +227,25 @@ impl Server {
                     &uid,
                     "Nick registered. The password is stored as an Argon2id hash, not recoverable. IDENTIFY on next connect.",
                 );
-                self.audit.event("nick_register", &[("nick", &user.nick), ("host", &user.host)]);
+                self.audit.event(
+                    "nick_register",
+                    &[("nick", &user.nick), ("host", &user.host)],
+                );
                 self.refresh_privileges(&uid);
             }
-            AuthKind::Unregister => {
-                match self.accounts.drop_nick(&user.nick) {
-                    Ok(()) => {
-                        if let Some(u) = self.state.user_mut(&uid) {
-                            u.nick_identified = false;
-                            u.rf_tx = u.oper;
-                        }
-                        self.notice_user(&uid, "Nick unregistered.");
-                        self.audit.event("nick_drop", &[("nick", &user.nick)]);
-                        self.refresh_privileges(&uid);
+            AuthKind::Unregister => match self.accounts.drop_nick(&user.nick) {
+                Ok(()) => {
+                    if let Some(u) = self.state.user_mut(&uid) {
+                        u.nick_identified = false;
+                        u.rf_tx = u.oper;
                     }
-                    Err(e) => self.notice_account_error(&uid, e),
+                    self.notice_user(&uid, "Nick unregistered.");
+                    self.audit.event("nick_drop", &[("nick", &user.nick)]);
+                    self.refresh_privileges(&uid);
                 }
-            }
+                Err(e) => self.notice_account_error(&uid, e),
+            },
+            AuthKind::Oper => self.grant_oper(&uid),
         }
     }
 
@@ -271,7 +294,9 @@ impl Server {
             AccountError::Io => "Could not write the nick database.".into(),
             AccountError::Taken => "That nick is already registered. IDENTIFY to claim it.".into(),
             AccountError::BadPassword => "Password incorrect.".into(),
-            AccountError::NotRegistered => "That nick is not registered. REGISTER <password> first.".into(),
+            AccountError::NotRegistered => {
+                "That nick is not registered. REGISTER <password> first.".into()
+            }
         };
         self.notice_user(uid, &text);
     }

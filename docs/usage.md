@@ -35,7 +35,9 @@ Then join `#rf`. If an RF station is in the channel and the transmitter is on,
 `PRIVMSG #rf` is radiated. You will get a NOTICE when it actually goes out.
 
 A control operator (`OPER`) has RF-TX for that session without a grant. They
-still need `CALLSIGN` before their text is radiated.
+still need `CALLSIGN` before their text is radiated. On a public
+`listen.bind`, `[[opers]]` passwords must be Argon2id hashes from
+`ax25ircd --hash-password`; plaintext is accepted only on loopback.
 
 `UNREGISTER` deletes the account, including the grant and stored callsign.
 Changing nick drops `IDENTIFY`; RF-TX comes back only after `IDENTIFY` on a
@@ -119,7 +121,7 @@ RADIO QUEUE               everything accepted but not yet transmitted
 RADIO LIMIT DUTY <1-50|off>    lower the duty cycle now, no restart
 RADIO LIMIT PACING <ms|off>    widen the gap between transmissions
 RADIO OFF / ON            kill switch; purges the transmit queue
-RADIO ID                  identify now
+RADIO ID                  identify now (rate-limited to id_interval)
 RADIO HEARD               stations, last heard, queue depth
 RADIO MAIL                held private messages (in memory, expires)
 RADIO KICK <callsign>     drop an RF station's presence

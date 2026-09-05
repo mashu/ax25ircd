@@ -20,9 +20,14 @@ use crate::server::{self, Event, Server};
 #[derive(Debug, PartialEq, Eq)]
 pub enum Invocation {
     /// Run the server with this configuration file.
-    Run { path: String },
+    Run {
+        path: String,
+    },
     /// Validate the configuration and exit.
-    Check { path: String },
+    Check {
+        path: String,
+    },
+    HashPassword,
     Version(String),
     Help(String),
     /// Bad usage; the message to print before exiting non-zero.
@@ -40,10 +45,12 @@ pub fn help() -> String {
         "\
 ax25ircd {} — IRC server with an AX.25 packet-radio gateway
 
-Usage: ax25ircd [--config path] [--check]
+Usage: ax25ircd [--config path] [--check] [--hash-password]
 
   -c, --config <path>   configuration file (default: {DEFAULT_CONFIG})
       --check           validate the configuration and exit
+      --hash-password   read a password from stdin and print an Argon2id hash
+                        (for [[opers]] when the listener is not loopback)
   -V, --version         print version
   -h, --help            this help
 
@@ -64,6 +71,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Invocation {
                 None => return Invocation::Usage("--config needs a path".into()),
             },
             "--check" => check_only = true,
+            "--hash-password" => return Invocation::HashPassword,
             "--version" | "-V" => return Invocation::Version(version()),
             "--help" | "-h" => return Invocation::Help(help()),
             other => return Invocation::Usage(format!("unknown argument: {other}")),
@@ -159,7 +167,7 @@ pub fn build(config: Arc<Config>) -> anyhow::Result<Gateway> {
     };
 
     let (events, events_rx) = mpsc::channel::<Event>(1024);
-    let mut server = Server::new(config.clone(), tnc_handle);
+    let mut server = Server::new(config.clone(), tnc_handle)?;
     server.attach_events(events.clone());
 
     // Frames heard on the air become events like anything else.
@@ -263,11 +271,11 @@ mod tests {
             }
         );
         assert!(matches!(parse_args(args(&["-V"])), Invocation::Version(_)));
-        assert!(matches!(parse_args(args(&["--help"])), Invocation::Help(_)));
         assert!(matches!(
-            parse_args(args(&["--wat"])),
-            Invocation::Usage(_)
+            parse_args(args(&["--hash-password"])),
+            Invocation::HashPassword
         ));
+        assert!(matches!(parse_args(args(&["--wat"])), Invocation::Usage(_)));
         assert!(
             matches!(parse_args(args(&["--config"])), Invocation::Usage(_)),
             "a missing path must be an error, not a silent fall back to the default"
@@ -284,7 +292,9 @@ mod tests {
         };
         let (link, far) = resolve_link(&tcp).unwrap();
         assert!(far.is_none());
-        assert!(matches!(link, TncLink::Tcp { ref host, port } if host == "10.0.0.1" && port == 8002));
+        assert!(
+            matches!(link, TncLink::Tcp { ref host, port } if host == "10.0.0.1" && port == 8002)
+        );
 
         let loop_back = TncSection {
             kind: "loopback".into(),
@@ -302,7 +312,10 @@ mod tests {
             ..Default::default()
         };
         let err = resolve_link(&bogus).unwrap_err().to_string();
-        assert!(err.contains("carrier-pigeon") && err.contains("loopback"), "{err}");
+        assert!(
+            err.contains("carrier-pigeon") && err.contains("loopback"),
+            "{err}"
+        );
     }
 
     #[cfg(not(feature = "serial"))]
@@ -349,12 +362,12 @@ rf = true
             "a loopback TNC hands back its far end, or the fake radio closes"
         );
         assert!(gw.server.radio.available(), "the radio should be usable");
-        assert!(gw.server.radio.airtime().is_some(), "airtime counters are published");
+        assert!(
+            gw.server.radio.airtime().is_some(),
+            "airtime counters are published"
+        );
         assert!(gw.server.state.channel("#rf").is_some());
-        assert!(gw
-            .server
-            .radio.status_line()
-            .contains("transmitter ON"));
+        assert!(gw.server.radio.status_line().contains("transmitter ON"));
     }
 
     #[tokio::test]
@@ -437,6 +450,8 @@ rf = true
     fn help_and_version_say_what_they_should() {
         assert!(version().starts_with("ax25ircd "));
         let h = help();
-        assert!(h.contains("--check") && h.contains(DEFAULT_CONFIG));
+        assert!(
+            h.contains("--check") && h.contains("--hash-password") && h.contains(DEFAULT_CONFIG)
+        );
     }
 }

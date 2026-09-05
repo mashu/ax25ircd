@@ -73,7 +73,7 @@ impl Net {
         let text = text.replace("target/test-commands-nicks.json", &path);
         let config = Arc::new(Config::from_toml(&text).unwrap());
         Net {
-            server: Server::new(config, None),
+            server: Server::new(config, None).unwrap(),
             rx: Vec::new(),
         }
     }
@@ -141,12 +141,19 @@ fn registration_sends_the_expected_welcome_burst() {
     n.send(a, "USER alice 0 * :Alice");
     let lines = n.drain(a);
 
-    for code in ["001", "002", "003", "004", "005", "251", "255", "375", "372", "376"] {
-        assert!(has_numeric(&lines, code), "missing numeric {code}: {lines:?}");
+    for code in [
+        "001", "002", "003", "004", "005", "251", "255", "375", "372", "376",
+    ] {
+        assert!(
+            has_numeric(&lines, code),
+            "missing numeric {code}: {lines:?}"
+        );
     }
     assert!(lines.iter().any(|l| l.contains("TESTNET")));
     assert!(
-        lines.iter().any(|l| l.contains(&format!("ax25ircd-{}", env!("CARGO_PKG_VERSION")))),
+        lines
+            .iter()
+            .any(|l| l.contains(&format!("ax25ircd-{}", env!("CARGO_PKG_VERSION")))),
         "004 should advertise this build, not a frozen version: {lines:?}"
     );
     assert!(
@@ -159,7 +166,12 @@ fn registration_sends_the_expected_welcome_burst() {
 fn commands_before_registration_are_refused() {
     let mut n = Net::new();
     let a = n.raw_client(1);
-    for cmd in ["JOIN #lobby", "PRIVMSG #lobby :hi", "MODE #lobby", "WHOIS bob"] {
+    for cmd in [
+        "JOIN #lobby",
+        "PRIVMSG #lobby :hi",
+        "MODE #lobby",
+        "WHOIS bob",
+    ] {
         let lines = n.ask(a, cmd);
         assert!(
             has_numeric(&lines, "451"),
@@ -298,7 +310,13 @@ fn join_zero_leaves_everything() {
         2,
         "JOIN 0 parts every channel: {lines:?}"
     );
-    assert!(n.server.state.user(&user_id(a)).unwrap().channels.is_empty());
+    assert!(n
+        .server
+        .state
+        .user(&user_id(a))
+        .unwrap()
+        .channels
+        .is_empty());
 }
 
 #[test]
@@ -315,7 +333,10 @@ fn channel_keys_limits_and_the_per_user_cap() {
 
     assert!(has_numeric(&n.ask(b, "JOIN #private"), "475"), "wrong key");
     let lines = n.ask(b, "JOIN #private hunter2");
-    assert!(lines.iter().any(|l| l.contains("JOIN #private")), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains("JOIN #private")),
+        "{lines:?}"
+    );
 
     // A limit of one is already full.
     n.send(a, "MODE #private +l 1");
@@ -359,7 +380,10 @@ fn topic_requires_operator_when_locked() {
     n.send(a, "OPER root operpass1");
     n.drain(a);
     let lines = n.ask(a, "TOPIC #lobby :a better topic");
-    assert!(lines.iter().any(|l| l.contains("a better topic")), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains("a better topic")),
+        "{lines:?}"
+    );
     assert_eq!(
         n.server.state.channel("#lobby").unwrap().topic.as_deref(),
         Some("a better topic")
@@ -369,7 +393,10 @@ fn topic_requires_operator_when_locked() {
     assert!(has_numeric(&n.ask(b, "TOPIC #lobby"), "332"));
     n.send(a, "JOIN #fresh");
     n.drain(a);
-    assert!(has_numeric(&n.ask(a, "TOPIC #fresh"), "331"), "no topic set");
+    assert!(
+        has_numeric(&n.ask(a, "TOPIC #fresh"), "331"),
+        "no topic set"
+    );
     assert!(has_numeric(&n.ask(a, "TOPIC #nowhere :x"), "403"));
     assert!(has_numeric(&n.ask(a, "TOPIC"), "461"));
 
@@ -396,7 +423,10 @@ fn kick_needs_channel_operator_privilege() {
         "an ordinary member cannot kick"
     );
     let lines = n.ask(a, "KICK #room bob :behave");
-    assert!(lines.iter().any(|l| l.contains("KICK #room bob")), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains("KICK #room bob")),
+        "{lines:?}"
+    );
     assert!(!n
         .server
         .state
@@ -405,7 +435,10 @@ fn kick_needs_channel_operator_privilege() {
         .members
         .contains_key(&user_id(b)));
 
-    assert!(has_numeric(&n.ask(a, "KICK #room bob"), "441"), "not on channel");
+    assert!(
+        has_numeric(&n.ask(a, "KICK #room bob"), "441"),
+        "not on channel"
+    );
     assert!(has_numeric(&n.ask(a, "KICK #room nobody"), "401"));
     assert!(has_numeric(&n.ask(a, "KICK #nowhere bob"), "403"));
     assert!(has_numeric(&n.ask(a, "KICK #room"), "461"));
@@ -434,7 +467,10 @@ fn messages_reach_channels_and_nicks_but_not_the_sender() {
     assert!(n.drain(b).iter().any(|l| l.contains("just you")));
 
     n.send(a, "NOTICE #lobby :a notice");
-    assert!(n.drain(b).iter().any(|l| l.starts_with(":alice") && l.contains("NOTICE")));
+    assert!(n
+        .drain(b)
+        .iter()
+        .any(|l| l.starts_with(":alice") && l.contains("NOTICE")));
 }
 
 #[test]
@@ -462,7 +498,10 @@ fn away_is_reported_to_whoever_messages_you() {
     n.drain(b);
 
     assert!(has_numeric(&n.ask(a, "PRIVMSG bob :you there?"), "301"));
-    assert!(n.ask(a, "WHOIS bob").iter().any(|l| l.contains("walking the dog")));
+    assert!(n
+        .ask(a, "WHOIS bob")
+        .iter()
+        .any(|l| l.contains("walking the dog")));
 
     n.send(b, "AWAY");
     n.drain(b);
@@ -485,7 +524,10 @@ fn who_whois_list_and_names() {
     assert!(has_numeric(&lines, "315"));
     assert!(lines.iter().any(|l| l.contains("bob")));
     assert!(has_numeric(&n.ask(a, "WHO bob"), "352"), "WHO by nick");
-    assert!(has_numeric(&n.ask(a, "WHO"), "315"), "WHO with no mask still ends");
+    assert!(
+        has_numeric(&n.ask(a, "WHO"), "315"),
+        "WHO with no mask still ends"
+    );
 
     let lines = n.ask(a, "WHOIS bob");
     assert!(has_numeric(&lines, "311"), "{lines:?}");
@@ -504,7 +546,10 @@ fn who_whois_list_and_names() {
 
     assert!(has_numeric(&n.ask(a, "MOTD"), "372"));
     assert!(has_numeric(&n.ask(a, "LUSERS"), "251"));
-    assert!(has_numeric(&n.ask(a, "FROBNICATE"), "421"), "unknown command");
+    assert!(
+        has_numeric(&n.ask(a, "FROBNICATE"), "421"),
+        "unknown command"
+    );
 }
 
 #[test]
@@ -571,8 +616,16 @@ fn channel_and_user_modes() {
     n.drain(a);
     {
         let c = n.server.state.channel("#room").unwrap();
-        assert_eq!(c.key.as_deref(), Some("secret"), "+k with no key must not unlock the channel");
-        assert_eq!(c.limit, Some(5), "+l with no number must not lift the limit");
+        assert_eq!(
+            c.key.as_deref(),
+            Some("secret"),
+            "+k with no key must not unlock the channel"
+        );
+        assert_eq!(
+            c.limit,
+            Some(5),
+            "+l with no number must not lift the limit"
+        );
     }
     n.send(a, "MODE #room -kl");
     n.drain(a);
@@ -590,7 +643,9 @@ fn channel_and_user_modes() {
     n.send(a, "MODE #room +t");
     let to_bob = n.drain(b);
     assert!(
-        !to_bob.iter().any(|l| l.contains("MODE") && l.contains("+t")),
+        !to_bob
+            .iter()
+            .any(|l| l.contains("MODE") && l.contains("+t")),
         "a no-op MODE must not be announced: {to_bob:?}"
     );
 
@@ -650,7 +705,9 @@ fn a_refused_mode_change_is_not_announced_to_the_channel() {
     let to_bob = n.drain(b);
     assert!(has_numeric(&to_alice, "481"), "{to_alice:?}");
     assert!(
-        !to_bob.iter().any(|l| l.contains("MODE") && l.contains("+r")),
+        !to_bob
+            .iter()
+            .any(|l| l.contains("MODE") && l.contains("+r")),
         "bob must not see a mode change that was refused: {to_bob:?}"
     );
     assert!(!n.server.state.channel("#room").unwrap().rf);
@@ -695,14 +752,20 @@ fn callsign_is_recorded_as_an_unverified_claim() {
     let a = n.client(1, "alice");
 
     assert!(n.ask(a, "CALLSIGN").iter().any(|l| l.contains("none")));
-    assert!(n.ask(a, "CALLSIGN not!valid").iter().any(|l| l.contains("not a valid callsign")));
+    assert!(n
+        .ask(a, "CALLSIGN not!valid")
+        .iter()
+        .any(|l| l.contains("not a valid callsign")));
     assert!(n
         .ask(a, "CALLSIGN AIRC")
         .iter()
         .any(|l| l.contains("does not look like an amateur callsign")));
 
     let lines = n.ask(a, "CALLSIGN sm0xyz");
-    assert!(lines.iter().any(|l| l.contains("unverified claim")), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains("unverified claim")),
+        "{lines:?}"
+    );
     assert_eq!(
         n.server
             .state
@@ -718,10 +781,7 @@ fn callsign_is_recorded_as_an_unverified_claim() {
 
 #[test]
 fn a_denied_callsign_is_refused() {
-    let text = CONFIG.replace(
-        "[policy]",
-        "[policy]\ndeny_callsigns = [\"SM0BAD\"]",
-    );
+    let text = CONFIG.replace("[policy]", "[policy]\ndeny_callsigns = [\"SM0BAD\"]");
     let mut n = Net::with(&text);
     let a = n.client(1, "alice");
     assert!(n
@@ -738,7 +798,10 @@ fn register_identify_and_unregister() {
     let mut n = Net::new();
     let a = n.client(1, "alice");
 
-    assert!(n.ask(a, "REGISTER short").iter().any(|l| l.contains("too short")));
+    assert!(n
+        .ask(a, "REGISTER short")
+        .iter()
+        .any(|l| l.contains("too short")));
     assert!(has_numeric(&n.ask(a, "REGISTER"), "461"));
     assert!(n
         .ask(a, "IDENTIFY whatever")
@@ -746,7 +809,10 @@ fn register_identify_and_unregister() {
         .any(|l| l.contains("not registered")));
 
     let lines = n.ask(a, "REGISTER goodpassword");
-    assert!(lines.iter().any(|l| l.contains("Nick registered")), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains("Nick registered")),
+        "{lines:?}"
+    );
     assert!(n.server.accounts.is_registered("alice"));
     assert!(n.server.state.user(&user_id(a)).unwrap().nick_identified);
 
@@ -801,7 +867,13 @@ fn a_registered_nick_must_be_identified_or_it_is_released() {
         lines.iter().any(|l| l.contains("This nick is registered")),
         "{lines:?}"
     );
-    assert!(n.server.state.user(&user_id(b)).unwrap().identify_by.is_some());
+    assert!(n
+        .server
+        .state
+        .user(&user_id(b))
+        .unwrap()
+        .identify_by
+        .is_some());
 }
 
 #[test]
@@ -829,13 +901,17 @@ fn quit_removes_the_user_and_tells_the_channel() {
     n.drain(b);
 
     n.send(a, "QUIT :73");
-    assert!(n.drain(b).iter().any(|l| l.contains("QUIT") && l.contains("73")));
+    assert!(n
+        .drain(b)
+        .iter()
+        .any(|l| l.contains("QUIT") && l.contains("73")));
     assert!(n.server.state.by_nick("alice").is_none());
 }
 
 #[test]
 fn the_command_flood_cap_bites_and_says_so() {
-    let text = CONFIG.replace("ip_cmds_per_min = 6000", "ip_cmds_per_min = 60")
+    let text = CONFIG
+        .replace("ip_cmds_per_min = 6000", "ip_cmds_per_min = 60")
         .replace("ip_cmd_burst = 500", "ip_cmd_burst = 5");
     let mut n = Net::with(&text);
     let a = n.client(1, "alice");
@@ -852,7 +928,10 @@ fn the_command_flood_cap_bites_and_says_so() {
 
     // PING, PONG and QUIT are never throttled: a client being told to slow
     // down still has to be able to answer a ping and leave.
-    assert!(n.ask(a, "PING :still-here").iter().any(|l| l.contains("PONG")));
+    assert!(n
+        .ask(a, "PING :still-here")
+        .iter()
+        .any(|l| l.contains("PONG")));
 }
 
 #[test]
@@ -887,7 +966,16 @@ fn radio_commands_report_a_disabled_gateway_without_pretending() {
         "a plain IRC server should say so: {lines:?}"
     );
     // Everything else needs privilege.
-    for sub in ["OFF", "ON", "ID", "HEARD", "MAIL", "QUEUE", "DUTY", "GRANT bob"] {
+    for sub in [
+        "OFF",
+        "ON",
+        "ID",
+        "HEARD",
+        "MAIL",
+        "QUEUE",
+        "DUTY",
+        "GRANT bob",
+    ] {
         assert!(
             has_numeric(&n.ask(a, &format!("RADIO {sub}")), "481"),
             "RADIO {sub} should need control-operator privilege"
@@ -896,12 +984,24 @@ fn radio_commands_report_a_disabled_gateway_without_pretending() {
 
     n.send(a, "OPER root operpass1");
     n.drain(a);
-    assert!(n.ask(a, "RADIO HEARD").iter().any(|l| l.contains("No stations")));
-    assert!(n.ask(a, "RADIO MAIL").iter().any(|l| l.contains("No messages")));
+    assert!(n
+        .ask(a, "RADIO HEARD")
+        .iter()
+        .any(|l| l.contains("No stations")));
+    assert!(n
+        .ask(a, "RADIO MAIL")
+        .iter()
+        .any(|l| l.contains("No messages")));
     assert!(n.ask(a, "RADIO DUTY").iter().any(|l| l.contains("No TNC")));
     assert!(n.ask(a, "RADIO QUEUE").iter().any(|l| l.contains("No TNC")));
-    assert!(n.ask(a, "RADIO ON").iter().any(|l| l.contains("disabled in the configuration")));
-    assert!(n.ask(a, "RADIO NONSENSE").iter().any(|l| l.contains("RADIO STATUS")));
+    assert!(n
+        .ask(a, "RADIO ON")
+        .iter()
+        .any(|l| l.contains("disabled in the configuration")));
+    assert!(n
+        .ask(a, "RADIO NONSENSE")
+        .iter()
+        .any(|l| l.contains("RADIO STATUS")));
     assert!(n.ask(a, "RADIO GRANT").iter().any(|l| l.contains("Usage")));
     assert!(n.ask(a, "RADIO REVOKE").iter().any(|l| l.contains("Usage")));
     assert!(n.ask(a, "RADIO KICK").iter().any(|l| l.contains("Usage")));
@@ -1028,7 +1128,9 @@ fn a_client_that_never_registers_is_reaped_by_the_tick() {
     std::thread::sleep(std::time::Duration::from_millis(1100));
     n.server.handle(Event::Tick);
     assert!(
-        n.drain(a).iter().any(|l| l.contains("Registration timeout")),
+        n.drain(a)
+            .iter()
+            .any(|l| l.contains("Registration timeout")),
         "an open socket that never registers is the cheapest denial of service there is"
     );
     assert!(n.server.state.user(&user_id(a)).is_none());
@@ -1093,19 +1195,17 @@ fn a_password_check_that_finishes_after_a_nick_change_is_discarded() {
 }
 
 #[test]
-fn an_unreadable_accounts_file_starts_empty_rather_than_failing() {
-    std::fs::write("target/test-commands-broken.json", b"{not json").unwrap();
-    let text = CONFIG.replace(
-        "target/test-commands-nicks.json",
-        "target/test-commands-broken.json",
-    );
+fn an_unreadable_accounts_file_refuses_to_start() {
+    let path = unique_accounts_file();
+    std::fs::write(&path, b"{not json").unwrap();
+    let text = CONFIG.replace("target/test-commands-nicks.json", &path);
     let config = Arc::new(Config::from_toml(&text).unwrap());
-    let server = Server::new(config, None);
-    assert!(
-        !server.accounts.is_registered("anyone"),
-        "a corrupt nick database must not take the server down with it"
-    );
-    let _ = std::fs::remove_file("target/test-commands-broken.json");
+    let err = match Server::new(config, None) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("corrupt nick file started an empty server"),
+    };
+    assert!(err.contains("overwrite") || err.contains("JSON"), "{err}");
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]
@@ -1193,7 +1293,11 @@ fn configuration_values_that_would_break_the_server_are_refused() {
             "max_channels_per_user = 0",
             "max_channels_per_user",
         ),
-        ("min_password_len = 8", "min_password_len = 0", "min_password_len"),
+        (
+            "min_password_len = 8",
+            "min_password_len = 0",
+            "min_password_len",
+        ),
     ];
     for (from, to, expect) in cases {
         let text = CONFIG.replace(from, to);
@@ -1210,10 +1314,7 @@ fn configuration_values_that_would_break_the_server_are_refused() {
 #[test]
 fn a_zero_length_rf_message_limit_is_refused() {
     // `max_rf_text_len = 0` turns every radiated message into a bare ellipsis.
-    let text = CONFIG.replace(
-        "[policy]",
-        "[policy]\nmax_rf_text_len = 0",
-    );
+    let text = CONFIG.replace("[policy]", "[policy]\nmax_rf_text_len = 0");
     let err = Config::from_toml(&text)
         .map(|_| String::new())
         .unwrap_or_else(|e| e.to_string());

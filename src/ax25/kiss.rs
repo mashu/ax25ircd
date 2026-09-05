@@ -159,7 +159,11 @@ mod tests {
             let wire = encode(port, command, &payload);
             let mut dec = KissDecoder::new(1024);
             let frames = dec.push(&wire);
-            assert_eq!(frames.len(), 1, "port {port} command {command}: {wire:02x?}");
+            assert_eq!(
+                frames.len(),
+                1,
+                "port {port} command {command}: {wire:02x?}"
+            );
             assert_eq!(frames[0].port, port, "port {port} command {command}");
             assert_eq!(frames[0].command, command);
             assert_eq!(

@@ -1,6 +1,6 @@
 //! ax25ircd - IRC server with an AX.25 packet radio gateway.
 //!
-//! Usage: `ax25ircd [--config path] [--check]`
+//! Usage: `ax25ircd [--config path] [--check] [--hash-password]`
 
 use std::fs::OpenOptions;
 use std::sync::Arc;
@@ -16,6 +16,21 @@ async fn main() -> anyhow::Result<()> {
     let (path, check_only) = match cli::parse_args(std::env::args().skip(1)) {
         cli::Invocation::Run { path } => (path, false),
         cli::Invocation::Check { path } => (path, true),
+        cli::Invocation::HashPassword => {
+            use std::io::Read;
+            let mut password = String::new();
+            std::io::stdin().read_to_string(&mut password)?;
+            let password = password.trim_end_matches(['\r', '\n']);
+            if password.is_empty() {
+                anyhow::bail!("no password on stdin");
+            }
+            println!(
+                "{}",
+                ax25ircd::accounts::hash_password(password)
+                    .map_err(|_| anyhow::anyhow!("could not hash password"))?
+            );
+            return Ok(());
+        }
         cli::Invocation::Version(text) => {
             println!("{text}");
             return Ok(());
@@ -54,7 +69,10 @@ async fn main() -> anyhow::Result<()> {
             .init();
         info!(path = %log_path, "logging to file");
     } else {
-        tracing_subscriber::registry().with(filter).with(stdout).init();
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(stdout)
+            .init();
     }
 
     let config = Arc::new(config);

@@ -5,8 +5,6 @@
 //! who may speak on one. Both are control-operator decisions, because they
 //! settle what gets transmitted under the gateway licensee's callsign.
 
-
-
 use crate::irc::message::{is_channel_name, Message};
 use crate::irc::numerics as num;
 
@@ -16,7 +14,11 @@ use super::super::{Delivery, Server};
 impl Server {
     pub(super) fn cmd_join(&mut self, uid: &UserId, msg: &Message) {
         let Some(list) = msg.param(0).map(|s| s.to_string()) else {
-            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["JOIN", "Not enough parameters"]);
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["JOIN", "Not enough parameters"],
+            );
             return;
         };
         if list == "0" {
@@ -56,19 +58,31 @@ impl Server {
         }
         let count = self.state.user(uid).map(|u| u.channels.len()).unwrap_or(0);
         if count >= self.config.server.max_channels_per_user {
-            self.numeric(uid, num::ERR_TOOMANYCHANNELS, &[name, "You have joined too many channels"]);
+            self.numeric(
+                uid,
+                num::ERR_TOOMANYCHANNELS,
+                &[name, "You have joined too many channels"],
+            );
             return;
         }
         if let Some(chan) = self.state.channel(name) {
             if let Some(k) = &chan.key {
                 if k != key {
-                    self.numeric(uid, num::ERR_BADCHANNELKEY, &[name, "Cannot join channel (+k)"]);
+                    self.numeric(
+                        uid,
+                        num::ERR_BADCHANNELKEY,
+                        &[name, "Cannot join channel (+k)"],
+                    );
                     return;
                 }
             }
             if let Some(limit) = chan.limit {
                 if chan.members.len() >= limit {
-                    self.numeric(uid, num::ERR_CHANNELISFULL, &[name, "Cannot join channel (+l)"]);
+                    self.numeric(
+                        uid,
+                        num::ERR_CHANNELISFULL,
+                        &[name, "Cannot join channel (+l)"],
+                    );
                     return;
                 }
             }
@@ -111,14 +125,23 @@ impl Server {
         }
         self.send_topic(uid, &real_name, false);
         self.send_names(uid, &real_name);
-        if self.state.channel(&real_name).map(|c| c.rf).unwrap_or(false) {
+        if self
+            .state
+            .channel(&real_name)
+            .map(|c| c.rf)
+            .unwrap_or(false)
+        {
             self.notice_rf_join(uid, &real_name);
         }
     }
 
     pub(super) fn cmd_part(&mut self, uid: &UserId, msg: &Message) {
         let Some(list) = msg.param(0).map(|s| s.to_string()) else {
-            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["PART", "Not enough parameters"]);
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["PART", "Not enough parameters"],
+            );
             return;
         };
         let reason = msg.param(1).unwrap_or("Leaving").to_string();
@@ -143,7 +166,11 @@ impl Server {
             .map(|c| c.members.contains_key(uid))
             .unwrap_or(false)
         {
-            self.numeric(uid, num::ERR_NOTONCHANNEL, &[&real_name, "You're not on that channel"]);
+            self.numeric(
+                uid,
+                num::ERR_NOTONCHANNEL,
+                &[&real_name, "You're not on that channel"],
+            );
             return;
         }
         let (nick, prefix) = self
@@ -210,12 +237,20 @@ impl Server {
             let joined = chunk.join(" ");
             self.numeric(uid, num::RPL_NAMREPLY, &["=", &chan.name, &joined]);
         }
-        self.numeric(uid, num::RPL_ENDOFNAMES, &[&chan.name, "End of /NAMES list"]);
+        self.numeric(
+            uid,
+            num::RPL_ENDOFNAMES,
+            &[&chan.name, "End of /NAMES list"],
+        );
     }
 
     pub(super) fn cmd_topic(&mut self, uid: &UserId, msg: &Message) {
         let Some(name) = msg.param(0).map(|s| s.to_string()) else {
-            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["TOPIC", "Not enough parameters"]);
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["TOPIC", "Not enough parameters"],
+            );
             return;
         };
         let Some(chan) = self.state.channel(&name).cloned() else {
@@ -227,13 +262,21 @@ impl Server {
             return;
         };
         if !chan.members.contains_key(uid) {
-            self.numeric(uid, num::ERR_NOTONCHANNEL, &[&chan.name, "You're not on that channel"]);
+            self.numeric(
+                uid,
+                num::ERR_NOTONCHANNEL,
+                &[&chan.name, "You're not on that channel"],
+            );
             return;
         }
         let is_op = chan.members.get(uid).map(|f| f.op).unwrap_or(false);
         let is_oper = self.state.user(uid).map(|u| u.oper).unwrap_or(false);
         if chan.topic_locked && !is_op && !is_oper {
-            self.numeric(uid, num::ERR_CHANOPRIVSNEEDED, &[&chan.name, "You're not channel operator"]);
+            self.numeric(
+                uid,
+                num::ERR_CHANOPRIVSNEEDED,
+                &[&chan.name, "You're not channel operator"],
+            );
             return;
         }
         let (nick, prefix) = self
@@ -255,10 +298,7 @@ impl Server {
         // privilege, callsign, per-sender rate limit, content screening and
         // the airtime backlog. A channel operator retyping the topic is not
         // a reason to key the transmitter.
-        let mut allow_rf = changed
-            && chan.rf
-            && chan.has_rf_members()
-            && self.radio.available();
+        let mut allow_rf = changed && chan.rf && chan.has_rf_members() && self.radio.available();
         let air_topic = if allow_rf {
             match self.screen_for_air(uid, &topic) {
                 Some(t) => t.text,
@@ -295,11 +335,7 @@ impl Server {
             })
             .collect();
         for (name, count, rf, topic) in channels {
-            let label = if rf {
-                format!("[RF] {topic}")
-            } else {
-                topic
-            };
+            let label = if rf { format!("[RF] {topic}") } else { topic };
             self.numeric(uid, num::RPL_LIST, &[&name, &count.to_string(), &label]);
         }
         self.numeric(uid, num::RPL_LISTEND, &["End of /LIST"]);
@@ -307,7 +343,11 @@ impl Server {
 
     pub(super) fn cmd_mode(&mut self, uid: &UserId, msg: &Message) {
         let Some(target) = msg.param(0).map(|s| s.to_string()) else {
-            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["MODE", "Not enough parameters"]);
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["MODE", "Not enough parameters"],
+            );
             return;
         };
         if !is_channel_name(&target) {
@@ -337,7 +377,11 @@ impl Server {
         let is_op = chan.members.get(uid).map(|f| f.op).unwrap_or(false);
         let is_oper = self.state.user(uid).map(|u| u.oper).unwrap_or(false);
         if !is_op && !is_oper {
-            self.numeric(uid, num::ERR_CHANOPRIVSNEEDED, &[&chan.name, "You're not channel operator"]);
+            self.numeric(
+                uid,
+                num::ERR_CHANOPRIVSNEEDED,
+                &[&chan.name, "You're not channel operator"],
+            );
             return;
         }
         // `+r` (RF bridging) is reserved to control operators: turning it on
@@ -347,14 +391,15 @@ impl Server {
         let mut applied = String::new();
         let mut applied_args: Vec<String> = Vec::new();
         let mut last_sign: Option<char> = None;
-        let push_mode = |applied: &mut String, last_sign: &mut Option<char>, adding: bool, letter: char| {
-            let sign = if adding { '+' } else { '-' };
-            if *last_sign != Some(sign) {
-                applied.push(sign);
-                *last_sign = Some(sign);
-            }
-            applied.push(letter);
-        };
+        let push_mode =
+            |applied: &mut String, last_sign: &mut Option<char>, adding: bool, letter: char| {
+                let sign = if adding { '+' } else { '-' };
+                if *last_sign != Some(sign) {
+                    applied.push(sign);
+                    *last_sign = Some(sign);
+                }
+                applied.push(letter);
+            };
         for c in changes.chars() {
             match c {
                 '+' => adding = true,
@@ -383,7 +428,11 @@ impl Server {
                 }
                 'r' => {
                     if !is_oper {
-                        self.numeric(uid, num::ERR_NOPRIVILEGES, &["Only a control operator may change +r"]);
+                        self.numeric(
+                            uid,
+                            num::ERR_NOPRIVILEGES,
+                            &["Only a control operator may change +r"],
+                        );
                     } else if let Some(ch) = self.state.channel_mut(&target) {
                         if ch.rf != adding {
                             ch.rf = adding;
@@ -421,7 +470,11 @@ impl Server {
                     let raw = msg.param(arg_index).map(|s| s.to_string());
                     arg_index += 1;
                     if adding {
-                        let Some(limit) = raw.as_deref().and_then(|s| s.parse::<usize>().ok()).filter(|&n| n > 0) else {
+                        let Some(limit) = raw
+                            .as_deref()
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .filter(|&n| n > 0)
+                        else {
                             self.numeric(
                                 uid,
                                 num::ERR_NEEDMOREPARAMS,
@@ -517,11 +570,19 @@ impl Server {
 
     pub(super) fn cmd_kick(&mut self, uid: &UserId, msg: &Message) {
         let Some(channel) = msg.param(0).map(|s| s.to_string()) else {
-            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["KICK", "Not enough parameters"]);
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["KICK", "Not enough parameters"],
+            );
             return;
         };
         let Some(who) = msg.param(1).map(|s| s.to_string()) else {
-            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["KICK", "Not enough parameters"]);
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["KICK", "Not enough parameters"],
+            );
             return;
         };
         let reason = msg.param(2).unwrap_or("Kicked").to_string();
@@ -530,7 +591,11 @@ impl Server {
             return;
         };
         if !self.is_chanop(uid, &chan.name) {
-            self.numeric(uid, num::ERR_CHANOPRIVSNEEDED, &[&chan.name, "You're not channel operator"]);
+            self.numeric(
+                uid,
+                num::ERR_CHANOPRIVSNEEDED,
+                &[&chan.name, "You're not channel operator"],
+            );
             return;
         }
         let Some(target) = self.find_target(&who) else {
@@ -538,7 +603,11 @@ impl Server {
             return;
         };
         if !chan.members.contains_key(&target) {
-            self.numeric(uid, num::ERR_USERNOTINCHANNEL, &[&who, &chan.name, "They aren't on that channel"]);
+            self.numeric(
+                uid,
+                num::ERR_USERNOTINCHANNEL,
+                &[&who, &chan.name, "They aren't on that channel"],
+            );
             return;
         }
         let kicker = self.state.user(uid).map(|u| u.prefix()).unwrap_or_default();
@@ -551,7 +620,10 @@ impl Server {
             }
         }
         self.state.part(&target, &chan.name);
-        self.audit.event("kick", &[("channel", &chan.name), ("nick", &who), ("reason", &reason)]);
+        self.audit.event(
+            "kick",
+            &[("channel", &chan.name), ("nick", &who), ("reason", &reason)],
+        );
         if let UserId::Rf(call) = &target {
             if let Some(peer) = self.radio.sessions.peer_mut(call) {
                 peer.mark_kicked(&chan.name);

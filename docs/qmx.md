@@ -97,6 +97,7 @@ CHANNEL  0
 MODEM    300
 PTT      RIG 2057 /dev/serial/by-id/usb-QRP_Labs_QMX_Transceiver-if00
 KISSPORT 8001
+AGWPORT  0
 TXDELAY  40
 TXTAIL   30
 ```
@@ -109,6 +110,8 @@ direwolf -c direwolf-qmx.conf
 ```
 
 Leave this terminal running. It should listen on KISS TCP port 8001.
+`AGWPORT 0` turns off Direwolf's AGW server (port 8000). ax25ircd speaks KISS,
+not AGW, and 8000 is often already taken.
 
 ## 5. Install ax25ircd
 
@@ -143,6 +146,8 @@ kind = "tcp"
 host = "127.0.0.1"
 port = 8001
 tx_pacing_ms = 2500
+# Cross-check MODEM / TXDELAY / TXTAIL against the governor.
+direwolf_conf = "/home/YOU/direwolf-qmx.conf"
 
 # Keep the QMX alive. At 300 baud a full frame is about four seconds of
 # unbroken carrier, and the QMX has no thermal headroom to speak of. These
@@ -158,7 +163,22 @@ max_continuous_secs = 30
 cooldown_secs = 60
 hourly_airtime_secs = 900
 max_hold_secs = 120
+
+# Required if you will leave the transmitter unattended. ax25ircd cannot see
+# SWR or PA temperature — Direwolf already holds the CAT port for PTT.
+# The command fails closed: until it exits 0, nothing is keyed, IDs included.
+[radio.interlock]
+command = "/usr/local/bin/check-qmx"
+args = ["--max-swr", "2.5"]
+interval_secs = 30
+timeout_secs = 5
 ```
+
+!!! danger "Do not leave a QMX unattended without an interlock"
+    The duty-cycle governor is a *model* of key-down time. It cannot see a
+    high SWR or a hot PA. Configure `[radio.interlock]` so a failing check
+    inhibits **everything**, identification included. Sit with the radio
+    until that command is proven.
 
 !!! danger "Do not raise these without reading [Airtime](airtime.md)"
     `[policy]` limits messages; `[radio.duty]` limits seconds of key-down.
@@ -192,7 +212,8 @@ irssi
 
 `RADIO` should show the transmitter **ON**. `#rf` is `+rm`: without a callsign
 you can listen, you cannot speak. Without RF-TX your speech stays on IRC.
-Change the example OPER password before you bind to a public address.
+Change the example OPER password, and hash it (`ax25ircd --hash-password`),
+before you bind to a public address.
 
 ## 8. First message that actually keys the radio
 
@@ -224,6 +245,7 @@ callsign with `-` turned into `|` (`YOURCALL|7`).
 ## 10. If nothing comes back
 
 - Direwolf not running, or not on `127.0.0.1:8001` — ax25ircd reconnects, but nothing radiates.
+- `Bind failed … Address already in use` on port 8000 — AGW, unused here. Set `AGWPORT 0`. The line that matters is `Ready to accept KISS TCP … on port 8001`.
 - `Could not open audio device … No such file or directory` — card index moved
   (HDMI often occupies `plughw:1,0`). Use `plughw:CARD=Transceiver,DEV=0`.
 - `Device or resource busy` on transmit — PipeWire grabbed the QMX; see step 2.

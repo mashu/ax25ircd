@@ -38,10 +38,10 @@
 //! entry point rather than a set of helpers: a rule about airtime is only
 //! worth something if there is no second way round it.
 
-pub mod airc;
-pub mod ax25;
 pub mod accounts;
+pub mod airc;
 pub mod audit;
+pub mod ax25;
 pub mod callsign;
 pub mod cli;
 pub mod config;

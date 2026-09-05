@@ -121,6 +121,12 @@ fn parse_inner<I: IntoIterator<Item = String>>(argv: I) -> anyhow::Result<Option
             }
             "--duty" => {
                 if let Some(v) = args.next().and_then(|v| v.parse::<u32>().ok()) {
+                    if v == 0 || f64::from(v) / 100.0 > crate::ax25::airtime::HARD_MAX_DUTY {
+                        anyhow::bail!(
+                            "--duty must be between 1 and {} (a QMX will not survive more)",
+                            (crate::ax25::airtime::HARD_MAX_DUTY * 100.0) as u32
+                        );
+                    }
                     airtime.max_duty = f64::from(v) / 100.0;
                 }
             }
@@ -151,6 +157,13 @@ fn parse_inner<I: IntoIterator<Item = String>>(argv: I) -> anyhow::Result<Option
     airtime
         .check_hardware_safe()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if !crate::ax25::airtime::STANDARD_PACKET_BAUDS.contains(&airtime.baud) {
+        anyhow::bail!(
+            "--baud {} is not 300, 1200 or 9600; a mismatch with the modem \
+             under-counts key-down time. Those three are the packet rates.",
+            airtime.baud
+        );
+    }
     for (name, ms) in [
         ("--txdelay", airtime.txdelay.as_millis()),
         ("--txtail", airtime.txtail.as_millis()),
@@ -370,7 +383,11 @@ impl Station {
             return;
         };
         let f = msg.fields();
-        let stale = if msg.flags & flags::RETRY != 0 { " (repeat)" } else { "" };
+        let stale = if msg.flags & flags::RETRY != 0 {
+            " (repeat)"
+        } else {
+            ""
+        };
         match msg.kind {
             Kind::Msg | Kind::Notice => {
                 let (target, from, text) = (
@@ -443,7 +460,6 @@ pub fn human_age(secs: u64) -> String {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,31 +497,47 @@ mod tests {
         assert_eq!(a.paclen, 128);
         assert!(a.path.is_empty());
         assert!(!a.quiet);
-        assert!(matches!(a.link, TncLink::Tcp { ref host, port } if host == "127.0.0.1" && port == 8001));
+        assert!(
+            matches!(a.link, TncLink::Tcp { ref host, port } if host == "127.0.0.1" && port == 8001)
+        );
     }
 
     #[test]
     fn parses_every_option() {
         let a = parsed(&[
-            "--call", "SM0ABC-7",
-            "--gateway", "SK0MT-1",
-            "--channel", "#rf",
-            "--tnc", "tcp://10.0.0.5:9001",
-            "--paclen", "200",
-            "--path", "SK0MT-2,SK0AA-1",
+            "--call",
+            "SM0ABC-7",
+            "--gateway",
+            "SK0MT-1",
+            "--channel",
+            "#rf",
+            "--tnc",
+            "tcp://10.0.0.5:9001",
+            "--paclen",
+            "200",
+            "--path",
+            "SK0MT-2,SK0AA-1",
             "--quiet",
-            "--baud", "1200",
-            "--txdelay", "250",
-            "--txtail", "120",
-            "--duty", "40",
-            "--max-continuous", "45",
-            "--cooldown", "90",
+            "--baud",
+            "1200",
+            "--txdelay",
+            "250",
+            "--txtail",
+            "120",
+            "--duty",
+            "40",
+            "--max-continuous",
+            "45",
+            "--cooldown",
+            "90",
         ]);
         assert_eq!(a.channel.as_deref(), Some("#rf"));
         assert_eq!(a.paclen, 200);
         assert_eq!(a.path.len(), 2);
         assert!(a.quiet);
-        assert!(matches!(a.link, TncLink::Tcp { ref host, port } if host == "10.0.0.5" && port == 9001));
+        assert!(
+            matches!(a.link, TncLink::Tcp { ref host, port } if host == "10.0.0.5" && port == 9001)
+        );
         assert_eq!(a.airtime.baud, 1200);
         assert_eq!(a.airtime.txdelay, Duration::from_millis(250));
         assert_eq!(a.airtime.txtail, Duration::from_millis(120));
@@ -519,24 +551,57 @@ mod tests {
         assert!(usage_error(&["--call", "SM0ABC-7"]).contains("required"));
         assert!(usage_error(&["--nonsense"]).contains("unknown argument"));
         assert!(usage_error(&[
-            "--call", "SM0ABC-7", "--gateway", "SK0MT-1",
-            "--path", "A,B,C"
+            "--call",
+            "SM0ABC-7",
+            "--gateway",
+            "SK0MT-1",
+            "--path",
+            "A,B,C"
         ])
         .contains("two digipeater hops"));
         assert!(usage_error(&[
-            "--call", "NOTACALL", "--gateway", "SK0MT-1", "--tnc", "carrier-pigeon://x"
+            "--call",
+            "NOTACALL",
+            "--gateway",
+            "SK0MT-1",
+            "--tnc",
+            "carrier-pigeon://x"
         ])
         .contains("unrecognised --tnc"));
         // The airtime limits are enforced here, not only in the gateway.
         assert!(usage_error(&[
-            "--call", "SM0ABC-7", "--gateway", "SK0MT-1",
-            "--max-continuous", "60", "--cooldown", "5"
+            "--call",
+            "SM0ABC-7",
+            "--gateway",
+            "SK0MT-1",
+            "--max-continuous",
+            "60",
+            "--cooldown",
+            "5"
         ])
         .contains("burst duty cycle"));
         assert!(usage_error(&[
-            "--call", "SM0ABC-7", "--gateway", "SK0MT-1", "--txdelay", "9000"
+            "--call",
+            "SM0ABC-7",
+            "--gateway",
+            "SK0MT-1",
+            "--txdelay",
+            "9000"
         ])
         .contains("2550"));
+        assert!(
+            usage_error(&["--call", "SM0ABC-7", "--gateway", "SK0MT-1", "--duty", "90"])
+                .contains("1 and 50")
+        );
+        assert!(usage_error(&[
+            "--call",
+            "SM0ABC-7",
+            "--gateway",
+            "SK0MT-1",
+            "--baud",
+            "2400"
+        ])
+        .contains("300"));
         assert!(matches!(parse_args(args(&["--help"])), Invocation::Help(_)));
     }
 
@@ -604,7 +669,10 @@ mod tests {
         assert!(s.drain_output().iter().any(|l| l.contains("usage: /join")));
 
         assert!(s.handle_input("/nonsense"));
-        assert!(s.drain_output().iter().any(|l| l.contains("unknown command")));
+        assert!(s
+            .drain_output()
+            .iter()
+            .any(|l| l.contains("unknown command")));
 
         assert!(s.handle_input("talking before joining"));
         assert!(s
@@ -640,23 +708,41 @@ mod tests {
         assert!(s.drain_output().iter().any(|l| l == "*bob* just you"));
 
         // A join confirmation carries a count; an explicit NAMES carries names.
-        s.handle_rf(from_gateway(Kind::NamesReply, 4, &["#rf", "12 here", "the topic"]));
+        s.handle_rf(from_gateway(
+            Kind::NamesReply,
+            4,
+            &["#rf", "12 here", "the topic"],
+        ));
         let out = s.drain_output();
-        assert!(out.iter().any(|l| l.contains("joined #rf (12 here")), "{out:?}");
+        assert!(
+            out.iter().any(|l| l.contains("joined #rf (12 here")),
+            "{out:?}"
+        );
         assert!(out.iter().any(|l| l.contains("topic: the topic")));
 
-        s.handle_rf(from_gateway(Kind::NamesReply, 5, &["#rf", "@alice,+SM0XYZ|1", ""]));
+        s.handle_rf(from_gateway(
+            Kind::NamesReply,
+            5,
+            &["#rf", "@alice,+SM0XYZ|1", ""],
+        ));
         assert!(s
             .drain_output()
             .iter()
             .any(|l| l.contains("members: @alice,+SM0XYZ|1")));
 
-        s.handle_rf(from_gateway(Kind::Stored, 6, &["SM0ABC|7", "carol", "held for you", "7200"]));
+        s.handle_rf(from_gateway(
+            Kind::Stored,
+            6,
+            &["SM0ABC|7", "carol", "held for you", "7200"],
+        ));
         let out = s.drain_output();
         assert!(out.iter().any(|l| l.contains("[held 2h]")), "{out:?}");
 
         s.handle_rf(from_gateway(Kind::Presence, 7, &["#rf", "dave", "+"]));
-        assert!(s.drain_output().iter().any(|l| l.contains("dave joined #rf")));
+        assert!(s
+            .drain_output()
+            .iter()
+            .any(|l| l.contains("dave joined #rf")));
         s.handle_rf(from_gateway(Kind::Presence, 8, &["#rf", "dave", "-"]));
         assert!(s.drain_output().iter().any(|l| l.contains("dave left #rf")));
 
@@ -691,7 +777,10 @@ mod tests {
         )
         .unwrap();
         s.handle_rf(other);
-        assert!(s.drain_output().is_empty(), "only the gateway is listened to");
+        assert!(
+            s.drain_output().is_empty(),
+            "only the gateway is listened to"
+        );
 
         // From the gateway, but unicast to somebody else. PROTOCOL.md §3.1:
         // reading it would poison our own duplicate-suppression window.
@@ -699,7 +788,12 @@ mod tests {
             "SK0MT-1".parse().unwrap(),
             "SM0QQQ-3".parse().unwrap(),
             &[],
-            AircFrame::new(Kind::Msg, 31, encode_fields(&["SM0QQQ|3", "bob", "private"])).encode(),
+            AircFrame::new(
+                Kind::Msg,
+                31,
+                encode_fields(&["SM0QQQ|3", "bob", "private"]),
+            )
+            .encode(),
         )
         .unwrap();
         s.handle_rf(elsewhere);

@@ -57,11 +57,7 @@ impl Mailbox {
         }
     }
 
-    pub fn store(
-        &mut self,
-        to: &Callsign,
-        message: StoredMessage,
-    ) -> Result<usize, StoreError> {
+    pub fn store(&mut self, to: &Callsign, message: StoredMessage) -> Result<usize, StoreError> {
         if !self.enabled || self.per_station == 0 {
             return Err(StoreError::Disabled);
         }
@@ -75,7 +71,6 @@ impl Mailbox {
         queue.push_back(message);
         Ok(queue.len())
     }
-
 
     /// The oldest message waiting for a station, without removing it.
     ///
@@ -96,7 +91,6 @@ impl Mailbox {
         }
         msg
     }
-
 
     pub fn depth(&self, call: &Callsign) -> usize {
         self.boxes.get(call).map(|q| q.len()).unwrap_or(0)

@@ -115,7 +115,7 @@ rf_names_max = 8
 #
 # While it fails, NOTHING is transmitted, station identification included.
 # It fails closed: a command that cannot be run, times out, or has not run
-# yet counts as a failure.
+# yet counts as a failure. Required for unattended QMX operation.
 #
 # [radio.interlock]
 # command = "/usr/local/bin/check-swr"
@@ -132,6 +132,8 @@ port = 8001
 # device = "/dev/ttyUSB0"
 # baud = 9600
 kiss_port = 0
+# Optional: `--check` compares MODEM / TXDELAY / TXTAIL to [radio.duty].
+# direwolf_conf = "/etc/direwolf-qmx.conf"
 
 # Minimum gap between transmissions. At 1200 baud a 128 byte frame is about
 # one second of airtime, so leave room for everyone else.
@@ -229,4 +231,6 @@ rf = false
 
 [[opers]]
 name = "sm0abc"
+# Plaintext is accepted only when listen.bind is loopback. On a public
+# address, paste an Argon2id hash from: ax25ircd --hash-password
 password = "change-me"

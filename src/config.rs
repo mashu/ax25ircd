@@ -241,6 +241,11 @@ pub struct DutyConfig {
     /// being transmitted late. Stale traffic costs airtime and says nothing.
     #[serde(default = "default_max_hold")]
     pub max_hold_secs: u64,
+    /// Permit a baud rate other than 300, 1200 or 9600. Without this, a
+    /// mistyped rate (the usual QMX mistake is 1200 against a 300-baud modem)
+    /// is refused at startup.
+    #[serde(default)]
+    pub allow_nonstandard_baud: bool,
 }
 
 impl Default for DutyConfig {
@@ -256,6 +261,7 @@ impl Default for DutyConfig {
             cooldown_secs: default_cooldown(),
             hourly_airtime_secs: default_hourly_airtime(),
             max_hold_secs: default_max_hold(),
+            allow_nonstandard_baud: false,
         }
     }
 }
@@ -311,6 +317,11 @@ pub struct TncSection {
     pub persistence: Option<u8>,
     #[serde(default)]
     pub slottime: Option<u8>,
+    /// Optional Direwolf config to cross-check against `[radio.duty]`.
+    /// `--check` compares MODEM / TXDELAY / TXTAIL so the governor's cost
+    /// model cannot silently disagree with the modem.
+    #[serde(default)]
+    pub direwolf_conf: Option<String>,
     /// Accepted only so that a configuration written before these moved gets
     /// an explanation instead of serde's "unknown field `txdelay`". Setting
     /// either is an error; see [`Config::validate`].
@@ -332,6 +343,7 @@ impl Default for TncSection {
             tx_pacing_ms: default_tx_pacing(),
             persistence: None,
             slottime: None,
+            direwolf_conf: None,
             txdelay: None,
             txtail: None,
         }
@@ -434,8 +446,8 @@ pub struct ChannelConfig {
 #[serde(deny_unknown_fields)]
 pub struct OperConfig {
     pub name: String,
-    /// Plain password. This server does not pretend to be a security product;
-    /// run it behind TLS or on localhost and treat OPER as a local console.
+    /// Plain password or Argon2id PHC string (`ax25ircd --hash-password`).
+    /// Plaintext is only accepted when `listen.bind` is loopback-only.
     pub password: String,
 }
 
@@ -536,6 +548,7 @@ impl Config {
                  truncated to nothing"
             );
         }
+        check_oper_passwords(&self.opers, &self.listen.bind)?;
         let mut seen: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
         for ch in &self.channels {
             if !crate::irc::message::is_channel_name(&ch.name) {
@@ -635,6 +648,24 @@ impl Config {
             if duty.baud == 0 {
                 anyhow::bail!("radio.duty.baud must be at least 1");
             }
+            if !duty.allow_nonstandard_baud
+                && !crate::ax25::airtime::STANDARD_PACKET_BAUDS.contains(&duty.baud)
+            {
+                anyhow::bail!(
+                    "radio.duty.baud is {}; the packet rates this station will price \
+                     without an override are 300 (HF), 1200 (VHF FM) and 9600. A wrong \
+                     baud rate makes the governor under-count key-down time and will \
+                     cook a QMX. Set allow_nonstandard_baud = true only if you mean it.",
+                    duty.baud
+                );
+            }
+            if self.radio.tnc.tx_pacing_ms == 0 && self.radio.tnc.kind != "loopback" {
+                anyhow::bail!(
+                    "radio.tnc.tx_pacing_ms is 0 on a real transmitter: frames would be \
+                     handed to the TNC back-to-back aside from the duty governor. Use \
+                     loopback for tests, or set a gap (2500 ms is the QMX starting point)."
+                );
+            }
             // These are pushed to the TNC as KISS parameters, which carry them
             // in 10 ms units in a single octet.
             for (name, v) in [
@@ -651,11 +682,12 @@ impl Config {
             let air = duty.to_airtime();
             // The window average is only half the story: the run and cooldown
             // settings are an independent way to hold the transmitter keyed.
-            air.check_hardware_safe().map_err(|e| anyhow::anyhow!("radio.duty: {e}"))?;
+            air.check_hardware_safe()
+                .map_err(|e| anyhow::anyhow!("radio.duty: {e}"))?;
             // A frame the governor can never fit inside its own allowance
             // would be deferred until `max_hold` and then dropped, forever.
-            let biggest = crate::ax25::Governor::new(air.clone())
-                .airtime_for(self.radio.paclen + 64);
+            let biggest =
+                crate::ax25::Governor::new(air.clone()).airtime_for(self.radio.paclen + 64);
             let allowance = air.window.mul_f64(air.effective_duty());
             if biggest > allowance {
                 anyhow::bail!(
@@ -671,6 +703,9 @@ impl Config {
                 anyhow::bail!(
                     "radio.duty.hourly_airtime_secs is smaller than a single full-length frame"
                 );
+            }
+            if let Some(path) = &self.radio.tnc.direwolf_conf {
+                check_direwolf_conf(path, duty)?;
             }
         }
         for c in self
@@ -690,12 +725,104 @@ impl Config {
     }
 
     pub fn rf_path(&self) -> Vec<Callsign> {
-        self.radio.path.iter().filter_map(|d| d.parse().ok()).collect()
+        self.radio
+            .path
+            .iter()
+            .filter_map(|d| d.parse().ok())
+            .collect()
     }
 
     pub fn id_interval(&self) -> Duration {
         Duration::from_secs(self.radio.id_interval_secs)
     }
+}
+
+fn check_oper_passwords(opers: &[OperConfig], bind: &[String]) -> anyhow::Result<()> {
+    let plaintext = opers
+        .iter()
+        .filter(|o| !crate::accounts::is_phc_hash(&o.password))
+        .count();
+    if plaintext == 0 {
+        return Ok(());
+    }
+    if bind.iter().all(|a| bind_is_loopback(a)) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{plaintext} [[opers]] password(s) are plaintext and listen.bind is not loopback-only. \
+         Hash them (`ax25ircd --hash-password`) or bind only to 127.0.0.1 / ::1. \
+         OPER with a password in the clear on a public address is control of the transmitter."
+    );
+}
+
+fn bind_is_loopback(addr: &str) -> bool {
+    if let Ok(sa) = addr.parse::<std::net::SocketAddr>() {
+        return sa.ip().is_loopback();
+    }
+    let host = addr
+        .rsplit_once(':')
+        .map(|(h, _)| h.trim_matches(['[', ']']))
+        .unwrap_or(addr);
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+}
+
+fn check_direwolf_conf(path: &str, duty: &DutyConfig) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("radio.tnc.direwolf_conf ({path}): {e}"))?;
+    let mut modem: Option<u32> = None;
+    let mut txdelay_units: Option<u32> = None;
+    let mut txtail_units: Option<u32> = None;
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(key) = parts.next() else {
+            continue;
+        };
+        match key.to_ascii_uppercase().as_str() {
+            "MODEM" => {
+                if let Some(v) = parts.next().and_then(|s| s.parse().ok()) {
+                    modem = Some(v);
+                }
+            }
+            "TXDELAY" => txdelay_units = parts.next().and_then(|s| s.parse().ok()),
+            "TXTAIL" => txtail_units = parts.next().and_then(|s| s.parse().ok()),
+            _ => {}
+        }
+    }
+    let Some(baud) = modem else {
+        anyhow::bail!("radio.tnc.direwolf_conf ({path}) has no MODEM line");
+    };
+    if baud != duty.baud {
+        anyhow::bail!(
+            "radio.duty.baud is {} but {path} has MODEM {baud}; the governor would \
+             under-count key-down time. They must match.",
+            duty.baud
+        );
+    }
+    if let Some(u) = txdelay_units {
+        let ms = u64::from(u) * 10;
+        if ms != duty.txdelay_ms {
+            anyhow::bail!(
+                "radio.duty.txdelay_ms is {} but {path} has TXDELAY {u} ({ms} ms). \
+                 They must match so the cost model and the modem agree.",
+                duty.txdelay_ms
+            );
+        }
+    }
+    if let Some(u) = txtail_units {
+        let ms = u64::from(u) * 10;
+        if ms != duty.txtail_ms {
+            anyhow::bail!(
+                "radio.duty.txtail_ms is {} but {path} has TXTAIL {u} ({ms} ms). \
+                 They must match so the cost model and the modem agree.",
+                duty.txtail_ms
+            );
+        }
+    }
+    Ok(())
 }
 
 fn default_network() -> String {
@@ -930,5 +1057,101 @@ ping_interval_secs = 0
 "##;
         let err = Config::from_toml(text).unwrap_err().to_string();
         assert!(err.contains("ping_interval_secs"), "{err}");
+    }
+
+    #[test]
+    fn plaintext_oper_is_refused_on_a_public_bind() {
+        let text = r##"
+[server]
+name = "test.example"
+[listen]
+bind = ["0.0.0.0:6667"]
+[[opers]]
+name = "root"
+password = "operpass1"
+"##;
+        let err = Config::from_toml(text).unwrap_err().to_string();
+        assert!(err.contains("plaintext"), "{err}");
+    }
+
+    #[test]
+    fn plaintext_oper_is_allowed_on_loopback() {
+        let text = r##"
+[server]
+name = "test.example"
+[listen]
+bind = ["127.0.0.1:6667"]
+[[opers]]
+name = "root"
+password = "operpass1"
+"##;
+        Config::from_toml(text).unwrap();
+    }
+
+    const RADIO: &str = r##"
+[server]
+name = "test.example"
+[radio]
+enabled = true
+callsign = "SM0ABC-1"
+[[channels]]
+name = "#rf"
+rf = true
+[radio.tnc]
+kind = "loopback"
+"##;
+
+    #[test]
+    fn rejects_a_nonstandard_baud_unless_overridden() {
+        let text = format!("{RADIO}\n[radio.duty]\nbaud = 4800\n");
+        let err = Config::from_toml(&text).unwrap_err().to_string();
+        assert!(err.contains("baud"), "{err}");
+        let text = format!("{RADIO}\n[radio.duty]\nbaud = 4800\nallow_nonstandard_baud = true\n");
+        Config::from_toml(&text).unwrap();
+    }
+
+    #[test]
+    fn rejects_zero_pacing_on_a_real_tnc() {
+        let text = r##"
+[server]
+name = "test.example"
+[radio]
+enabled = true
+callsign = "SM0ABC-1"
+[[channels]]
+name = "#rf"
+rf = true
+[radio.tnc]
+kind = "tcp"
+tx_pacing_ms = 0
+"##;
+        let err = Config::from_toml(text).unwrap_err().to_string();
+        assert!(err.contains("tx_pacing_ms"), "{err}");
+    }
+
+    #[test]
+    fn direwolf_conf_must_agree_with_the_governor() {
+        let dir = std::env::temp_dir().join(format!(
+            "ax25ircd-dw-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("direwolf.conf");
+        let conf = path.to_str().unwrap();
+        std::fs::write(&path, "MODEM 1200\nTXDELAY 40\nTXTAIL 30\n").unwrap();
+        let with_path = RADIO.replace(
+            "kind = \"loopback\"",
+            &format!("kind = \"loopback\"\ndirewolf_conf = \"{conf}\""),
+        );
+        let text =
+            format!("{with_path}\n[radio.duty]\nbaud = 300\ntxdelay_ms = 400\ntxtail_ms = 300\n");
+        let err = Config::from_toml(&text).unwrap_err().to_string();
+        assert!(err.contains("MODEM"), "{err}");
+        std::fs::write(&path, "MODEM 300\nTXDELAY 40\nTXTAIL 30\n").unwrap();
+        Config::from_toml(&text).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

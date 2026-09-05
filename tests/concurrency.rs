@@ -46,7 +46,7 @@ async fn start(config_text: &str) -> String {
     let config_text = config_text.replace("target/test-concurrency-nicks.json", &path);
     let config = Arc::new(Config::from_toml(&config_text).unwrap());
     let (events_tx, events_rx) = mpsc::channel::<Event>(1024);
-    let mut srv = Server::new(config, None);
+    let mut srv = Server::new(config, None).unwrap();
     srv.attach_events(events_tx.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -113,7 +113,9 @@ async fn a_hundred_clients_connect_and_talk_at_once() {
     assert_eq!(held.len(), 100);
 
     // The server is still responsive after all that.
-    let mut probe = register(&addr, "probe").await.expect("server stopped accepting");
+    let mut probe = register(&addr, "probe")
+        .await
+        .expect("server stopped accepting");
     probe.write_all(b"PING :alive\r\n").await.unwrap();
     let (r, _w) = probe.into_split();
     let mut lines = BufReader::new(r).lines();

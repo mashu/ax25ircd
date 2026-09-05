@@ -176,18 +176,38 @@ mod tests {
     #[test]
     fn reserved_nicks_cover_casemapping_and_ax25_form() {
         let want: Callsign = "SM0ABC-7".parse().unwrap();
-        assert_eq!(Callsign::reserved_from_nick("SM0ABC|7").as_ref(), Some(&want));
-        assert_eq!(Callsign::reserved_from_nick("SM0ABC\\7").as_ref(), Some(&want));
-        assert_eq!(Callsign::reserved_from_nick("SM0ABC-7").as_ref(), Some(&want));
-        assert_eq!(Callsign::reserved_from_nick("sm0abc|7").as_ref(), Some(&want));
+        assert_eq!(
+            Callsign::reserved_from_nick("SM0ABC|7").as_ref(),
+            Some(&want)
+        );
+        assert_eq!(
+            Callsign::reserved_from_nick("SM0ABC\\7").as_ref(),
+            Some(&want)
+        );
+        assert_eq!(
+            Callsign::reserved_from_nick("SM0ABC-7").as_ref(),
+            Some(&want)
+        );
+        assert_eq!(
+            Callsign::reserved_from_nick("sm0abc|7").as_ref(),
+            Some(&want)
+        );
         assert!(Callsign::reserved_from_nick("alice").is_none());
-        assert!(Callsign::reserved_from_nick("SM0ABC").unwrap().looks_like_amateur_call());
+        assert!(Callsign::reserved_from_nick("SM0ABC")
+            .unwrap()
+            .looks_like_amateur_call());
     }
 
     #[test]
     fn plausibility() {
-        assert!("SM0ABC".parse::<Callsign>().unwrap().looks_like_amateur_call());
+        assert!("SM0ABC"
+            .parse::<Callsign>()
+            .unwrap()
+            .looks_like_amateur_call());
         assert!(!"ID".parse::<Callsign>().unwrap().looks_like_amateur_call());
-        assert!(!"AIRC".parse::<Callsign>().unwrap().looks_like_amateur_call());
+        assert!(!"AIRC"
+            .parse::<Callsign>()
+            .unwrap()
+            .looks_like_amateur_call());
     }
 }

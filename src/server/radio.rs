@@ -107,11 +107,19 @@ pub struct Radio {
     /// Runtime kill switch (`RADIO OFF`). The control operator must be able to
     /// stop the station radiating immediately, without killing the IRC side.
     pub enabled: bool,
-    last_id: Instant,
+    last_id: Option<Instant>,
     /// Set by any transmission, cleared by identifying. An automatically
     /// controlled station must identify the series of transmissions it made,
     /// and must not identify when it has made none — that is just QRM.
     transmitted_since_id: bool,
+}
+
+/// Result of an operator or automatic identification attempt.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum IdentifyResult {
+    Sent,
+    RateLimited,
+    NotQueued,
 }
 
 impl Radio {
@@ -139,7 +147,7 @@ impl Radio {
             sessions,
             mailbox,
             stats: Stats::default(),
-            last_id: Instant::now(),
+            last_id: None,
             transmitted_since_id: false,
         }
     }
@@ -359,11 +367,17 @@ impl Radio {
         if !self.transmitted_since_id {
             return;
         }
-        // Periodic identification waits for the interval. A failed sign-off
-        // (`RADIO OFF` queued an ID that did not fit) retries every tick:
-        // `available()` is now false, so the old guard never tried again.
-        if self.enabled && now.duration_since(self.last_id) < self.config.id_interval() {
-            return;
+        // Periodic identification waits for the interval after the last ID.
+        // A failed sign-off (`RADIO OFF` queued an ID that did not fit) retries
+        // every tick: `available()` is now false, so the old guard never tried
+        // again. The first ID after transmitting is due immediately — a licence
+        // wants the transmissions identified, not a wait from process start.
+        if self.enabled {
+            if let Some(at) = self.last_id {
+                if now.duration_since(at) < self.config.id_interval() {
+                    return;
+                }
+            }
         }
         let _ = self.send_id();
     }
@@ -382,8 +396,21 @@ impl Radio {
     ///
     /// Returns whether the frame was handed to the TNC. A failure leaves the
     /// "owes an ID" flag set so a later attempt still has something to say.
-    pub fn identify_now(&mut self) -> bool {
-        self.send_id()
+    /// Operator `RADIO ID` is rate-limited to `id_interval` unless the station
+    /// currently owes an identification (it has transmitted since the last ID).
+    pub fn identify_now(&mut self) -> IdentifyResult {
+        if !self.transmitted_since_id {
+            if let Some(at) = self.last_id {
+                if Instant::now().duration_since(at) < self.config.id_interval() {
+                    return IdentifyResult::RateLimited;
+                }
+            }
+        }
+        if self.send_id() {
+            IdentifyResult::Sent
+        } else {
+            IdentifyResult::NotQueued
+        }
     }
 
     fn send_id(&mut self) -> bool {
@@ -397,7 +424,7 @@ impl Radio {
         let frame = AircFrame::new(Kind::Id, seq, payload);
         if self.transmit_id(&dest, frame) {
             self.transmitted_since_id = false;
-            self.last_id = Instant::now();
+            self.last_id = Some(Instant::now());
             debug!("station identification transmitted");
             true
         } else {
@@ -457,7 +484,11 @@ impl Radio {
                 "Radio gateway: transmitter OFF. Station {call}. Nothing is being radiated."
             );
         }
-        if self.airtime().map(|a| a.interlock_failed()).unwrap_or(false) {
+        if self
+            .airtime()
+            .map(|a| a.interlock_failed())
+            .unwrap_or(false)
+        {
             return format!(
                 "Radio gateway: station {call}, transmitter BLOCKED by the safety interlock. \
                  Nothing is being radiated. Station identification is held until it is safe."
@@ -488,13 +519,7 @@ impl Radio {
     /// As [`Radio::broadcast`], with AIRC frame flags — currently only
     /// [`crate::airc::frame::flags::TRUNCATED`], so a receiving station can
     /// show that it is not seeing the whole message.
-    pub fn broadcast_flagged(
-        &mut self,
-        kind: Kind,
-        payload: Vec<u8>,
-        class: TxClass,
-        flags: u8,
-    ) {
+    pub fn broadcast_flagged(&mut self, kind: Kind, payload: Vec<u8>, class: TxClass, flags: u8) {
         if !self.available() || self.interlock_down() {
             return;
         }
@@ -556,11 +581,7 @@ impl Radio {
         // Same hole as broadcast: airtime can still fit when the 64-deep
         // frame queue cannot. Reliable traffic that would wait behind an
         // in-flight message does not need a slot yet.
-        let queued_behind = reliable
-            && self
-                .sessions
-                .peer(dst)
-                .is_some_and(|p| p.awaiting_ack());
+        let queued_behind = reliable && self.sessions.peer(dst).is_some_and(|p| p.awaiting_ack());
         if !queued_behind {
             let max = self.sessions.config.max_payload();
             let fragments = if payload.is_empty() {

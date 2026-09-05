@@ -102,7 +102,7 @@ impl Rf {
         let (link, far) = TncConfig::loopback_link();
         let (handle, rf_rx) = tnc::spawn(TncConfig::from_config(&config, link));
         Rf {
-            server: Server::new(config, Some(handle)),
+            server: Server::new(config, Some(handle)).unwrap(),
             rx: Vec::new(),
             seq: 1,
             _far: far,
@@ -220,7 +220,10 @@ async fn frames_that_are_not_ours_are_ignored() {
     .unwrap();
     not_ui.control = 0x00; // an I frame
     rf.heard_raw(not_ui);
-    assert!(rf.station("SM0ABC-7").is_none(), "non-UI frames are not AIRC");
+    assert!(
+        rf.station("SM0ABC-7").is_none(),
+        "non-UI frames are not AIRC"
+    );
 
     // Right control field, wrong PID.
     let mut wrong_pid = Ax25Frame::ui(
@@ -236,7 +239,10 @@ async fn frames_that_are_not_ours_are_ignored() {
 
     // Our own transmission coming back through a digipeater.
     rf.heard("SK0MT-1", Kind::Join, &["#rf"]);
-    assert!(rf.station("SK0MT-1").is_none(), "we do not answer ourselves");
+    assert!(
+        rf.station("SK0MT-1").is_none(),
+        "we do not answer ourselves"
+    );
 
     // Addressed to someone else.
     rf.heard_to("SM0ABC-7", "SK0AA-9", Kind::Join, &["#rf"]);
@@ -266,13 +272,13 @@ async fn an_implausible_callsign_is_ignored() {
 
 #[tokio::test]
 async fn a_denied_station_gets_nothing() {
-    let text = CONFIG.replace(
-        "[policy]",
-        "[policy]\ndeny_callsigns = [\"SM0BAD\"]",
-    );
+    let text = CONFIG.replace("[policy]", "[policy]\ndeny_callsigns = [\"SM0BAD\"]");
     let mut rf = Rf::with(&text);
     rf.heard("SM0BAD-7", Kind::Hello, &[]);
-    assert!(rf.station("SM0BAD-7").is_none(), "the deny list covers every SSID");
+    assert!(
+        rf.station("SM0BAD-7").is_none(),
+        "the deny list covers every SSID"
+    );
 
     rf.heard("SM0ABC-7", Kind::Hello, &[]);
     assert!(rf.station("SM0ABC-7").is_some());
@@ -280,10 +286,7 @@ async fn a_denied_station_gets_nothing() {
 
 #[tokio::test]
 async fn an_allow_list_excludes_everyone_else() {
-    let text = CONFIG.replace(
-        "[policy]",
-        "[policy]\nallow_callsigns = [\"SM0ABC\"]",
-    );
+    let text = CONFIG.replace("[policy]", "[policy]\nallow_callsigns = [\"SM0ABC\"]");
     let mut rf = Rf::with(&text);
     rf.heard("SM0XYZ-1", Kind::Hello, &[]);
     assert!(rf.station("SM0XYZ-1").is_none());
@@ -298,10 +301,17 @@ async fn hello_registers_a_station() {
     let mut rf = Rf::new();
     rf.heard("SM0ABC-7", Kind::Hello, &["ax25irc-station/1"]);
     assert!(rf.station("SM0ABC-7").is_some());
-    let u = rf.server.state.by_nick("SM0ABC|7").expect("nick from callsign");
+    let u = rf
+        .server
+        .state
+        .by_nick("SM0ABC|7")
+        .expect("nick from callsign");
     assert_eq!(u.username, "rf");
     assert!(u.registered);
-    assert_eq!(u.callsign.as_ref().map(|c| c.to_string()), Some("SM0ABC-7".into()));
+    assert_eq!(
+        u.callsign.as_ref().map(|c| c.to_string()),
+        Some("SM0ABC-7".into())
+    );
 }
 
 #[tokio::test]
@@ -314,7 +324,9 @@ async fn join_part_and_quit_are_visible_on_irc() {
     rf.heard("SM0ABC-7", Kind::Join, &["#rf"]);
     let lines = rf.drain(a);
     assert!(
-        lines.iter().any(|l| l.contains("SM0ABC|7") && l.contains("JOIN #rf")),
+        lines
+            .iter()
+            .any(|l| l.contains("SM0ABC|7") && l.contains("JOIN #rf")),
         "{lines:?}"
     );
     assert!(
@@ -325,7 +337,9 @@ async fn join_part_and_quit_are_visible_on_irc() {
     rf.heard("SM0ABC-7", Kind::Part, &["#rf", "going qrt"]);
     let lines = rf.drain(a);
     assert!(
-        lines.iter().any(|l| l.contains("PART #rf") && l.contains("going qrt")),
+        lines
+            .iter()
+            .any(|l| l.contains("PART #rf") && l.contains("going qrt")),
         "{lines:?}"
     );
 
@@ -334,7 +348,12 @@ async fn join_part_and_quit_are_visible_on_irc() {
     rf.drain(a);
     rf.heard("SM0ABC-7", Kind::Quit, &["73 all"]);
     let lines = rf.drain(a);
-    assert!(lines.iter().any(|l| l.contains("QUIT") && l.contains("73 all")), "{lines:?}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("QUIT") && l.contains("73 all")),
+        "{lines:?}"
+    );
     assert!(rf.station("SM0ABC-7").is_none());
 }
 
@@ -442,7 +461,10 @@ async fn a_channel_message_from_rf_reaches_irc() {
     );
 
     rf.heard("SM0ABC-7", Kind::Notice, &["#rf", "a notice"]);
-    assert!(rf.drain(a).iter().any(|l| l.contains("NOTICE #rf :a notice")));
+    assert!(rf
+        .drain(a)
+        .iter()
+        .any(|l| l.contains("NOTICE #rf :a notice")));
 }
 
 #[tokio::test]
@@ -455,8 +477,14 @@ async fn a_message_from_a_station_that_never_joined_still_arrives() {
     // A lost JOIN must not silently swallow a QSO.
     rf.heard("SM0XYZ-9", Kind::Msg, &["#rf", "anyone about?"]);
     let lines = rf.drain(a);
-    assert!(lines.iter().any(|l| l.contains("JOIN #rf")), "joined implicitly: {lines:?}");
-    assert!(lines.iter().any(|l| l.contains("anyone about?")), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains("JOIN #rf")),
+        "joined implicitly: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("anyone about?")),
+        "{lines:?}"
+    );
 }
 
 #[tokio::test]
@@ -569,7 +597,10 @@ async fn a_quit_reason_from_the_air_cannot_inject_an_irc_line() {
 
 #[tokio::test]
 async fn a_station_that_goes_quiet_is_dropped() {
-    let text = CONFIG.replace("id_interval_secs = 60", "id_interval_secs = 60\npeer_idle_timeout_secs = 1");
+    let text = CONFIG.replace(
+        "id_interval_secs = 60",
+        "id_interval_secs = 60\npeer_idle_timeout_secs = 1",
+    );
     let mut rf = Rf::with(&text);
     let a = rf.client(1, "alice");
     rf.send(a, "JOIN #rf");
@@ -604,14 +635,13 @@ async fn an_operator_can_remove_a_station() {
         rf.station("SM0ABC-7").is_none(),
         "RADIO KICK must not be undone by the next PRIVMSG"
     );
-    assert!(
-        !rf.server
-            .state
-            .channel("#rf")
-            .unwrap()
-            .members
-            .contains_key(&UserId::Rf("SM0ABC-7".parse().unwrap()))
-    );
+    assert!(!rf
+        .server
+        .state
+        .channel("#rf")
+        .unwrap()
+        .members
+        .contains_key(&UserId::Rf("SM0ABC-7".parse().unwrap())));
 
     // HELLO is how they come back.
     rf.heard("SM0ABC-7", Kind::Hello, &[]);
@@ -729,7 +759,10 @@ async fn a_full_mailbox_says_so_rather_than_silently_dropping() {
     rf.send(a, "PRIVMSG SM0DEF|2 :for someone else");
     rf.drain(a);
     rf.send(a, "PRIVMSG SM0GHI|4 :no room left");
-    assert!(rf.drain(a).iter().any(|l| l.contains("gateway mailbox is full")));
+    assert!(rf
+        .drain(a)
+        .iter()
+        .any(|l| l.contains("gateway mailbox is full")));
 }
 
 #[tokio::test]
@@ -767,7 +800,9 @@ async fn presence_notices_reach_the_air_only_when_enabled() {
     let b = rf.client(2, "bob");
     rf.send(b, "JOIN #rf");
     let lines = rf.drain(a);
-    assert!(lines.iter().any(|l| l.contains("bob") && l.contains("JOIN #rf")));
+    assert!(lines
+        .iter()
+        .any(|l| l.contains("bob") && l.contains("JOIN #rf")));
 }
 
 #[tokio::test]
@@ -797,7 +832,10 @@ async fn held_mail_is_not_destroyed_when_the_transmit_queue_is_full() {
     // store-and-forward of last resort; if it silently drops, there is no
     // other copy anywhere.
     let text = CONFIG
-        .replace("id_interval_secs = 60", "id_interval_secs = 60\nmax_queued_airtime_secs = 1")
+        .replace(
+            "id_interval_secs = 60",
+            "id_interval_secs = 60\nmax_queued_airtime_secs = 1",
+        )
         .replace("baud = 9600", "baud = 300");
     let mut rf = Rf::with(&text);
     let a = rf.client(1, "alice");
@@ -807,7 +845,11 @@ async fn held_mail_is_not_destroyed_when_the_transmit_queue_is_full() {
 
     rf.send(a, "PRIVMSG SM0ABC|7 :something worth keeping");
     rf.drain(a);
-    assert_eq!(rf.server.radio.mailbox.len(), 1, "test setup: the message was held");
+    assert_eq!(
+        rf.server.radio.mailbox.len(),
+        1,
+        "test setup: the message was held"
+    );
 
     // Fill the transmit backlog so nothing more can be admitted, then let the
     // station appear.
@@ -845,7 +887,11 @@ async fn held_mail_is_not_destroyed_when_the_transmitter_is_off() {
 
     rf.send(a, "PRIVMSG SM0ABC|7 :something worth keeping");
     rf.drain(a);
-    assert_eq!(rf.server.radio.mailbox.len(), 1, "test setup: the message was held");
+    assert_eq!(
+        rf.server.radio.mailbox.len(),
+        1,
+        "test setup: the message was held"
+    );
 
     rf.server.radio.enabled = false;
     rf.heard("SM0ABC-7", Kind::Hello, &[]);
@@ -857,7 +903,6 @@ async fn held_mail_is_not_destroyed_when_the_transmitter_is_off() {
          out of the mailbox"
     );
 }
-
 
 #[tokio::test]
 async fn a_topic_change_reaches_the_air_once_however_many_stations_are_listening() {
@@ -907,7 +952,10 @@ async fn a_server_notice_to_a_station_is_short_and_not_retried() {
     // Provoke a notice by asking to speak in a channel that is not bridged.
     rf.heard("SM0ABC-7", Kind::Msg, &["#local", "can you hear me"]);
     let sent = rf.transmitted().await;
-    for f in sent.iter().filter(|f| f.kind == Kind::Notice || f.kind == Kind::Error) {
+    for f in sent
+        .iter()
+        .filter(|f| f.kind == Kind::Notice || f.kind == Kind::Error)
+    {
         assert_eq!(
             f.frag_total, 1,
             "a courtesy notice must fit one frame, not fragment across several"
@@ -922,7 +970,10 @@ async fn a_server_notice_to_a_station_is_short_and_not_retried() {
 #[tokio::test]
 async fn presence_notices_go_out_once_when_enabled() {
     let mut rf = Rf::new();
-    assert!(rf.server.config.radio.presence_notices, "fixture enables them");
+    assert!(
+        rf.server.config.radio.presence_notices,
+        "fixture enables them"
+    );
     let a = rf.client(1, "alice");
     rf.send(a, "JOIN #rf");
     rf.heard("SM0ABC-7", Kind::Join, &["#rf"]);
@@ -952,9 +1003,10 @@ async fn presence_notices_go_out_once_when_enabled() {
 async fn the_message_limit_follows_the_fragment_budget_not_just_the_character_count() {
     // A small paclen with a one-frame budget must lower the effective text
     // limit, whatever `max_rf_text_len` says.
-    let text = CONFIG
-        .replace("paclen = 128", "paclen = 64")
-        .replace("[policy]", "[policy]\nmax_rf_text_len = 250\nmax_rf_fragments = 1");
+    let text = CONFIG.replace("paclen = 128", "paclen = 64").replace(
+        "[policy]",
+        "[policy]\nmax_rf_text_len = 250\nmax_rf_fragments = 1",
+    );
     let rf = Rf::with(&text);
     let effective = rf.server.policy.config.max_rf_text_len;
     assert!(

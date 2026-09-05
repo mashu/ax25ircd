@@ -9,7 +9,6 @@
 
 use std::time::Instant;
 
-
 use crate::irc::message::{is_channel_name, Message};
 use crate::irc::numerics as num;
 use crate::policy::Verdict;
@@ -56,11 +55,22 @@ impl Server {
             };
             let member = chan.members.get(uid).copied();
             if member.is_none() {
-                self.numeric(uid, num::ERR_CANNOTSENDTOCHAN, &[&chan.name, "Cannot send to channel"]);
+                self.numeric(
+                    uid,
+                    num::ERR_CANNOTSENDTOCHAN,
+                    &[&chan.name, "Cannot send to channel"],
+                );
                 return;
             }
             if chan.moderated && !member.map(|f| f.op || f.voice).unwrap_or(false) {
-                self.numeric(uid, num::ERR_CANNOTSENDTOCHAN, &[&chan.name, "Channel is moderated (+m); identify with CALLSIGN for +v"]);
+                self.numeric(
+                    uid,
+                    num::ERR_CANNOTSENDTOCHAN,
+                    &[
+                        &chan.name,
+                        "Channel is moderated (+m); identify with CALLSIGN for +v",
+                    ],
+                );
                 return;
             }
 
@@ -236,7 +246,10 @@ impl Server {
 
     fn screen(&mut self, uid: &UserId, text: &str, timing: AirTiming) -> Option<Screened> {
         if !self.radio.available() {
-            self.notice_user(uid, "The transmitter is off; your message stayed on the wire.");
+            self.notice_user(
+                uid,
+                "The transmitter is off; your message stayed on the wire.",
+            );
             return None;
         }
         if !self.user_may_tx_rf(uid) {
@@ -260,7 +273,10 @@ impl Server {
         }
         if let Some(call) = &identified {
             if !self.policy.station_allowed(call) {
-                self.notice_user(uid, "Not relayed to RF: your callsign is not permitted on this gateway.");
+                self.notice_user(
+                    uid,
+                    "Not relayed to RF: your callsign is not permitted on this gateway.",
+                );
                 return None;
             }
         }
@@ -334,7 +350,8 @@ impl Server {
                 ),
             );
             self.radio.stats.rf_frames_refused += 1;
-            self.audit.event("rf_backlog_refused", &[("octets", &octets.to_string())]);
+            self.audit
+                .event("rf_backlog_refused", &[("octets", &octets.to_string())]);
             return None;
         }
         Some(Screened {

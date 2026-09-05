@@ -135,7 +135,7 @@ impl Harness {
         // TNC in tests exactly as it does in production.
         let (link, far) = TncConfig::loopback_link();
         let (handle, rf_rx) = tnc::spawn(TncConfig::from_config(&config, link));
-        let mut server = Server::new(config, Some(handle));
+        let mut server = Server::new(config, Some(handle)).unwrap();
 
         let (out, client_rx) = mpsc::channel(1024);
         server.handle(Event::Connected {
@@ -285,7 +285,9 @@ async fn station_joins_and_appears_on_irc() {
 
     let lines = h.drain_client();
     assert!(
-        lines.iter().any(|l| l.contains("SM0ABC|7") && l.contains("JOIN #rf")),
+        lines
+            .iter()
+            .any(|l| l.contains("SM0ABC|7") && l.contains("JOIN #rf")),
         "IRC users should see the station join: {lines:?}"
     );
 
@@ -324,7 +326,11 @@ async fn message_from_rf_reaches_irc_without_retransmission() {
 
     h.station_transmits(
         "SM0ABC-7",
-        AircFrame::new(Kind::Msg, 2, encode_fields(&["#rf", "good morning from the hilltop"])),
+        AircFrame::new(
+            Kind::Msg,
+            2,
+            encode_fields(&["#rf", "good morning from the hilltop"]),
+        ),
     )
     .await;
 
@@ -358,7 +364,9 @@ async fn irc_message_needs_a_callsign_before_it_is_transmitted() {
     h.send("PRIVMSG #rf :hello radio");
     let lines = h.drain_client();
     assert!(
-        lines.iter().any(|l| l.contains(" 404 ") || l.contains("+m")),
+        lines
+            .iter()
+            .any(|l| l.contains(" 404 ") || l.contains("+m")),
         "unidentified users must not speak on #rf: {lines:?}"
     );
     let tx = h.transmitted().await;
@@ -369,7 +377,9 @@ async fn irc_message_needs_a_callsign_before_it_is_transmitted() {
     h.send("PRIVMSG #rf :hello radio");
     let lines = h.drain_client();
     assert!(
-        lines.iter().any(|l| l.contains("RF-TX") || l.contains("not have RF-TX")),
+        lines
+            .iter()
+            .any(|l| l.contains("RF-TX") || l.contains("not have RF-TX")),
         "CALLSIGN alone must not radiate: {lines:?}"
     );
     let tx = h.transmitted().await;
@@ -384,7 +394,12 @@ async fn irc_message_needs_a_callsign_before_it_is_transmitted() {
     let (ax, airc) = tx
         .iter()
         .find(|(_, a)| a.kind == Kind::Msg)
-        .unwrap_or_else(|| panic!("OPER + CALLSIGN should put the message on the air; got {:?}", tx.iter().map(|(_,a)| a.kind).collect::<Vec<_>>()));
+        .unwrap_or_else(|| {
+            panic!(
+                "OPER + CALLSIGN should put the message on the air; got {:?}",
+                tx.iter().map(|(_, a)| a.kind).collect::<Vec<_>>()
+            )
+        });
     assert_eq!(ax.destination.call.to_string(), "AIRC");
     assert_eq!(airc.fields(), vec!["#rf", "alice", "hello radio"]);
 }
@@ -421,7 +436,9 @@ async fn ciphertext_is_not_transmitted() {
 
     let bob_lines = drain_rx(&mut bob_rx);
     assert!(
-        bob_lines.iter().any(|l| l.contains("PRIVMSG #rf") && l.contains("U2FsdGVk")),
+        bob_lines
+            .iter()
+            .any(|l| l.contains("PRIVMSG #rf") && l.contains("U2FsdGVk")),
         "ciphertext must still reach other IRC clients: {bob_lines:?}"
     );
 }
@@ -438,8 +455,11 @@ fn drain_rx(rx: &mut mpsc::Receiver<String>) -> Vec<String> {
 async fn private_message_to_a_station_is_acknowledged_and_retried() {
     let mut h = Harness::new().await;
     h.oper_and_callsign();
-    h.station_transmits("SM0ABC-7", AircFrame::new(Kind::Hello, 1, encode_fields(&[""])))
-        .await;
+    h.station_transmits(
+        "SM0ABC-7",
+        AircFrame::new(Kind::Hello, 1, encode_fields(&[""])),
+    )
+    .await;
     // The welcome is sent reliably, so the station must acknowledge it before
     // anything else can be unicast to it.
     let welcome = h
@@ -483,8 +503,11 @@ async fn station_frames_from_implausible_callsigns_are_ignored() {
     h.send("JOIN #rf");
     h.drain_client();
 
-    h.station_transmits("NOCALL", AircFrame::new(Kind::Join, 1, encode_fields(&["#rf"])))
-        .await;
+    h.station_transmits(
+        "NOCALL",
+        AircFrame::new(Kind::Join, 1, encode_fields(&["#rf"])),
+    )
+    .await;
     let lines = h.drain_client();
     assert!(lines.iter().all(|l| !l.contains("JOIN #rf")), "{lines:?}");
 }
@@ -510,8 +533,11 @@ async fn messages_are_held_for_a_station_that_is_out_of_range() {
 
     // The station appears. The welcome goes first and is acknowledged; the
     // held message follows it out of the per-station queue.
-    h.station_transmits("SM0ABC-7", AircFrame::new(Kind::Hello, 1, encode_fields(&[""])))
-        .await;
+    h.station_transmits(
+        "SM0ABC-7",
+        AircFrame::new(Kind::Hello, 1, encode_fields(&[""])),
+    )
+    .await;
     let welcome = h
         .transmitted()
         .await
@@ -603,7 +629,9 @@ async fn callsign_alone_does_not_radiate() {
     h.send("PRIVMSG #rf :hello radio");
     let lines = h.drain_client();
     assert!(
-        lines.iter().any(|l| l.contains("RF-TX") || l.contains("not have RF-TX")),
+        lines
+            .iter()
+            .any(|l| l.contains("RF-TX") || l.contains("not have RF-TX")),
         "CALLSIGN alone must not radiate: {lines:?}"
     );
     let tx = h.transmitted().await;
@@ -671,7 +699,9 @@ password = "operpass1"
     });
     let grant_ok = drain_rx(&mut oper_rx);
     assert!(
-        grant_ok.iter().any(|l| l.contains("stored in the nick file")),
+        grant_ok
+            .iter()
+            .any(|l| l.contains("stored in the nick file")),
         "{grant_ok:?}"
     );
 
@@ -681,13 +711,12 @@ password = "operpass1"
     h.drain_client();
     let tx = h.transmitted().await;
     assert!(
-        tx.iter().any(|(_, a)| a.kind == Kind::Msg && a.fields().last() == Some(&"after grant".to_string())),
+        tx.iter()
+            .any(|(_, a)| a.kind == Kind::Msg
+                && a.fields().last() == Some(&"after grant".to_string())),
         "{tx:?}"
     );
 }
-
-
-
 
 #[tokio::test]
 async fn frames_addressed_elsewhere_are_ignored() {
@@ -732,7 +761,11 @@ async fn a_second_gateways_downlink_does_not_start_a_loop() {
     h.transmits_to(
         "SK0AA-1",
         "AIRC",
-        AircFrame::new(Kind::Msg, 7, encode_fields(&["#rf", "bob", "hello from the other gateway"])),
+        AircFrame::new(
+            Kind::Msg,
+            7,
+            encode_fields(&["#rf", "bob", "hello from the other gateway"]),
+        ),
     )
     .await;
 
@@ -742,7 +775,9 @@ async fn a_second_gateways_downlink_does_not_start_a_loop() {
     );
     let lines = h.drain_client();
     assert!(
-        !lines.iter().any(|l| l.contains("hello from the other gateway")),
+        !lines
+            .iter()
+            .any(|l| l.contains("hello from the other gateway")),
         "another gateway's downlink was relayed to IRC: {lines:?}"
     );
 }
@@ -812,7 +847,6 @@ async fn names_reply_to_rf_is_bounded() {
     }
 }
 
-
 /// A realistic QRP HF gateway: 300 baud, a 5 % duty limit, a 60 s backlog.
 /// A busy channel must not be able to commit the transmitter to more than the
 /// backlog holds, and the senders whose messages do not fit must be told.
@@ -849,7 +883,10 @@ async fn a_busy_channel_fills_the_backlog_and_then_is_refused() {
     }
     let notices: Vec<String> = h.drain_client();
 
-    let queued = notices.iter().filter(|l| l.contains("Queued for RF")).count();
+    let queued = notices
+        .iter()
+        .filter(|l| l.contains("Queued for RF"))
+        .count();
     let refused = notices
         .iter()
         .filter(|l| l.contains("transmit queue is"))
@@ -974,7 +1011,6 @@ async fn config_rejects_a_duty_budget_that_can_never_pass_a_frame() {
     assert!(err.contains("duty"), "{err}");
 }
 
-
 #[tokio::test]
 async fn member_lists_are_sent_only_when_asked_and_are_capped() {
     let mut h = Harness::new().await;
@@ -1023,7 +1059,10 @@ async fn member_lists_are_sent_only_when_asked_and_are_capped() {
     let names = reply.1.fields()[1].clone();
     let listed = names.split(',').filter(|n| n.contains("ham_")).count();
     assert!(listed <= 8, "{listed} names is more than rf_names_max");
-    assert!(names.contains("more"), "the truncation should be visible: {names}");
+    assert!(
+        names.contains("more"),
+        "the truncation should be visible: {names}"
+    );
     assert!(
         reply.1.payload.len() <= 200,
         "a NAMES reply of {} octets is too much airtime",
@@ -1099,7 +1138,6 @@ async fn a_full_backlog_is_refused_out_loud_not_dropped_silently() {
     );
 }
 
-
 #[tokio::test]
 async fn the_safety_interlock_stops_everything_including_identification() {
     let mut h = Harness::new().await;
@@ -1112,7 +1150,8 @@ async fn the_safety_interlock_stops_everything_including_identification() {
 
     // An SWR check (or a temperature probe, or a tower interlock) has failed.
     h.server
-        .radio.airtime()
+        .radio
+        .airtime()
         .unwrap()
         .interlock_ok
         .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1131,13 +1170,15 @@ async fn the_safety_interlock_stops_everything_including_identification() {
         "the operator should be told why nothing is going out: {lines:?}"
     );
 
-    // Interlock recovers; the station transmits again.
+    // Interlock recovers; the sign-off ID that was held should go out on
+    // the airtime clock. Do not RADIO ID again — that is now rate-limited.
     h.server
-        .radio.airtime()
+        .radio
+        .airtime()
         .unwrap()
         .interlock_ok
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    h.send("RADIO ID");
+        .store(true, std::sync::atomic::Ordering::Release);
+    tokio::time::sleep(Duration::from_millis(500)).await;
     let sent = h.transmitted().await;
     let id = sent
         .iter()
@@ -1164,7 +1205,9 @@ async fn opers_can_see_the_unsent_queue_and_retune_the_limits() {
         "RADIO QUEUE should report the transmit backlog: {lines:?}"
     );
     assert!(
-        lines.iter().any(|l| l.contains("Held for stations out of range")),
+        lines
+            .iter()
+            .any(|l| l.contains("Held for stations out of range")),
         "RADIO QUEUE should account for held mail too: {lines:?}"
     );
 
@@ -1246,7 +1289,6 @@ async fn the_server_is_capped_in_total_not_just_per_host() {
     );
 }
 
-
 #[tokio::test]
 async fn kiss_timing_parameters_are_pushed_to_the_tnc() {
     // The governor prices every frame using txdelay/txtail, so the modem had
@@ -1294,7 +1336,6 @@ async fn kiss_timing_parameters_are_pushed_to_the_tnc() {
     );
     assert_eq!(get(kiss::CMD_SLOTTIME), Some(vec![10]), "{params:?}");
 }
-
 
 #[tokio::test]
 async fn a_config_using_the_old_txdelay_key_is_told_where_it_went() {

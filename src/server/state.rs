@@ -207,7 +207,9 @@ impl State {
     }
 
     pub fn by_nick(&self, nick: &str) -> Option<&User> {
-        self.nicks.get(&lower(nick)).and_then(|id| self.users.get(id))
+        self.nicks
+            .get(&lower(nick))
+            .and_then(|id| self.users.get(id))
     }
 
     pub fn nick_taken(&self, nick: &str) -> bool {
@@ -310,7 +312,11 @@ impl State {
     ///
     /// Anything an operator granted by hand is preserved: this only decides
     /// the derived part.
-    pub fn apply_intended_flags(&mut self, id: &UserId, channel: &str) -> Option<(MemberFlags, MemberFlags)> {
+    pub fn apply_intended_flags(
+        &mut self,
+        id: &UserId,
+        channel: &str,
+    ) -> Option<(MemberFlags, MemberFlags)> {
         let key = lower(channel);
         let (old, rf, operators) = {
             let chan = self.channels.get(&key)?;

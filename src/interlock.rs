@@ -20,9 +20,10 @@
 //! * **Fail closed.** A check that cannot be run, times out, or has never run
 //!   counts as a failure. The failure mode of an unreadable SWR meter is not
 //!   "assume it is fine".
-//! * **It blocks station identification too.** Identifying is otherwise
-//!   unconditional, but a station that must not transmit must not transmit; a
-//!   licence requires you to identify transmissions you make, not to make one.
+//! * **It blocks station identification too.** Identification jumps the data
+//!   queue, not the airtime clock — but a station that must not transmit must
+//!   not transmit; a licence requires you to identify transmissions you make,
+//!   not to make one.
 
 use std::process::Stdio;
 use std::sync::atomic::Ordering;
@@ -77,7 +78,8 @@ pub async fn run_once(config: &InterlockConfig) -> Check {
         Err(_) => {
             return Check::Unavailable(format!(
                 "{} did not answer within {}s",
-                config.command, timeout.as_secs()
+                config.command,
+                timeout.as_secs()
             ));
         }
     };
@@ -112,7 +114,7 @@ pub async fn run_once(config: &InterlockConfig) -> Check {
 /// Poll the interlock forever, publishing the result into `shared`.
 pub fn spawn(config: InterlockConfig, shared: Arc<AirtimeShared>) {
     // Until the first check succeeds, the transmitter stays down.
-    shared.interlock_ok.store(false, Ordering::Relaxed);
+    shared.interlock_ok.store(false, Ordering::Release);
     info!(
         command = %config.command,
         "transmit interlock enabled; the transmitter stays inhibited until it passes"
@@ -123,14 +125,17 @@ pub fn spawn(config: InterlockConfig, shared: Arc<AirtimeShared>) {
         loop {
             let check = run_once(&config).await;
             let ok = check.is_pass();
-            shared.interlock_ok.store(ok, Ordering::Relaxed);
+            shared.interlock_ok.store(ok, Ordering::Release);
             // Log transitions, not every poll: this runs every thirty seconds
             // for the life of the process.
             if last_ok != Some(ok) {
                 if ok {
                     info!("transmit interlock passed; transmitting is permitted again");
                 } else {
-                    warn!("transmit interlock FAILED, transmitter inhibited: {}", check.reason());
+                    warn!(
+                        "transmit interlock FAILED, transmitter inhibited: {}",
+                        check.reason()
+                    );
                 }
                 last_ok = Some(ok);
             }
@@ -180,6 +185,10 @@ mod tests {
         c.timeout_secs = 1;
         let check = run_once(&c).await;
         assert!(!check.is_pass());
-        assert!(check.reason().contains("did not answer"), "{}", check.reason());
+        assert!(
+            check.reason().contains("did not answer"),
+            "{}",
+            check.reason()
+        );
     }
 }

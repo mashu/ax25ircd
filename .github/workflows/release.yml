@@ -39,6 +39,12 @@ jobs:
         with:
           tool: cargo-zigbuild
       - name: Build (static musl)
+        # rustc 1.97+ surfaces linker stderr as `linker_messages`. zig cc always
+        # warns about rustc's -O1, and Zig 0.13's musl CRT warns on a K&R
+        # prototype in dlstart.c. Neither is from this crate.
+        # https://github.com/rust-lang/rust/issues/158192
+        env:
+          RUSTFLAGS: "-A linker_messages"
         run: cargo zigbuild --release --target ${{ matrix.target }}
       - name: Dist
         run: |

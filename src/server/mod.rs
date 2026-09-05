@@ -1,8 +1,8 @@
 //! The server actor: one task, one state, one ordering of events.
 
-pub mod commands;
 pub mod bridge;
 pub mod clients;
+pub mod commands;
 pub mod mailbox;
 pub mod radio;
 pub mod state;
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::accounts::Accounts;
 use crate::airc::{encode_fields, Kind};
@@ -23,7 +23,7 @@ use crate::irc::message::{is_channel_name, lower, Message};
 use crate::policy::Policy;
 
 pub use clients::Clients;
-pub use radio::{Radio, Stats, TxClass};
+pub use radio::{IdentifyResult, Radio, Stats, TxClass};
 use state::{ClientId, State, User, UserId};
 
 /// Everything that can happen to the server, from any source.
@@ -60,14 +60,13 @@ pub enum Event {
     Shutdown,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthKind {
     Identify,
     Register,
     Unregister,
+    Oper,
 }
-
-
 
 /// A thing that happened, in a form that can be rendered either as IRC text or
 /// as an on-air AIRC frame. Keeping these separate from the wire formats is
@@ -142,7 +141,7 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(config: Arc<Config>, tnc: Option<TncHandle>) -> Self {
+    pub fn new(config: Arc<Config>, tnc: Option<TncHandle>) -> anyhow::Result<Self> {
         let audit = Audit::open(config.logging.audit_file.as_deref());
         let radio = Radio::new(config.clone(), tnc, audit.clone());
 
@@ -179,18 +178,9 @@ impl Server {
             policy_config.max_rf_text_len = fragment_cap;
         }
 
-        let accounts = match Accounts::load(&config.accounts.file) {
-            Ok(a) => a,
-            Err(e) => {
-                warn!(
-                    path = %config.accounts.file,
-                    "nick accounts file unreadable ({e}); starting empty"
-                );
-                Accounts::empty(&config.accounts.file)
-            }
-        };
+        let accounts = Accounts::load(&config.accounts.file)?;
 
-        Self {
+        Ok(Self {
             config,
             state,
             policy: Policy::new(policy_config),
@@ -200,11 +190,12 @@ impl Server {
             audit,
             events: None,
             started: SystemTime::now(),
-        }
+        })
     }
 
     pub fn attach_events(&mut self, tx: mpsc::Sender<Event>) {
         self.events = Some(tx);
+        self.accounts.enable_async_persist();
     }
 
     pub fn server_name(&self) -> &str {
@@ -232,9 +223,11 @@ impl Server {
                 let total = self.config.listen.max_clients;
                 let per_host = self.config.listen.max_conns_per_host;
                 let refuse = if total > 0 && self.state.ip_users() >= total {
-                    Some(("max_clients", format!("ERROR :Server is full (max {total} clients)")))
-                } else if per_host > 0
-                    && self.state.ip_count_from_host(&host) >= per_host as usize
+                    Some((
+                        "max_clients",
+                        format!("ERROR :Server is full (max {total} clients)"),
+                    ))
+                } else if per_host > 0 && self.state.ip_count_from_host(&host) >= per_host as usize
                 {
                     Some((
                         "max_conns_per_host",
@@ -255,7 +248,8 @@ impl Server {
                 self.clients.insert(id, out, hangup);
                 self.radio.stats.ip_connections += 1;
                 let id_s = id.to_string();
-                self.audit.event("connect", &[("id", &id_s), ("host", &host)]);
+                self.audit
+                    .event("connect", &[("id", &id_s), ("host", &host)]);
                 let user = User::new(UserId::Ip(id), host, now);
                 self.state.insert_user(user);
             }
@@ -269,11 +263,7 @@ impl Server {
                 if let Some(u) = self.state.user(&uid) {
                     self.audit.event(
                         "disconnect",
-                        &[
-                            ("nick", &u.nick),
-                            ("host", &u.host),
-                            ("reason", &reason),
-                        ],
+                        &[("nick", &u.nick), ("host", &u.host), ("reason", &reason)],
                     );
                 }
                 self.quit_user(&uid, &reason);
@@ -363,9 +353,7 @@ impl Server {
             .users
             .values()
             .filter(|u| {
-                !u.is_rf()
-                    && !u.nick_identified
-                    && u.identify_by.map(|d| now >= d).unwrap_or(false)
+                !u.is_rf() && !u.nick_identified && u.identify_by.map(|d| now >= d).unwrap_or(false)
             })
             .map(|u| u.id.clone())
             .collect();
@@ -393,7 +381,11 @@ impl Server {
                 self.quit_user(&uid, "Identify timeout");
                 continue;
             }
-            let prefix = self.state.user(&uid).map(|u| u.prefix()).unwrap_or_default();
+            let prefix = self
+                .state
+                .user(&uid)
+                .map(|u| u.prefix())
+                .unwrap_or_default();
             let _ = self.state.set_nick(&uid, &guest);
             let d = Delivery::NickChange {
                 old_nick: old.clone(),
@@ -406,10 +398,8 @@ impl Server {
                 &format!("{old} is registered. Your nick is now {guest}. IDENTIFY to reclaim it."),
             );
             self.refresh_privileges(&uid);
-            self.audit.event(
-                "identify_timeout",
-                &[("old", &old), ("guest", &guest)],
-            );
+            self.audit
+                .event("identify_timeout", &[("old", &old), ("guest", &guest)]);
         }
     }
 
@@ -423,9 +413,6 @@ impl Server {
     }
 
     // ------------------------------------------------------------- IP output
-
-
-
 
     /// Send a numeric reply. RF users never receive numerics: they are pure
     /// airtime with no information a small screen needs.
@@ -469,7 +456,8 @@ impl Server {
                 let call = call.clone();
                 let text: String = text.chars().take(80).collect();
                 let payload = encode_fields(&["*", &text]);
-                self.radio.unicast(&call, Kind::Notice, payload, false, TxClass::Control);
+                self.radio
+                    .unicast(&call, Kind::Notice, payload, false, TxClass::Control);
             }
         }
     }
@@ -507,9 +495,11 @@ impl Server {
                 // Channel traffic goes out once as a broadcast; a private
                 // message is unicast and acknowledged.
                 if is_channel_name(target) {
-                    self.radio.broadcast_flagged(kind, payload, TxClass::Chat, flags);
+                    self.radio
+                        .broadcast_flagged(kind, payload, TxClass::Chat, flags);
                 } else {
-                    self.radio.unicast_flagged(call, kind, payload, true, TxClass::Direct, flags);
+                    self.radio
+                        .unicast_flagged(call, kind, payload, true, TxClass::Direct, flags);
                 }
             }
             // Presence is off by default and is the lowest-value traffic
@@ -590,24 +580,6 @@ impl Server {
 
     // ------------------------------------------------------------------- RF
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     // --------------------------------------------------------------- helpers
 
     pub fn quit_user(&mut self, uid: &UserId, reason: &str) {
@@ -671,7 +643,6 @@ impl Server {
         self.state.by_nick(name).map(|u| u.id.clone())
     }
 
-
     /// May this IP user have a message radiated? RF stations always may:
     /// they are already on the air. An IP user needs RF-TX (OPER, or IDENTIFY
     /// to a nick the operator granted with `RADIO GRANT`).
@@ -692,7 +663,11 @@ impl Server {
         let granted = user.nick_identified && self.accounts.grants_rf_tx(&user.nick);
         let stored_call = user
             .nick_identified
-            .then(|| self.accounts.get(&user.nick).and_then(|a| a.callsign.clone()))
+            .then(|| {
+                self.accounts
+                    .get(&user.nick)
+                    .and_then(|a| a.callsign.clone())
+            })
             .flatten();
         if let Some(u) = self.state.user_mut(uid) {
             u.rf_tx = u.oper || granted;
@@ -704,7 +679,6 @@ impl Server {
         }
     }
 
-
     pub fn is_chanop(&self, uid: &UserId, channel: &str) -> bool {
         if self.state.user(uid).map(|u| u.oper).unwrap_or(false) {
             return true;
@@ -715,7 +689,6 @@ impl Server {
             .map(|f| f.op)
             .unwrap_or(false)
     }
-
 
     pub fn channel_air_line(&self, channel: &str) -> String {
         let Some(chan) = self.state.channel(channel) else {
@@ -784,20 +757,10 @@ impl Server {
                 continue;
             };
             if old.op != new.op {
-                self.announce_mode(
-                    &ch,
-                    &server,
-                    if new.op { "+o" } else { "-o" },
-                    &[&nick],
-                );
+                self.announce_mode(&ch, &server, if new.op { "+o" } else { "-o" }, &[&nick]);
             }
             if old.voice != new.voice {
-                self.announce_mode(
-                    &ch,
-                    &server,
-                    if new.voice { "+v" } else { "-v" },
-                    &[&nick],
-                );
+                self.announce_mode(&ch, &server, if new.voice { "+v" } else { "-v" }, &[&nick]);
             }
         }
     }
@@ -854,40 +817,43 @@ pub fn guest_nick(id: u64, max_nick_len: usize) -> String {
 
 /// Render a delivery as an IRC protocol line.
 fn render_irc(d: &Delivery) -> Option<String> {
-    let msg = match d {
-        Delivery::Privmsg {
-            from_prefix,
-            target,
-            text,
-            notice,
-            ..
-        } => Message::new(
-            if *notice { "NOTICE" } else { "PRIVMSG" },
-            vec![target.clone(), text.clone()],
-        )
-        .with_prefix(from_prefix.clone()),
-        Delivery::Join {
-            prefix, channel, ..
-        } => Message::new("JOIN", vec![channel.clone()]).with_prefix(prefix.clone()),
-        Delivery::Part {
-            prefix,
-            channel,
-            reason,
-            ..
-        } => Message::new("PART", vec![channel.clone(), reason.clone()]).with_prefix(prefix.clone()),
-        Delivery::Quit { prefix, reason, .. } => {
-            Message::new("QUIT", vec![reason.clone()]).with_prefix(prefix.clone())
-        }
-        Delivery::NickChange {
-            prefix, new_nick, ..
-        } => Message::new("NICK", vec![new_nick.clone()]).with_prefix(prefix.clone()),
-        Delivery::Topic {
-            prefix,
-            channel,
-            topic,
-            ..
-        } => Message::new("TOPIC", vec![channel.clone(), topic.clone()]).with_prefix(prefix.clone()),
-    };
+    let msg =
+        match d {
+            Delivery::Privmsg {
+                from_prefix,
+                target,
+                text,
+                notice,
+                ..
+            } => Message::new(
+                if *notice { "NOTICE" } else { "PRIVMSG" },
+                vec![target.clone(), text.clone()],
+            )
+            .with_prefix(from_prefix.clone()),
+            Delivery::Join {
+                prefix, channel, ..
+            } => Message::new("JOIN", vec![channel.clone()]).with_prefix(prefix.clone()),
+            Delivery::Part {
+                prefix,
+                channel,
+                reason,
+                ..
+            } => Message::new("PART", vec![channel.clone(), reason.clone()])
+                .with_prefix(prefix.clone()),
+            Delivery::Quit { prefix, reason, .. } => {
+                Message::new("QUIT", vec![reason.clone()]).with_prefix(prefix.clone())
+            }
+            Delivery::NickChange {
+                prefix, new_nick, ..
+            } => Message::new("NICK", vec![new_nick.clone()]).with_prefix(prefix.clone()),
+            Delivery::Topic {
+                prefix,
+                channel,
+                topic,
+                ..
+            } => Message::new("TOPIC", vec![channel.clone(), topic.clone()])
+                .with_prefix(prefix.clone()),
+        };
     Some(msg.to_string())
 }
 

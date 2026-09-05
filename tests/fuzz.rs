@@ -17,9 +17,9 @@ use ax25ircd::airc::{encode_fields, SessionConfig, Sessions};
 use ax25ircd::ax25::kiss::{self, KissDecoder};
 use ax25ircd::ax25::{Address, Ax25Frame};
 use ax25ircd::callsign::Callsign;
+use ax25ircd::config::PolicyConfig;
 use ax25ircd::irc::message::{is_channel_name, is_valid_nick, lower, Message};
 use ax25ircd::policy::{looks_like_ciphertext, sanitize, Policy};
-use ax25ircd::config::PolicyConfig;
 
 /// Deterministic, dependency-free noise.
 struct Rng(u64);
@@ -431,11 +431,8 @@ fn a_trailing_parameter_keeps_its_spacing() {
     // The trailing parameter is everything after the colon, so it can hold
     // runs of spaces. Collapsing them mangles anything aligned — a table, a
     // code snippet, ASCII art — for no safety benefit.
-    let m = Message::new(
-        "PRIVMSG",
-        vec!["#rf".into(), "column1    column2".into()],
-    )
-    .with_prefix("alice!a@h");
+    let m = Message::new("PRIVMSG", vec!["#rf".into(), "column1    column2".into()])
+        .with_prefix("alice!a@h");
     let back = Message::parse(&m.to_string()).unwrap();
     assert_eq!(
         back.params[1], "column1    column2",
@@ -552,7 +549,10 @@ fn a_peer_that_never_acknowledges_is_eventually_given_up_on() {
     let call: Callsign = "SM0ABC-7".parse().unwrap();
     let mut now = Instant::now();
 
-    assert_eq!(s.send(&call, Kind::Msg, b"hello".to_vec(), true, now).len(), 1);
+    assert_eq!(
+        s.send(&call, Kind::Msg, b"hello".to_vec(), true, now).len(),
+        1
+    );
     let mut transmissions = 1;
     let mut lost = false;
     for _ in 0..40 {
@@ -564,7 +564,10 @@ fn a_peer_that_never_acknowledges_is_eventually_given_up_on() {
             break;
         }
     }
-    assert!(lost, "a station that never answers must eventually be dropped");
+    assert!(
+        lost,
+        "a station that never answers must eventually be dropped"
+    );
     assert!(
         transmissions <= 5,
         "{transmissions} transmissions for one message: max_retries is 3, and every \
@@ -593,6 +596,7 @@ fn the_governor_is_sane_across_the_configurable_range() {
             cooldown_secs: rng.below(600) as u64,
             hourly_airtime_secs: rng.below(3600) as u64,
             max_hold_secs: 1 + rng.below(600) as u64,
+            allow_nonstandard_baud: true,
         };
         let air = duty.to_airtime();
         // The clamp holds regardless of what was asked for.

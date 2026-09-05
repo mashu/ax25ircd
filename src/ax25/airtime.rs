@@ -61,6 +61,11 @@ const RUN_GAP: Duration = Duration::from_secs(3);
 /// that would breach it in bursts.
 pub const HARD_MAX_DUTY: f64 = 0.5;
 
+/// Packet symbol rates the governor is willing to price without an explicit
+/// override. Anything else is almost certainly a mismatch with the modem
+/// (the usual QMX footgun is `baud = 1200` against Direwolf `MODEM 300`).
+pub const STANDARD_PACKET_BAUDS: &[u32] = &[300, 1200, 9600];
+
 #[derive(Clone, Debug)]
 pub struct AirtimeConfig {
     /// Off entirely. Only sensible on a loopback or a dummy load.
@@ -219,17 +224,16 @@ impl Default for AirtimeShared {
 }
 
 impl AirtimeShared {
-    /// Nothing may be transmitted: the operator has inhibited the station, or
-    /// the external safety interlock is not satisfied. Both block station
-    /// identification too — a station that must not transmit must not
-    /// transmit, and a licence requires you to identify the transmissions you
-    /// make, not to make one.
+    /// Data may not be transmitted: the operator has inhibited the station, or
+    /// the external safety interlock is not satisfied. The interlock also
+    /// holds identification; the inhibit does not — `RADIO OFF` still owes
+    /// the band a sign-off ID.
     pub fn tx_blocked(&self) -> bool {
-        self.inhibit.load(Ordering::Relaxed) || !self.interlock_ok.load(Ordering::Relaxed)
+        self.inhibit.load(Ordering::Acquire) || !self.interlock_ok.load(Ordering::Acquire)
     }
 
     pub fn interlock_failed(&self) -> bool {
-        !self.interlock_ok.load(Ordering::Relaxed)
+        !self.interlock_ok.load(Ordering::Acquire)
     }
 
     /// Estimated wait before a frame queued right now reaches the air:
@@ -277,7 +281,7 @@ impl AirtimeShared {
     pub fn pacing(&self, configured: Duration) -> Duration {
         match self.pacing_ms_override.load(Ordering::Relaxed) {
             0 => configured,
-            ms => Duration::from_millis(ms),
+            ms => Duration::from_millis(ms).max(configured),
         }
     }
 
@@ -320,13 +324,15 @@ impl AirtimeShared {
         }
         let over = self.duty_pct_override.load(Ordering::Relaxed);
         if over > 0 {
-            s.push_str(&format!("; duty overridden to {over}% by a control operator"));
+            s.push_str(&format!(
+                "; duty overridden to {over}% by a control operator"
+            ));
         }
         let pacing = self.pacing_ms_override.load(Ordering::Relaxed);
         if pacing > 0 {
             s.push_str(&format!("; pacing overridden to {pacing}ms"));
         }
-        if self.inhibit.load(Ordering::Relaxed) {
+        if self.inhibit.load(Ordering::Acquire) {
             s.push_str("; TRANSMIT INHIBITED by a control operator");
         }
         if self.interlock_failed() {
@@ -493,7 +499,9 @@ impl Governor {
         if self.run + cost > self.cfg.max_continuous && self.run > Duration::ZERO {
             let until = self.last_end.unwrap_or(now) + RUN_GAP;
             return TxDecision::Defer(
-                until.saturating_duration_since(now).max(Duration::from_millis(1)),
+                until
+                    .saturating_duration_since(now)
+                    .max(Duration::from_millis(1)),
                 DeferReason::Cooldown,
             );
         }
@@ -502,7 +510,10 @@ impl Governor {
         let allowance = self.allowance();
         let used = self.airtime_within(now, self.cfg.window);
         if used + cost > allowance {
-            return TxDecision::Defer(self.retry_delay(now, self.cfg.window, allowance, cost), DeferReason::Duty);
+            return TxDecision::Defer(
+                self.retry_delay(now, self.cfg.window, allowance, cost),
+                DeferReason::Duty,
+            );
         }
 
         // 3. Rolling-hour budget.
@@ -523,7 +534,13 @@ impl Governor {
     /// How long until enough old airtime falls out of `window` to make room
     /// for `cost`. Exact rather than a fixed poll interval, so a deferred
     /// frame wakes up once instead of spinning.
-    fn retry_delay(&self, now: Instant, window: Duration, allowance: Duration, cost: Duration) -> Duration {
+    fn retry_delay(
+        &self,
+        now: Instant,
+        window: Duration,
+        allowance: Duration,
+        cost: Duration,
+    ) -> Duration {
         let mut used = self.airtime_within(now, window);
         // Expire bursts oldest-first until `cost` fits.
         for b in self.bursts.iter() {
@@ -542,7 +559,9 @@ impl Governor {
         }
         // Either the frame can never fit (cost alone exceeds the allowance)
         // or the arithmetic ran out; back off and let `max_hold` decide.
-        window.min(Duration::from_secs(30)).max(Duration::from_millis(100))
+        window
+            .min(Duration::from_secs(30))
+            .max(Duration::from_millis(100))
     }
 
     /// Record a transmission that has just been made. Returns the key-down
@@ -592,15 +611,19 @@ impl Governor {
         shared
             .window_span_ms
             .store(self.cfg.window.as_millis() as u64, Ordering::Relaxed);
-        shared
-            .hour_ms
-            .store(self.airtime_within(now, hour).as_millis() as u64, Ordering::Relaxed);
-        shared.hour_budget_ms.store(
-            self.cfg.hourly_budget.as_millis() as u64,
+        shared.hour_ms.store(
+            self.airtime_within(now, hour).as_millis() as u64,
             Ordering::Relaxed,
         );
-        shared.run_ms.store(self.run.as_millis() as u64, Ordering::Relaxed);
-        shared.total_ms.store(self.total.as_millis() as u64, Ordering::Relaxed);
+        shared
+            .hour_budget_ms
+            .store(self.cfg.hourly_budget.as_millis() as u64, Ordering::Relaxed);
+        shared
+            .run_ms
+            .store(self.run.as_millis() as u64, Ordering::Relaxed);
+        shared
+            .total_ms
+            .store(self.total.as_millis() as u64, Ordering::Relaxed);
         let cooling = self
             .cooling_until
             .map(|u| u.saturating_duration_since(now).as_millis() as u64)
@@ -802,7 +825,10 @@ mod tests {
         c.max_continuous = Duration::from_secs(30);
         c.cooldown = Duration::from_secs(30);
         c.hourly_budget = Duration::ZERO;
-        assert!(c.check_hardware_safe().is_ok(), "50/50 is exactly the ceiling");
+        assert!(
+            c.check_hardware_safe().is_ok(),
+            "50/50 is exactly the ceiling"
+        );
 
         let mut g = Governor::new(c);
         let start = Instant::now();
@@ -840,7 +866,7 @@ mod tests {
                 .sum();
             let duty = busy / window.as_secs_f64();
             assert!(
-                duty <= HARD_MAX_DUTY + 0.02,
+                duty <= HARD_MAX_DUTY,
                 "duty {duty:.3} in the window starting at {start_s}s exceeds the {HARD_MAX_DUTY} ceiling"
             );
         }
@@ -849,7 +875,11 @@ mod tests {
     #[test]
     fn an_override_can_lower_the_duty_but_never_raise_it_past_the_ceiling() {
         let shared = AirtimeShared::default();
-        assert_eq!(shared.duty_limit(0.25), 0.25, "no override, configured value");
+        assert_eq!(
+            shared.duty_limit(0.25),
+            0.25,
+            "no override, configured value"
+        );
 
         assert_eq!(shared.set_duty_override(Some(10)), Some(10));
         assert_eq!(shared.duty_limit(0.25), 0.10);

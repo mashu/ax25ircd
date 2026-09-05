@@ -587,8 +587,8 @@ mod tests {
     fn duplicates_are_suppressed_but_still_acked() {
         let mut rx = Sessions::new(SessionConfig::default());
         let now = Instant::now();
-        let f = AircFrame::new(Kind::Msg, 9, encode_fields(&["#rf", "hi"]))
-            .with_flags(flags::ACK_REQ);
+        let f =
+            AircFrame::new(Kind::Msg, 9, encode_fields(&["#rf", "hi"])).with_flags(flags::ACK_REQ);
 
         let first = rx.on_receive(&call(), f.clone(), now);
         assert!(first.deliver.is_some());
@@ -609,7 +609,10 @@ mod tests {
         };
         let mut s = Sessions::new(cfg);
         let mut now = Instant::now();
-        assert_eq!(s.send(&call(), Kind::Msg, b"x".to_vec(), true, now).len(), 1);
+        assert_eq!(
+            s.send(&call(), Kind::Msg, b"x".to_vec(), true, now).len(),
+            1
+        );
 
         now += Duration::from_secs(11);
         assert_eq!(s.tick(now).transmit.len(), 1);
@@ -630,14 +633,23 @@ mod tests {
         };
         let mut s = Sessions::new(cfg);
         let mut now = Instant::now();
-        assert_eq!(s.send(&call(), Kind::Msg, b"x".to_vec(), true, now).len(), 1);
+        assert_eq!(
+            s.send(&call(), Kind::Msg, b"x".to_vec(), true, now).len(),
+            1
+        );
 
         // Well past every retry deadline, but the transmitter cannot key up.
         now += Duration::from_secs(120);
         let out = s.tick_retries(now, false);
         assert!(out.transmit.is_empty());
-        assert!(out.lost.is_empty(), "giving up would drop a message still held in the TNC");
-        assert!(s.peer(&call()).is_some(), "the session must still be waiting");
+        assert!(
+            out.lost.is_empty(),
+            "giving up would drop a message still held in the TNC"
+        );
+        assert!(
+            s.peer(&call()).is_some(),
+            "the session must still be waiting"
+        );
 
         // Once it can transmit, the first retry is still available.
         let out = s.tick_retries(now, true);
@@ -736,7 +748,10 @@ mod tests {
         let c: Callsign = "SM0CCC-1".parse().unwrap();
         assert!(s.touch(&a, now).is_some());
         assert!(s.touch(&b, now).is_some());
-        assert!(s.touch(&c, now).is_none(), "a third peer must not grow the table");
+        assert!(
+            s.touch(&c, now).is_none(),
+            "a third peer must not grow the table"
+        );
         s.force_touch(&c, now);
         assert_eq!(s.peers().count(), 2);
         assert_eq!(

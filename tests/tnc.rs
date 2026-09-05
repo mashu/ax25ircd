@@ -11,8 +11,8 @@ use ax25ircd::ax25::airtime::AirtimeConfig;
 use ax25ircd::ax25::kiss::{self, KissDecoder};
 use ax25ircd::ax25::tnc::{self, TncConfig};
 use ax25ircd::ax25::Ax25Frame;
-use ax25ircd::interlock::{self, Check};
 use ax25ircd::config::InterlockConfig;
+use ax25ircd::interlock::{self, Check};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::mpsc;
 
@@ -215,6 +215,66 @@ async fn the_inhibit_purges_the_queue_but_identification_still_goes_out() {
     assert!(frames.iter().any(|f| f.command == kiss::CMD_DATA));
 }
 
+fn hf_packet() -> AirtimeConfig {
+    AirtimeConfig {
+        baud: 300,
+        txdelay: Duration::from_millis(400),
+        txtail: Duration::from_millis(300),
+        max_duty: 0.25,
+        max_continuous: Duration::from_secs(30),
+        cooldown: Duration::from_secs(60),
+        window: Duration::from_secs(600),
+        hourly_budget: Duration::ZERO,
+        max_hold: Duration::from_secs(120),
+        enabled: true,
+    }
+}
+
+#[tokio::test]
+async fn identification_waits_for_the_previous_frame_to_finish() {
+    let (tnc, mut far, _rx) = spawn(hf_packet(), 512);
+    let mut dec = KissDecoder::new(1024);
+    let _ = drain(&mut far, &mut dec).await;
+
+    assert!(tnc.try_send(frame("SK0MT-1", b"chat")));
+    assert!(tnc.try_send_id(frame("SK0MT-1", b"SK0MT-1 gateway")));
+
+    // At 300 baud the chat frame is ~0.8 s of key-down. If ID jumped the
+    // airtime clock, a second DATA frame would already be on the wire.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let early = drain(&mut far, &mut dec).await;
+    let early_data = early.iter().filter(|f| f.command == kiss::CMD_DATA).count();
+    assert_eq!(
+        early_data, 1,
+        "ID must not key up while the previous frame still occupies the channel"
+    );
+
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let later = drain(&mut far, &mut dec).await;
+    assert!(
+        later.iter().any(|f| f.command == kiss::CMD_DATA),
+        "the ID should go out once the previous keyed time has elapsed"
+    );
+}
+
+#[tokio::test]
+async fn identification_is_not_flushed_as_a_kiss_burst() {
+    let (tnc, mut far, _rx) = spawn(hf_packet(), 512);
+    let mut dec = KissDecoder::new(1024);
+    let _ = drain(&mut far, &mut dec).await;
+
+    for i in 0..4 {
+        assert!(tnc.try_send_id(frame("SK0MT-1", format!("id-{i}").as_bytes())));
+    }
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let early = drain(&mut far, &mut dec).await;
+    let n = early.iter().filter(|f| f.command == kiss::CMD_DATA).count();
+    assert!(
+        n <= 1,
+        "four IDs dumped onto the TNC at once would key a QMX continuously: {n} frames"
+    );
+}
+
 #[tokio::test]
 async fn the_safety_interlock_stops_even_identification() {
     let (tnc, mut far, _rx) = spawn(fast(), 512);
@@ -233,7 +293,8 @@ async fn the_safety_interlock_stops_even_identification() {
         "if it is not safe to key up, it is not safe to key up for an ID either"
     );
 
-    tnc.airtime().interlock_ok.store(true, Ordering::Relaxed);
+    tnc.airtime().interlock_ok.store(true, Ordering::Release);
+    tokio::time::sleep(Duration::from_millis(400)).await;
     tnc.try_send_id(frame("SK0MT-1", b"SK0MT-1 gateway"));
     let frames = drain(&mut far, &mut dec).await;
     assert!(frames.iter().any(|f| f.command == kiss::CMD_DATA));
@@ -292,7 +353,7 @@ async fn an_interlock_failure_holds_the_queue_instead_of_purging_it() {
         "a failing interlock is not RADIO OFF: the queue must be held, not discarded"
     );
 
-    tnc.airtime().interlock_ok.store(true, Ordering::Relaxed);
+    tnc.airtime().interlock_ok.store(true, Ordering::Release);
     tokio::time::sleep(Duration::from_millis(400)).await;
     let frames = drain(&mut far, &mut dec).await;
     let sent: Vec<_> = frames
@@ -304,6 +365,46 @@ async fn an_interlock_failure_holds_the_queue_instead_of_purging_it() {
         sent.iter()
             .any(|ax| ax.info.windows(7).any(|w| w == b"keep-me")),
         "the frame queued while blocked must go out once it is safe: {sent:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_held_id_does_not_keep_stale_data_forever() {
+    let mut air = fast();
+    air.max_hold = Duration::from_millis(200);
+    let (tnc, mut far, _rx) = spawn(air, 512);
+    let mut dec = KissDecoder::new(1024);
+    let _ = drain(&mut far, &mut dec).await;
+
+    tnc.airtime().interlock_ok.store(false, Ordering::Release);
+    assert!(tnc.try_send(frame("SK0MT-1", b"stale-chat")));
+    assert!(tnc.try_send_id(frame("SK0MT-1", b"id-signoff")));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    tnc.airtime().interlock_ok.store(true, Ordering::Release);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let frames = drain(&mut far, &mut dec).await;
+    let infos: Vec<Vec<u8>> = frames
+        .iter()
+        .filter(|f| f.command == kiss::CMD_DATA)
+        .filter_map(|f| Ax25Frame::decode(&f.payload).ok())
+        .map(|ax| ax.info)
+        .collect();
+    assert!(
+        infos
+            .iter()
+            .any(|i| i.windows(10).any(|w| w == b"id-signoff")),
+        "the sign-off ID is not stale and must still go out: {infos:?}"
+    );
+    assert!(
+        infos
+            .iter()
+            .all(|i| !i.windows(10).any(|w| w == b"stale-chat")),
+        "chat held past max_hold behind an ID must not be radiated: {infos:?}"
+    );
+    assert!(
+        tnc.airtime().dropped_stale.load(Ordering::Relaxed) > 0,
+        "the stale frame must be counted as dropped, not lost"
     );
 }
 
@@ -345,14 +446,32 @@ async fn a_control_operator_can_slow_the_station_down_at_runtime() {
     assert_eq!(air.set_duty_override(None), None);
     assert_eq!(air.duty_limit(0.25), 0.25);
 
-    assert_eq!(air.pacing(Duration::from_millis(800)), Duration::from_millis(800));
+    assert_eq!(
+        air.pacing(Duration::from_millis(800)),
+        Duration::from_millis(800)
+    );
     air.set_pacing_override(Some(4000));
-    assert_eq!(air.pacing(Duration::from_millis(800)), Duration::from_millis(4000));
+    assert_eq!(
+        air.pacing(Duration::from_millis(800)),
+        Duration::from_millis(4000)
+    );
+    // Asking for less than the configured gap must not speed the station up.
+    air.set_pacing_override(Some(1));
+    assert_eq!(
+        air.pacing(Duration::from_millis(800)),
+        Duration::from_millis(800)
+    );
     air.set_pacing_override(None);
-    assert_eq!(air.pacing(Duration::from_millis(800)), Duration::from_millis(800));
+    assert_eq!(
+        air.pacing(Duration::from_millis(800)),
+        Duration::from_millis(800)
+    );
 
     let summary = air.summary();
-    assert!(summary.contains("duty") && summary.contains("queued"), "{summary}");
+    assert!(
+        summary.contains("duty") && summary.contains("queued"),
+        "{summary}"
+    );
 }
 
 #[tokio::test]
@@ -437,7 +556,10 @@ async fn the_interlock_poller_tracks_the_command() {
 
 #[tokio::test]
 async fn interlock_failures_are_reported_in_the_command_s_own_words() {
-    assert_eq!(interlock::run_once(&interlock_cfg("true", &[])).await, Check::Pass);
+    assert_eq!(
+        interlock::run_once(&interlock_cfg("true", &[])).await,
+        Check::Pass
+    );
 
     let c = interlock_cfg("sh", &["-c", "echo 'SWR 3.8:1 on 40m' >&2; exit 1"]);
     let check = interlock::run_once(&c).await;
@@ -446,7 +568,10 @@ async fn interlock_failures_are_reported_in_the_command_s_own_words() {
 
     // Output on stdout is used when stderr is empty.
     let c = interlock_cfg("sh", &["-c", "echo 'PA too hot'; exit 2"]);
-    assert!(interlock::run_once(&c).await.reason().contains("PA too hot"));
+    assert!(interlock::run_once(&c)
+        .await
+        .reason()
+        .contains("PA too hot"));
 
     // A command that says nothing at all still explains itself.
     let c = interlock_cfg("false", &[]);

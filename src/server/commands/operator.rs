@@ -13,43 +13,75 @@ use crate::irc::message::Message;
 use crate::irc::numerics as num;
 
 use super::super::state::UserId;
-use super::super::Server;
+use super::super::{AuthKind, Server};
 use super::constant_time_eq;
 
 impl Server {
     pub(super) fn cmd_oper(&mut self, uid: &UserId, msg: &Message) {
         let (Some(name), Some(pass)) = (msg.param(0), msg.param(1)) else {
-            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["OPER", "Not enough parameters"]);
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["OPER", "Not enough parameters"],
+            );
             return;
         };
         if !self.auth_rate_ok(uid) {
             return;
         }
-        // Compare every configured oper, and compare the password in constant
-        // time. `==` on a secret leaks its length and its first differing byte
-        // through timing, and OPER is the command that hands out control of a
-        // transmitter.
-        let mut ok = false;
+        // Compare every configured oper name in constant time. OPER hands
+        // out control of a transmitter, so `==` on the name is not enough
+        // by itself — but the password check is the expensive one.
+        let mut matched: Option<(bool, String)> = None;
         for o in &self.config.opers {
-            if constant_time_eq(&o.name, name) && constant_time_eq(&o.password, pass) {
-                ok = true;
+            if constant_time_eq(&o.name, name) {
+                matched = Some((
+                    crate::accounts::is_phc_hash(&o.password),
+                    o.password.clone(),
+                ));
             }
         }
-        if ok {
-            if let Some(u) = self.state.user_mut(uid) {
-                u.oper = true;
-            }
-            self.numeric(uid, num::RPL_YOUREOPER, &["You are now a control operator"]);
-            if let Some(u) = self.state.user(uid) {
-                self.audit.event("oper", &[("nick", &u.nick), ("host", &u.host)]);
-            }
-            self.refresh_privileges(uid);
-        } else {
+        let Some((hashed, secret)) = matched else {
             self.numeric(uid, num::ERR_PASSWDMISMATCH, &["Password incorrect"]);
             if let Some(u) = self.state.user(uid) {
-                self.audit.event("oper_fail", &[("nick", &u.nick), ("host", &u.host)]);
+                self.audit
+                    .event("oper_fail", &[("nick", &u.nick), ("host", &u.host)]);
             }
+            return;
+        };
+        if hashed {
+            let password = pass.to_string();
+            let nick = self
+                .state
+                .user(uid)
+                .map(|u| u.nick.clone())
+                .unwrap_or_default();
+            self.run_argon2(uid, AuthKind::Oper, nick, move || {
+                crate::accounts::verify_password(&password, &secret).map(|()| None)
+            });
+            return;
         }
+        if !constant_time_eq(&secret, pass) {
+            self.numeric(uid, num::ERR_PASSWDMISMATCH, &["Password incorrect"]);
+            if let Some(u) = self.state.user(uid) {
+                self.audit
+                    .event("oper_fail", &[("nick", &u.nick), ("host", &u.host)]);
+            }
+            return;
+        }
+        self.grant_oper(uid);
+    }
+
+    pub(crate) fn grant_oper(&mut self, uid: &UserId) {
+        if let Some(u) = self.state.user_mut(uid) {
+            u.oper = true;
+        }
+        self.numeric(uid, num::RPL_YOUREOPER, &["You are now a control operator"]);
+        if let Some(u) = self.state.user(uid) {
+            self.audit
+                .event("oper", &[("nick", &u.nick), ("host", &u.host)]);
+        }
+        self.refresh_privileges(uid);
     }
 
     pub(super) fn cmd_callsign(&mut self, uid: &UserId, msg: &Message) {
@@ -80,7 +112,12 @@ impl Server {
         if let Some(u) = self.state.user_mut(uid) {
             u.callsign = Some(call.clone());
         }
-        if self.state.user(uid).map(|u| u.nick_identified).unwrap_or(false) {
+        if self
+            .state
+            .user(uid)
+            .map(|u| u.nick_identified)
+            .unwrap_or(false)
+        {
             if let Some(nick) = self.state.user(uid).map(|u| u.nick.clone()) {
                 let _ = self.accounts.set_callsign(&nick, &call.to_string());
             }
@@ -89,7 +126,11 @@ impl Server {
         if let Some(u) = self.state.user(uid) {
             self.audit.event(
                 "callsign",
-                &[("nick", &u.nick), ("call", &call.to_string()), ("host", &u.host)],
+                &[
+                    ("nick", &u.nick),
+                    ("call", &call.to_string()),
+                    ("host", &u.host),
+                ],
             );
         }
         self.notice_user(
@@ -186,18 +227,27 @@ impl Server {
                     self.notice_user(uid, "Radio support is disabled in the configuration.");
                 }
             }
-            "ID" => {
-                if self.radio.identify_now() {
+            "ID" => match self.radio.identify_now() {
+                crate::server::IdentifyResult::Sent => {
                     self.notice_user(uid, "Station identification transmitted.");
-                } else {
+                }
+                crate::server::IdentifyResult::RateLimited => {
+                    self.notice_user(
+                        uid,
+                        "Station identification was already sent recently. \
+                             Wait for the identification interval, or transmit first.",
+                    );
+                }
+                crate::server::IdentifyResult::NotQueued => {
                     self.notice_user(
                         uid,
                         "Station identification was not transmitted. Check RADIO STATUS.",
                     );
                 }
-            }
+            },
             "HEARD" => {
-                let mut rows: Vec<String> = self.radio
+                let mut rows: Vec<String> = self
+                    .radio
                     .sessions
                     .peers()
                     .map(|p| {
@@ -219,41 +269,39 @@ impl Server {
                     self.notice_user(uid, &r);
                 }
             }
-            "DUTY" => {
-                match self.radio.airtime() {
-                    Some(a) => {
-                        let summary = a.summary();
-                        self.notice_user(uid, &summary);
-                        let d = &self.config.radio.duty;
-                        if d.enabled {
-                            self.notice_user(
-                                uid,
-                                &format!(
-                                    "limits: {}% of {}s, max {}s continuous then {}s cooldown, \
+            "DUTY" => match self.radio.airtime() {
+                Some(a) => {
+                    let summary = a.summary();
+                    self.notice_user(uid, &summary);
+                    let d = &self.config.radio.duty;
+                    if d.enabled {
+                        self.notice_user(
+                            uid,
+                            &format!(
+                                "limits: {}% of {}s, max {}s continuous then {}s cooldown, \
                                      {}s per rolling hour, frames dropped after {}s held \
                                      (baud {}, txdelay {}ms, txtail {}ms)",
-                                    d.max_duty_percent,
-                                    d.window_secs,
-                                    d.max_continuous_secs,
-                                    d.cooldown_secs,
-                                    d.hourly_airtime_secs,
-                                    d.max_hold_secs,
-                                    d.baud,
-                                    d.txdelay_ms,
-                                    d.txtail_ms,
-                                ),
-                            );
-                        } else {
-                            self.notice_user(
-                                uid,
-                                "The airtime governor is DISABLED in the configuration. \
+                                d.max_duty_percent,
+                                d.window_secs,
+                                d.max_continuous_secs,
+                                d.cooldown_secs,
+                                d.hourly_airtime_secs,
+                                d.max_hold_secs,
+                                d.baud,
+                                d.txdelay_ms,
+                                d.txtail_ms,
+                            ),
+                        );
+                    } else {
+                        self.notice_user(
+                            uid,
+                            "The airtime governor is DISABLED in the configuration. \
                                  Nothing is protecting the finals or the channel.",
-                            );
-                        }
+                        );
                     }
-                    None => self.notice_user(uid, "No TNC; there is no airtime to report."),
                 }
-            }
+                None => self.notice_user(uid, "No TNC; there is no airtime to report."),
+            },
             "QUEUE" => {
                 // Everything that has been accepted but not yet radiated, in
                 // the three places it can be waiting.
@@ -276,7 +324,8 @@ impl Server {
                     }
                     None => self.notice_user(uid, "No TNC; nothing can be queued."),
                 }
-                let mut waiting: Vec<String> = self.radio
+                let mut waiting: Vec<String> = self
+                    .radio
                     .sessions
                     .peers()
                     .filter(|p| p.queue_depth() > 0)
@@ -340,7 +389,10 @@ impl Server {
                         self.notice_user(uid, &text);
                         self.audit.event(
                             "radio_limit_duty",
-                            &[("percent", &applied.map(|p| p.to_string()).unwrap_or("off".into()))],
+                            &[(
+                                "percent",
+                                &applied.map(|p| p.to_string()).unwrap_or("off".into()),
+                            )],
                         );
                     }
                     ("PACING", Some(v)) => {
@@ -359,12 +411,26 @@ impl Server {
                             }
                         };
                         a.set_pacing_override(ms);
+                        let configured = Duration::from_millis(self.config.radio.tnc.tx_pacing_ms);
                         let text = match ms {
-                            Some(m) => format!(
-                                "Minimum gap between transmissions set to {m}ms. \
-                                 This slows the station down; it cannot speed it past the \
-                                 duty-cycle limit."
-                            ),
+                            Some(asked) => {
+                                let applied = a.pacing(configured);
+                                if applied > Duration::from_millis(asked) {
+                                    format!(
+                                        "Minimum gap set to {}ms — pacing can only slow the \
+                                         station (configured floor is {}ms).",
+                                        applied.as_millis(),
+                                        configured.as_millis()
+                                    )
+                                } else {
+                                    format!(
+                                        "Minimum gap between transmissions set to {}ms. \
+                                         This slows the station down; it cannot speed it past the \
+                                         duty-cycle limit.",
+                                        applied.as_millis()
+                                    )
+                                }
+                            }
                             None => "Pacing override cleared; the configured gap applies.".into(),
                         };
                         self.notice_user(uid, &text);
@@ -428,7 +494,11 @@ impl Server {
             return;
         }
         let Some(who) = msg.param(0).map(|s| s.to_string()) else {
-            self.numeric(uid, num::ERR_NEEDMOREPARAMS, &["KILL", "Not enough parameters"]);
+            self.numeric(
+                uid,
+                num::ERR_NEEDMOREPARAMS,
+                &["KILL", "Not enough parameters"],
+            );
             return;
         };
         let reason = msg.param(1).unwrap_or("Killed").to_string();
@@ -436,7 +506,8 @@ impl Server {
             self.numeric(uid, num::ERR_NOSUCHNICK, &[&who, "No such nick"]);
             return;
         };
-        self.audit.event("kill", &[("nick", &who), ("reason", &reason)]);
+        self.audit
+            .event("kill", &[("nick", &who), ("reason", &reason)]);
         if let UserId::Ip(id) = target {
             self.send_raw(id, format!("ERROR :Killed ({reason})"));
         }
