@@ -82,6 +82,14 @@ impl Harness {
     }
 
     async fn transmitted(&mut self) -> Vec<AircFrame> {
+        self.transmitted_ax()
+            .await
+            .into_iter()
+            .filter_map(|ax| AircFrame::decode(&ax.info).ok())
+            .collect()
+    }
+
+    async fn transmitted_ax(&mut self) -> Vec<Ax25Frame> {
         let mut out = Vec::new();
         let mut buf = [0u8; 4096];
         loop {
@@ -92,9 +100,7 @@ impl Harness {
                             continue;
                         }
                         if let Ok(ax) = Ax25Frame::decode(&kf.payload) {
-                            if let Ok(airc) = AircFrame::decode(&ax.info) {
-                                out.push(airc);
-                            }
+                            out.push(ax);
                         }
                     }
                 }
@@ -301,6 +307,93 @@ async fn identification_is_counted_as_airtime_like_anything_else() {
     assert!(
         h.radio.stats.rf_bytes_tx > before,
         "an ID is key-down time and has to appear in the totals"
+    );
+}
+
+#[tokio::test]
+async fn identification_is_addressed_to_id() {
+    let mut h = Harness::new();
+    h.radio
+        .broadcast(Kind::Msg, encode_fields(&["#rf", "a", "b"]), TxClass::Chat);
+    let _ = h.transmitted().await;
+
+    h.radio.id_if_needed();
+    let sent = h.transmitted_ax().await;
+    let id = sent
+        .iter()
+        .find(|ax| AircFrame::decode(&ax.info).map(|f| f.kind) == Ok(Kind::Id))
+        .expect("an ID frame should have gone out");
+    assert_eq!(
+        id.destination.call.to_string(),
+        "ID",
+        "identification is addressed to ID, not the protocol address: {}",
+        id.to_monitor_line()
+    );
+}
+
+#[tokio::test]
+async fn held_mail_is_not_destroyed_when_the_transmitter_is_off() {
+    use ax25ircd::server::mailbox::StoredMessage;
+
+    let mut h = Harness::new();
+    h.radio
+        .mailbox
+        .store(
+            &station(),
+            StoredMessage {
+                from: "alice".into(),
+                text: "keep this".into(),
+                notice: false,
+                truncated: false,
+                stored_at: Instant::now(),
+            },
+        )
+        .unwrap();
+    h.radio.enabled = false;
+    h.radio.flush_mailbox(&station());
+    assert_eq!(
+        h.radio.mailbox.depth(&station()),
+        1,
+        "RADIO OFF must not take the only copy out of the mailbox"
+    );
+}
+
+#[tokio::test]
+async fn held_mail_is_not_destroyed_when_the_session_queue_is_full() {
+    use ax25ircd::server::mailbox::StoredMessage;
+
+    let mut h = Harness::new();
+    for _ in 0..20 {
+        h.radio.unicast(
+            &station(),
+            Kind::Msg,
+            encode_fields(&["SM0ABC|7", "alice", "filler"]),
+            true,
+            TxClass::Direct,
+        );
+    }
+    assert!(
+        !h.radio.sessions.can_accept(&station()),
+        "test setup: the session queue should be full"
+    );
+    h.radio
+        .mailbox
+        .store(
+            &station(),
+            StoredMessage {
+                from: "alice".into(),
+                text: "keep this too".into(),
+                notice: false,
+                truncated: false,
+                stored_at: Instant::now(),
+            },
+        )
+        .unwrap();
+    h.radio.flush_mailbox(&station());
+    assert_eq!(
+        h.radio.mailbox.depth(&station()),
+        1,
+        "a full session queue must leave held mail where it is"
     );
 }
 

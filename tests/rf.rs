@@ -5,6 +5,7 @@
 //! going through the TNC task, so a test can assert on one frame at a time
 //! without waiting for pacing or airtime.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -90,8 +91,14 @@ impl Rf {
     }
 
     fn with(text: &str) -> Self {
-        let _ = std::fs::remove_file("target/test-rf-nicks.json");
-        let config = Arc::new(Config::from_toml(text).unwrap());
+        static N: AtomicU64 = AtomicU64::new(0);
+        let path = format!(
+            "target/test-rf-nicks-{}-{}.json",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        );
+        let text = text.replace("target/test-rf-nicks.json", &path);
+        let config = Arc::new(Config::from_toml(&text).unwrap());
         let (link, far) = TncConfig::loopback_link();
         let (handle, rf_rx) = tnc::spawn(TncConfig::from_config(&config, link));
         Rf {
@@ -795,6 +802,29 @@ async fn held_mail_is_not_destroyed_when_the_transmit_queue_is_full() {
         1,
         "the held message was taken out of the mailbox and then refused by \
          admission control, so it is gone: neither transmitted nor held"
+    );
+}
+
+#[tokio::test]
+async fn held_mail_is_not_destroyed_when_the_transmitter_is_off() {
+    let mut rf = Rf::new();
+    let a = rf.client(1, "alice");
+    rf.send(a, "OPER root operpass1");
+    rf.send(a, "CALLSIGN SM0XYZ");
+    rf.drain(a);
+
+    rf.send(a, "PRIVMSG SM0ABC|7 :something worth keeping");
+    rf.drain(a);
+    assert_eq!(rf.server.radio.mailbox.len(), 1, "test setup: the message was held");
+
+    rf.server.radio.enabled = false;
+    rf.heard("SM0ABC-7", Kind::Hello, &[]);
+
+    assert_eq!(
+        rf.server.radio.mailbox.len(),
+        1,
+        "a HELLO while the transmitter is OFF must not take the only copy \
+         out of the mailbox"
     );
 }
 

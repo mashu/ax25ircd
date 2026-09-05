@@ -386,10 +386,9 @@ impl Governor {
     /// How long before a frame of `octets` could be transmitted, without
     /// changing any state.
     ///
-    /// [`Governor::check`] has to record that a cooldown started, so it takes
-    /// `&mut self` and cannot be used to answer "when could I send this?" for
-    /// a message the caller has not committed to yet. Admission control needs
-    /// exactly that question, so it gets its own read-only path.
+    /// [`Governor::check`] expires old bursts and ends a run that has already
+    /// cooled, so it takes `&mut self`. Admission control needs a path that
+    /// cannot change the answer by asking, so it gets this read-only query.
     pub fn time_until_clear(&self, octets: usize, now: Instant) -> Duration {
         if !self.cfg.enabled {
             return Duration::ZERO;
@@ -409,7 +408,10 @@ impl Governor {
             self.run
         };
         if run > Duration::ZERO && run + cost > self.cfg.max_continuous {
-            let until = self.last_end.unwrap_or(now) + self.cfg.cooldown;
+            // This frame does not fit in the remaining run. Wait for the
+            // finals to cool across the gap so the run resets; do not start a
+            // cooldown we have not earned by actually transmitting.
+            let until = self.last_end.unwrap_or(now) + RUN_GAP;
             wait = wait.max(until.saturating_duration_since(now));
         }
         let allowance = self.allowance();
@@ -483,10 +485,13 @@ impl Governor {
         let cost = self.airtime_for(octets);
 
         // 1. Continuous run. Checked before the others because it is the one
-        //    that protects the hardware rather than the band.
+        //    that protects the hardware rather than the band. A frame that
+        //    does not fit is deferred until the run gap expires; the cooldown
+        //    itself is started only by [`Governor::record`] after a real
+        //    transmission, so asking about a large frame cannot block a
+        //    smaller one that still fits.
         if self.run + cost > self.cfg.max_continuous && self.run > Duration::ZERO {
-            let until = self.last_end.unwrap_or(now) + self.cfg.cooldown;
-            self.cooling_until = Some(until);
+            let until = self.last_end.unwrap_or(now) + RUN_GAP;
             return TxDecision::Defer(
                 until.saturating_duration_since(now).max(Duration::from_millis(1)),
                 DeferReason::Cooldown,
@@ -904,5 +909,31 @@ mod tests {
         assert_eq!(g.check(158, t), TxDecision::Send);
         g.record(158, t);
         assert!(g.run < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn checking_a_frame_that_does_not_fit_does_not_start_a_cooldown() {
+        let mut g = Governor::new(cfg());
+        let mut t = Instant::now();
+        // Build a run that still has a few seconds of room, but not enough
+        // for a large frame.
+        while g.run + Duration::from_secs(8) < Duration::from_secs(30) {
+            assert_eq!(g.check(80, t), TxDecision::Send);
+            let cost = g.record(80, t);
+            t += cost;
+        }
+        assert!(
+            !matches!(g.check(500, t), TxDecision::Send),
+            "a ~15 s frame must not fit in the remaining run"
+        );
+        assert_eq!(
+            g.check(80, t),
+            TxDecision::Send,
+            "refusing a large frame must not cool the PA and block a smaller one that still fits"
+        );
+        assert!(
+            g.cooling_until.is_none(),
+            "a cooldown is earned by transmitting, not by asking"
+        );
     }
 }

@@ -9,12 +9,11 @@ use std::time::Duration;
 
 use tracing::info;
 
-use crate::airc::{encode_fields, Kind};
 use crate::irc::message::Message;
 use crate::irc::numerics as num;
 
 use super::super::state::UserId;
-use super::super::{Server, TxClass};
+use super::super::Server;
 use super::constant_time_eq;
 
 impl Server {
@@ -188,8 +187,14 @@ impl Server {
                 }
             }
             "ID" => {
-                self.force_id();
-                self.notice_user(uid, "Station identification transmitted.");
+                if self.radio.identify_now() {
+                    self.notice_user(uid, "Station identification transmitted.");
+                } else {
+                    self.notice_user(
+                        uid,
+                        "Station identification was not transmitted. Check RADIO STATUS.",
+                    );
+                }
             }
             "HEARD" => {
                 let mut rows: Vec<String> = self.radio
@@ -435,13 +440,5 @@ impl Server {
             self.send_raw(id, format!("ERROR :Killed ({reason})"));
         }
         self.quit_user(&target, &format!("Killed ({reason})"));
-    }
-
-    pub(super) fn force_id(&mut self) {
-        let text = format!(
-            "{} {}",
-            self.config.radio.callsign, self.config.radio.id_text
-        );
-        self.radio.broadcast(Kind::Id, encode_fields(&[&text]), TxClass::Control);
     }
 }

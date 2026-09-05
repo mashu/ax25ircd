@@ -287,6 +287,15 @@ impl Radio {
         if depth == 0 {
             return;
         }
+        // The mailbox is the last copy. If we cannot radiate — transmitter
+        // off, no TNC, interlock down — leave the mail where it is. A HELLO
+        // still arrives while `RADIO OFF` (receive keeps running), and taking
+        // the message out then handing it to a unicast that returns immediately
+        // would destroy it.
+        if !self.available() || self.airtime().is_some_and(|a| a.tx_blocked()) {
+            debug!(%call, "holding mail back: the transmitter is not available");
+            return;
+        }
         let batch = self.config.radio.mailbox_flush_batch.max(1);
         let now = Instant::now();
         let nick = call.to_nick();
@@ -311,6 +320,10 @@ impl Radio {
                 debug!(%call, "holding mail back: the transmit backlog is full");
                 break;
             }
+            if !self.sessions.can_accept(call) {
+                debug!(%call, "holding mail back: the station's session queue is full");
+                break;
+            }
             self.mailbox.drop_front(call);
             self.unicast_flagged(call, Kind::Stored, payload, true, TxClass::Direct, flags);
             sent += 1;
@@ -331,7 +344,11 @@ impl Radio {
         // Only transmit an ID if we have actually transmitted. Identifying an
         // idle station just adds QRM.
         if self.transmitted_since_id {
-            self.send_id();
+            if !self.send_id() {
+                // The obligation still stands; try again on the next tick
+                // rather than waiting another full interval.
+                return;
+            }
         }
         self.last_id = now;
     }
@@ -346,7 +363,15 @@ impl Radio {
         }
     }
 
-    fn send_id(&mut self) {
+    /// Identify now. Used by `RADIO ID` and by the automatic ID path.
+    ///
+    /// Returns whether the frame was handed to the TNC. A failure leaves the
+    /// "owes an ID" flag set so a later attempt still has something to say.
+    pub fn identify_now(&mut self) -> bool {
+        self.send_id()
+    }
+
+    fn send_id(&mut self) -> bool {
         let text = format!(
             "{} {}",
             self.config.radio.callsign, self.config.radio.id_text
@@ -355,24 +380,35 @@ impl Radio {
         let dest: Callsign = "ID".parse().unwrap();
         let seq = self.sessions.next_seq();
         let frame = AircFrame::new(Kind::Id, seq, payload);
-        self.transmit_id(&dest, frame);
-        self.transmitted_since_id = false;
-        self.last_id = Instant::now();
-        debug!("station identification transmitted");
+        if self.transmit_id(&dest, frame) {
+            self.transmitted_since_id = false;
+            self.last_id = Instant::now();
+            debug!("station identification transmitted");
+            true
+        } else {
+            false
+        }
     }
 
     /// Identification goes out on the TNC's priority path, so it is not held
     /// behind a backlog and is not discarded by the transmit inhibit. This is
     /// the one frame the station is obliged to send.
-    fn transmit_id(&mut self, dest: &Callsign, frame: AircFrame) {
+    fn transmit_id(&mut self, dest: &Callsign, frame: AircFrame) -> bool {
         let (Some(tnc), Some(source)) = (self.tnc.as_ref(), self.source.clone()) else {
-            return;
+            return false;
         };
+        // The TNC also suppresses an ID when the interlock fails; checking
+        // here means we do not clear `transmitted_since_id` for a frame that
+        // will never be keyed.
+        if tnc.airtime().interlock_failed() {
+            warn!("station ID not queued: the safety interlock is not satisfied");
+            return false;
+        }
         let ax = match Ax25Frame::ui(source, dest.clone(), &self.path, frame.encode()) {
             Ok(f) => f,
             Err(e) => {
                 warn!("cannot build station ID frame: {e}");
-                return;
+                return false;
             }
         };
         let len = ax.encode().len();
@@ -381,8 +417,10 @@ impl Radio {
             self.stats.rf_bytes_tx += len as u64;
             let n = len.to_string();
             self.audit.event("rf_id", &[("bytes", &n)]);
+            true
         } else {
             self.stats.rf_frames_dropped += 1;
+            false
         }
     }
 

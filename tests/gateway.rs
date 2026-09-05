@@ -1,6 +1,7 @@
 //! End-to-end tests: a fake TNC on one side, a fake IRC client on the other,
 //! and the real server in between.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -115,7 +116,19 @@ impl Harness {
     }
 
     async fn from_toml(text: &str) -> Self {
-        let config = Arc::new(Config::from_toml(&config_text(text)).unwrap());
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let text = text
+            .replace(
+                "target/test-nicks.json",
+                &format!("target/test-nicks-{pid}-{n}.json"),
+            )
+            .replace(
+                "target/test-nicks-grant.json",
+                &format!("target/test-nicks-grant-{pid}-{n}.json"),
+            );
+        let config = Arc::new(Config::from_toml(&config_text(&text)).unwrap());
         // The same TncConfig the server builds, with a loopback link
         // substituted. Anything derived from the configuration file — paclen,
         // pacing, and the whole `[radio.duty]` section — therefore reaches the
@@ -602,7 +615,6 @@ async fn callsign_alone_does_not_radiate() {
 
 #[tokio::test]
 async fn grant_requires_a_registered_nick_then_survives_identify() {
-    let _ = std::fs::remove_file("target/test-nicks-grant.json");
     let toml = r##"
 [server]
 name = "test.gateway"
@@ -1126,12 +1138,16 @@ async fn the_safety_interlock_stops_everything_including_identification() {
         .interlock_ok
         .store(true, std::sync::atomic::Ordering::Relaxed);
     h.send("RADIO ID");
-    assert!(
-        h.transmitted()
-            .await
-            .iter()
-            .any(|(_, f)| f.kind == Kind::Id),
-        "transmitting should resume once the interlock passes"
+    let sent = h.transmitted().await;
+    let id = sent
+        .iter()
+        .find(|(_, f)| f.kind == Kind::Id)
+        .expect("RADIO ID should put an identification frame on the air");
+    assert_eq!(
+        id.0.destination.call.to_string(),
+        "ID",
+        "RADIO ID must use the identification address, not the protocol broadcast: {}",
+        id.0.to_monitor_line()
     );
 }
 

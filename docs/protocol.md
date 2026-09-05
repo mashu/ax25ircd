@@ -187,7 +187,7 @@ should not lose its conversation too.
 
 Station `SM0ABC-7` says "hi all" in `#rf`.
 
-AX.25 UI frame, `SM0ABC-7 > AIRC`, `PID 0xF0`, information field:
+AX.25 UI frame, `SM0ABC-7 > SK0MT-1` (the gateway callsign), `PID 0xF0`, information field:
 
 ```
 41 31 05 00 00 2A 00 01 23 72 66 1F 68 69 20 61 6C 6C

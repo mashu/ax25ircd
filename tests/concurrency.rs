@@ -5,7 +5,7 @@
 //! `Server` struct, because the questions they answer — concurrency, accept
 //! backlog, connection caps — are about the parts a unit test skips.
 
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,7 +37,14 @@ name = "#lobby"
 
 /// Start a server on an ephemeral port and return its address.
 async fn start(config_text: &str) -> String {
-    let config = Arc::new(Config::from_toml(config_text).unwrap());
+    static N: AtomicU64 = AtomicU64::new(0);
+    let path = format!(
+        "target/test-concurrency-nicks-{}-{}.json",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    );
+    let config_text = config_text.replace("target/test-concurrency-nicks.json", &path);
+    let config = Arc::new(Config::from_toml(&config_text).unwrap());
     let (events_tx, events_rx) = mpsc::channel::<Event>(1024);
     let mut srv = Server::new(config, None);
     srv.attach_events(events_tx.clone());

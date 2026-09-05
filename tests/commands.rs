@@ -6,12 +6,22 @@
 //! command that "works" but replies with the wrong numeric is broken for
 //! irssi and WeeChat.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use ax25ircd::config::Config;
 use ax25ircd::server::state::ClientId;
 use ax25ircd::server::{Event, Server};
 use tokio::sync::mpsc;
+
+fn unique_accounts_file() -> String {
+    static N: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "target/test-commands-nicks-{}-{}.json",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 const CONFIG: &str = r##"
 [server]
@@ -59,8 +69,9 @@ impl Net {
     }
 
     fn with(text: &str) -> Self {
-        let _ = std::fs::remove_file("target/test-commands-nicks.json");
-        let config = Arc::new(Config::from_toml(text).unwrap());
+        let path = unique_accounts_file();
+        let text = text.replace("target/test-commands-nicks.json", &path);
+        let config = Arc::new(Config::from_toml(&text).unwrap());
         Net {
             server: Server::new(config, None),
             rx: Vec::new(),

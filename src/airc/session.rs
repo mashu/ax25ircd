@@ -296,6 +296,18 @@ impl Sessions {
         out
     }
 
+    /// Would a reliable send to `dst` be accepted rather than dropped?
+    ///
+    /// Held mail uses this so a message is not taken out of the mailbox only
+    /// to be refused by a full per-station queue. Unreliable traffic is never
+    /// queued, so it is always accepted here.
+    pub fn can_accept(&self, dst: &Callsign) -> bool {
+        match self.peers.get(dst) {
+            Some(peer) if peer.pending.is_some() => peer.queue.len() < self.config.max_queue,
+            _ => true,
+        }
+    }
+
     /// Queue a message for `dst`, fragmenting as needed. Returns the frames to
     /// transmit immediately (empty if something is already in flight and this
     /// message had to be queued behind it).
@@ -548,6 +560,10 @@ mod tests {
         let peer = s.peer(&call()).unwrap();
         assert_eq!(peer.queue_depth(), 3);
         assert_eq!(peer.dropped, 2);
+        assert!(
+            !s.can_accept(&call()),
+            "a full queue must be visible before the next send refuses"
+        );
     }
 
     #[test]
