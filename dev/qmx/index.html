@@ -1071,9 +1071,37 @@ is an operator's checklist, not legal advice.</p>
 <a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>arecord<span class="w"> </span>-l
 <a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>ls<span class="w"> </span>-l<span class="w"> </span>/dev/serial/by-id/
 </code></pre></div>
-<p>You want a card named <strong>QMX</strong> (remember <code>plughw:N,0</code>) and a stable serial path
-such as <code>/dev/serial/by-id/usb-QRP_Labs_QMX_Transceiver-if00</code>. Do not put
-<code>/dev/ttyACM0</code> in a config you intend to keep — the number moves.</p>
+<p>You want a card named <strong>QMX Transceiver</strong> (ALSA short name <code>Transceiver</code>) and a
+stable serial path such as
+<code>/dev/serial/by-id/usb-QRP_Labs_QMX_Transceiver-if00</code>. Use
+<code>plughw:CARD=Transceiver,DEV=0</code>, not <code>plughw:1,0</code> — card numbers move when HDMI
+or another USB gadget appears. Do not put <code>/dev/ttyACM0</code> in a config you intend
+to keep; that number moves too.</p>
+<p>If PipeWire or PulseAudio has taken the QMX (it often becomes the default
+sink), Direwolf cannot open it for transmit. Keep desktop audio on the laptop
+speakers and leave the radio to ALSA:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>wpctl<span class="w"> </span>status<span class="w">                    </span><span class="c1"># note the Built-in Audio sink/source IDs</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>wpctl<span class="w"> </span>set-default<span class="w"> </span>&lt;sink-id&gt;
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>wpctl<span class="w"> </span>set-default<span class="w"> </span>&lt;source-id&gt;
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>pactl<span class="w"> </span>set-card-profile<span class="w"> </span>alsa_card.usb-QRP_Labs_QMX_Transceiver-02<span class="w"> </span>off
+</code></pre></div>
+<p>To make that stick across replugs, drop a WirePlumber rule that disables the
+QMX for PipeWire (Direwolf still opens it via ALSA):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a># ~/.config/wireplumber/wireplumber.conf.d/51-qmx.conf
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>monitor.alsa.rules = [
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>  {
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>    matches = [
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>      { device.name = "~alsa_card.usb-QRP_Labs_QMX_Transceiver.*" }
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>    ]
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>    actions = {
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>      update-props = {
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>        device.disabled = true
+<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>      }
+<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>    }
+<a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a>  }
+<a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>]
+</code></pre></div>
+<p>Then <code>systemctl --user restart wireplumber</code>.</p>
 <h2 id="3-set-the-radio-ssb-usb-iq-off-tx-from-usb">3. Set the radio: SSB USB, IQ off, TX from USB<a class="headerlink" href="#3-set-the-radio-ssb-usb-iq-off-tx-from-usb" title="Permanent link">&para;</a></h2>
 <p>AIRC is AFSK from Direwolf, sent as ordinary SSB audio. Digi mode is
 single-tone FSK (FT8-style) and will not work.</p>
@@ -1107,27 +1135,27 @@ single-tone FSK (FT8-style) and will not work.</p>
 <p>HF packet is 300 baud. VHF FM is 1200; that is a different radio. Copy
 <a href="../assets/direwolf-qmx.conf">direwolf-qmx.conf</a>, then edit <code>ADEVICE</code>, <code>MYCALL</code>
 (your callsign), and the <code>PTT</code> serial path from step 2.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>ADEVICE  plughw:1,0
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>ARATE    48000
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>MYCALL   YOURCALL-1
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>CHANNEL  0
-<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>MODEM    300
-<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>PTT      RIG 2057 /dev/serial/by-id/usb-QRP_Labs_QMX_Transceiver-if00
-<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>KISSPORT 8001
-<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>TXDELAY  40
-<a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>TXTAIL   30
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>ADEVICE  plughw:CARD=Transceiver,DEV=0
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>ARATE    48000
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>MYCALL   YOURCALL-1
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>CHANNEL  0
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>MODEM    300
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>PTT      RIG 2057 /dev/serial/by-id/usb-QRP_Labs_QMX_Transceiver-if00
+<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>KISSPORT 8001
+<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>TXDELAY  40
+<a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>TXTAIL   30
 </code></pre></div>
 <p>Hamlib model <strong>2057</strong> is QMX. Older hamlib: Kenwood TS-480, model <strong>2028</strong>, same
 serial device.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>direwolf<span class="w"> </span>-c<span class="w"> </span>direwolf-qmx.conf
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>direwolf<span class="w"> </span>-c<span class="w"> </span>direwolf-qmx.conf
 </code></pre></div>
 <p>Leave this terminal running. It should listen on KISS TCP port 8001.</p>
 <h2 id="5-install-ax25ircd">5. Install ax25ircd<a class="headerlink" href="#5-install-ax25ircd" title="Permanent link">&para;</a></h2>
 <p>See <a href="../install/">Install</a>. Short version:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>curl<span class="w"> </span>-fsSL<span class="w"> </span>-o<span class="w"> </span>ax25ircd.run<span class="w"> </span><span class="se">\</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span>https://github.com/mashu/ax25ircd/releases/latest/download/ax25ircd-x86_64.run
-<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>chmod<span class="w"> </span>+x<span class="w"> </span>ax25ircd.run
-<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>./ax25ircd.run
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>curl<span class="w"> </span>-fsSL<span class="w"> </span>-o<span class="w"> </span>ax25ircd.run<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w">  </span>https://github.com/mashu/ax25ircd/releases/latest/download/ax25ircd-x86_64.run
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>chmod<span class="w"> </span>+x<span class="w"> </span>ax25ircd.run
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>./ax25ircd.run
 </code></pre></div>
 <p>AppImage subcommands: <code>./ax25ircd.AppImage station …</code> and
 <code>./ax25ircd.AppImage kisshub …</code>. ARM: aarch64 tarball or <code>.run</code> from
@@ -1136,30 +1164,30 @@ serial device.</p>
 <p>The installer writes <code>~/.config/ax25ircd/ax25ircd.toml</code> if that file did not
 exist. Set <code>server.name</code>, <strong>your</strong> callsign, and turn the radio on only when
 Direwolf is already listening.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">[radio]</span>
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="n">enabled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
-<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="n">callsign</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"YOURCALL-1"</span>
-<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="n">paclen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">128</span>
-<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="n">notice_air_relay</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
-<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>
-<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="k">[radio.tnc]</span>
-<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a><span class="n">kind</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"tcp"</span>
-<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="n">host</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"127.0.0.1"</span>
-<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a><span class="n">port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8001</span>
-<a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a><span class="n">tx_pacing_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2500</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="k">[radio]</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="n">enabled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="n">callsign</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"YOURCALL-1"</span>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="n">paclen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">128</span>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="n">notice_air_relay</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>
+<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="k">[radio.tnc]</span>
+<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="n">kind</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"tcp"</span>
+<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="n">host</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"127.0.0.1"</span>
+<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="n">port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8001</span>
+<a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="n">tx_pacing_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2500</span>
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>ax25ircd<span class="w"> </span>--check<span class="w"> </span>-c<span class="w"> </span>~/.config/ax25ircd/ax25ircd.toml
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>ax25ircd<span class="w"> </span>--check<span class="w"> </span>-c<span class="w"> </span>~/.config/ax25ircd/ax25ircd.toml
 </code></pre></div>
 <p>The checker refuses a fake callsign, an ID interval over ten minutes, and
 <code>radio.enabled</code> with no bridged channel. Keep <code>#rf</code> as <code>rf = true</code>.</p>
 <h2 id="7-start-the-gateway-then-the-irc-client">7. Start the gateway, then the IRC client<a class="headerlink" href="#7-start-the-gateway-then-the-irc-client" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>ax25ircd<span class="w"> </span>-c<span class="w"> </span>~/.config/ax25ircd/ax25ircd.toml
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="c1"># another terminal:</span>
-<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>irssi
-<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="c1">#  /connect 127.0.0.1 6667</span>
-<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="c1">#  /quote CALLSIGN YOURCALL</span>
-<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="c1">#  /join #rf</span>
-<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="c1">#  /quote RADIO</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>ax25ircd<span class="w"> </span>-c<span class="w"> </span>~/.config/ax25ircd/ax25ircd.toml
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="c1"># another terminal:</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>irssi
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="c1">#  /connect 127.0.0.1 6667</span>
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="c1">#  /quote CALLSIGN YOURCALL</span>
+<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="c1">#  /join #rf</span>
+<a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="c1">#  /quote RADIO</span>
 </code></pre></div>
 <p><code>RADIO</code> should show the transmitter <strong>ON</strong>. <code>#rf</code> is <code>+rm</code>: without a callsign
 you can listen, you cannot speak. Without RF-TX your speech stays on IRC.
@@ -1201,15 +1229,17 @@ line in <code>#rf</code>. If <code>notice_air_relay</code> is on, the server not
 </table>
 <h2 id="9-optional-a-second-qmx-as-the-operator-radio">9. Optional: a second QMX as the operator radio<a class="headerlink" href="#9-optional-a-second-qmx-as-the-operator-radio" title="Permanent link">&para;</a></h2>
 <p>Same Direwolf setup on that machine, then the station client:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>ax25irc-station<span class="w"> </span>--call<span class="w"> </span>YOURCALL-7<span class="w"> </span>--gateway<span class="w"> </span>GATEWAY-1<span class="w"> </span><span class="se">\</span>
-<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="w">    </span>--channel<span class="w"> </span><span class="s1">'#rf'</span><span class="w"> </span>--tnc<span class="w"> </span>tcp://127.0.0.1:8001
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>ax25irc-station<span class="w"> </span>--call<span class="w"> </span>YOURCALL-7<span class="w"> </span>--gateway<span class="w"> </span>GATEWAY-1<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="w">    </span>--channel<span class="w"> </span><span class="s1">'#rf'</span><span class="w"> </span>--tnc<span class="w"> </span>tcp://127.0.0.1:8001
 </code></pre></div>
 <p>AppImage: <code>./ax25ircd.AppImage station --call …</code>. The nick on IRC is the
 callsign with <code>-</code> turned into <code>|</code> (<code>YOURCALL|7</code>).</p>
 <h2 id="10-if-nothing-comes-back">10. If nothing comes back<a class="headerlink" href="#10-if-nothing-comes-back" title="Permanent link">&para;</a></h2>
 <ul>
 <li>Direwolf not running, or not on <code>127.0.0.1:8001</code> — ax25ircd reconnects, but nothing radiates.</li>
-<li>Wrong <code>plughw</code> index after unplugging — check <code>arecord -l</code> again.</li>
+<li><code>Could not open audio device … No such file or directory</code> — card index moved
+  (HDMI often occupies <code>plughw:1,0</code>). Use <code>plughw:CARD=Transceiver,DEV=0</code>.</li>
+<li><code>Device or resource busy</code> on transmit — PipeWire grabbed the QMX; see step 2.</li>
 <li>Not in <code>dialout</code> — PTT silently fails. <code>groups</code> should list it.</li>
 <li>QMX still in Digi or IQ — audio looks like noise to Direwolf.</li>
 <li>Hamlib 2057 unknown — switch PTT to <code>RIG 2028</code>.</li>
