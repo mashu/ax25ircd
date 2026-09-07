@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ax25ircd::airc::{encode_fields, AircFrame, Kind};
+use ax25ircd::airc::{encode_fields, flags, AircFrame, Kind};
 use ax25ircd::ax25::kiss::{self, KissDecoder};
 use ax25ircd::ax25::tnc::{self, TncConfig};
 use ax25ircd::ax25::Ax25Frame;
@@ -787,7 +787,7 @@ async fn frames_addressed_elsewhere_are_ignored() {
     let mut h = Harness::new().await;
     h.drain_client();
 
-    // Addressed to the AIRC protocol address: a broadcast, not ours to act on.
+    // A JOIN to AIRC is not channel chat; the gateway still ignores it.
     h.transmits_to(
         "SM0ABC-7",
         "AIRC",
@@ -843,6 +843,65 @@ async fn a_second_gateways_downlink_does_not_start_a_loop() {
             .iter()
             .any(|l| l.contains("hello from the other gateway")),
         "another gateway's downlink was relayed to IRC: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_station_broadcast_reaches_irc_without_being_repeated() {
+    let mut h = Harness::new().await;
+    h.send("JOIN #rf");
+    h.drain_client();
+    h.station_transmits(
+        "SM0ABC-7",
+        AircFrame::new(Kind::Join, 1, encode_fields(&["#rf"])),
+    )
+    .await;
+    let _ = h.transmitted().await;
+
+    h.transmits_to(
+        "SM0ABC-7",
+        "AIRC",
+        AircFrame::new(Kind::Msg, 4, encode_fields(&["#rf", "from the hillside"])),
+    )
+    .await;
+
+    let lines = h.drain_client();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("PRIVMSG #rf :from the hillside")),
+        "broadcast uplink must still reach IRC: {lines:?}"
+    );
+    let tx = h.transmitted().await;
+    assert!(
+        !tx.iter().any(|(_, a)| a.kind == Kind::Msg),
+        "the gateway must not retransmit what every station already heard: {tx:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_welcome_piggybacks_the_hello_ack() {
+    let mut h = Harness::new().await;
+    h.drain_client();
+    h.station_transmits(
+        "SM0ABC-7",
+        AircFrame::new(Kind::Hello, 1, encode_fields(&[""])).with_flags(flags::ACK_REQ),
+    )
+    .await;
+    let tx = h.transmitted().await;
+    let welcome = tx
+        .iter()
+        .find(|(_, a)| a.kind == Kind::Welcome)
+        .map(|(_, a)| a);
+    assert!(welcome.is_some(), "HELLO still gets a WELCOME: {tx:?}");
+    assert_eq!(
+        welcome.unwrap().piggyback_seq,
+        Some(1),
+        "ACK+WELCOME as two key-ups burns the PA for nothing"
+    );
+    assert!(
+        !tx.iter().any(|(_, a)| a.kind == Kind::Ack),
+        "a standalone ACK next to WELCOME is the old two-frame handshake: {tx:?}"
     );
 }
 

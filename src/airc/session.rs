@@ -59,6 +59,9 @@ impl SessionConfig {
 
 struct Pending {
     frames: Vec<AircFrame>,
+    /// Fragment `i` has been reported received. A 2-octet ACK sets every bit;
+    /// a bitmap ACK sets the bits it carries.
+    acked: Vec<bool>,
     attempts: u32,
     /// `None` until the TNC reports the frame keyed. A backlog must not
     /// manufacture an ACK timeout.
@@ -70,6 +73,16 @@ struct Reassembly {
     flags: u8,
     parts: Vec<Option<Vec<u8>>>,
     started: Instant,
+    want_ack: bool,
+}
+
+/// An ACK we owe this station. Held so the next unicast can carry it rather
+/// than keying up a second time.
+struct OwedAck {
+    seq: u16,
+    /// `None` means the whole message arrived (2-octet ACK). `Some` is a
+    /// selective bitmap: bit *i* set when fragment *i* is in hand.
+    bitmap: Option<Vec<u8>>,
 }
 
 /// One station heard on the air.
@@ -83,6 +96,7 @@ pub struct Peer {
     /// Frames dropped for this peer, for `RADIO HEARD`.
     pub dropped: u64,
     pending: Option<Pending>,
+    owed_ack: Option<OwedAck>,
     queue: VecDeque<Vec<AircFrame>>,
     seen: VecDeque<u16>,
     reasm: HashMap<u16, Reassembly>,
@@ -104,6 +118,7 @@ impl Peer {
             registered: false,
             dropped: 0,
             pending: None,
+            owed_ack: None,
             queue: VecDeque::new(),
             seen: VecDeque::new(),
             reasm: HashMap::new(),
@@ -139,7 +154,9 @@ impl Peer {
 pub struct RxOutcome {
     /// A complete message from the station, ready for the bridge.
     pub deliver: Option<AircFrame>,
-    /// Frames to put on the air right now (ACKs).
+    /// Frames to put on the air right now (the next queued message after an
+    /// ACK released the in-flight one). Standalone ACKs are held on the peer
+    /// and collected with [`Sessions::drain_acks`].
     pub transmit: Vec<AircFrame>,
     /// True if the frame was a duplicate we had already processed.
     pub duplicate: bool,
@@ -301,23 +318,20 @@ impl Sessions {
                 peer.seen.clear();
                 peer.reasm.clear();
                 peer.pending = None;
+                peer.owed_ack = None;
                 peer.queue.clear();
                 peer.epoch = epoch;
             }
         }
 
+        if let Some(acked) = frame.piggyback_seq {
+            out.transmit.extend(apply_ack(peer, acked, None, now, &cfg));
+        }
+
         if frame.kind == Kind::Ack {
-            let acked = frame
-                .payload
-                .get(0..2)
-                .map(|b| u16::from_be_bytes([b[0], b[1]]));
-            if let (Some(acked), Some(p)) = (acked, peer.pending.as_ref()) {
-                if p.frames.first().map(|f| f.seq) == Some(acked) {
-                    peer.pending = None;
-                    if let Some(next) = peer.queue.pop_front() {
-                        out.transmit = start_pending(peer, next, now, &cfg);
-                    }
-                }
+            if let Some((acked, bitmap)) = parse_ack_payload(&frame.payload) {
+                out.transmit
+                    .extend(apply_ack(peer, acked, bitmap, now, &cfg));
             }
             return out;
         }
@@ -328,7 +342,7 @@ impl Sessions {
             // the usual reason for a repeat is that our ACK was lost.
             // Incomplete fragments are not in `seen` and are not ACKed.
             if addressed_to_us && frame.wants_ack() {
-                out.transmit.push(ack_for(frame.seq));
+                owe_ack(peer, frame.seq, None);
             }
             // HELLO is the start of a session. A restarted station whose
             // sequence space overlapped (no epoch, or the same seq as last
@@ -343,16 +357,17 @@ impl Sessions {
 
         if frame.frag_total == 1 {
             if addressed_to_us && frame.wants_ack() {
-                out.transmit.push(ack_for(frame.seq));
+                owe_ack(peer, frame.seq, None);
             }
             remember_seq(peer, frame.seq, cfg.dedup_window);
             out.deliver = Some(frame);
             return out;
         }
 
-        // Fragmented message: stash and wait for the rest. ACK only when the
-        // last missing fragment arrives (PROTOCOL.md §5). ACKing fragment 0
-        // would let the sender drop the rest of the message.
+        // Fragmented message: stash and wait for the rest. A 2-octet ACK is
+        // sent only when the last missing fragment arrives. A RETRY of an
+        // incomplete set earns a bitmap so the sender can fill holes without
+        // repeating what we already have.
         if frame.payload.len() > cfg.max_payload() {
             return out;
         }
@@ -366,11 +381,13 @@ impl Sessions {
                 peer.reasm.remove(&oldest);
             }
         }
+        let want_ack = addressed_to_us && frame.wants_ack();
         let entry = peer.reasm.entry(frame.seq).or_insert_with(|| Reassembly {
             kind: frame.kind,
             flags: frame.flags,
             parts: vec![None; frame.frag_total as usize],
             started: now,
+            want_ack,
         });
         if entry.parts.len() != frame.frag_total as usize {
             *entry = Reassembly {
@@ -378,11 +395,20 @@ impl Sessions {
                 flags: frame.flags,
                 parts: vec![None; frame.frag_total as usize],
                 started: now,
+                want_ack,
             };
+        }
+        entry.want_ack |= want_ack;
+        if frame.flags & flags::ACK_REQ != 0 {
+            entry.flags |= flags::ACK_REQ;
         }
         entry.parts[frame.frag_index as usize] = Some(frame.payload.clone());
         let complete = entry.parts.iter().all(|p| p.is_some());
         if !complete {
+            if want_ack && frame.flags & flags::RETRY != 0 {
+                let bitmap = bitmap_from_parts(&entry.parts);
+                owe_ack(peer, frame.seq, Some(bitmap));
+            }
             return out;
         }
 
@@ -390,13 +416,24 @@ impl Sessions {
         for part in entry.parts.iter().flatten() {
             payload.extend_from_slice(part);
         }
-        let (kind, flg) = (entry.kind, entry.flags);
+        let (kind, flg, want) = (entry.kind, entry.flags, entry.want_ack);
         peer.reasm.remove(&frame.seq);
         remember_seq(peer, frame.seq, cfg.dedup_window);
-        if addressed_to_us && (frame.wants_ack() || flg & flags::ACK_REQ != 0) {
-            out.transmit.push(ack_for(frame.seq));
+        if want || (addressed_to_us && (frame.wants_ack() || flg & flags::ACK_REQ != 0)) {
+            owe_ack(peer, frame.seq, None);
         }
         out.deliver = Some(AircFrame::new(kind, frame.seq, payload).with_flags(flg));
+        out
+    }
+
+    /// Standalone ACKs that were not piggybacked onto a later unicast.
+    pub fn drain_acks(&mut self) -> Vec<(Callsign, AircFrame)> {
+        let mut out = Vec::new();
+        for (call, peer) in self.peers.iter_mut() {
+            if let Some(owed) = peer.owed_ack.take() {
+                out.push((call.clone(), owed.to_frame()));
+            }
+        }
         out
     }
 
@@ -444,12 +481,30 @@ impl Sessions {
         let Some(peer) = self.force_touch(dst, now) else {
             return SendOutcome::dropped();
         };
-        let chunks: Vec<&[u8]> = if payload.is_empty() {
-            vec![&[]]
+        let send_now = !reliable || peer.pending.is_none();
+        // Only a complete ACK piggybacks, and only onto a unicast we are
+        // actually sending now. A broadcast with PIGGYACK would be processed
+        // by every station in range as an ACK of that seq, which is not
+        // theirs to complete.
+        let piggy = if send_now && reliable && cfg.max_payload() > 2 {
+            match peer.owed_ack.take() {
+                Some(o) if o.bitmap.is_none() => Some(o.seq),
+                other => {
+                    peer.owed_ack = other;
+                    None
+                }
+            }
         } else {
-            payload.chunks(cfg.max_payload()).collect()
+            None
         };
+        let chunks = chunk_payload(&payload, cfg.max_payload(), piggy.is_some());
         if chunks.len() > u8::MAX as usize {
+            if let Some(s) = piggy {
+                peer.owed_ack = Some(OwedAck {
+                    seq: s,
+                    bitmap: None,
+                });
+            }
             peer.dropped += 1;
             return SendOutcome::dropped();
         }
@@ -458,7 +513,7 @@ impl Sessions {
             .into_iter()
             .enumerate()
             .map(|(i, chunk)| {
-                let mut f = AircFrame::new(kind, seq, chunk.to_vec());
+                let mut f = AircFrame::new(kind, seq, chunk);
                 f.frag_index = i as u8;
                 f.frag_total = total;
                 if reliable {
@@ -475,6 +530,12 @@ impl Sessions {
             };
         }
         if peer.pending.is_some() {
+            if let Some(s) = piggy {
+                peer.owed_ack = Some(OwedAck {
+                    seq: s,
+                    bitmap: None,
+                });
+            }
             if peer.queue.len() >= cfg.max_queue {
                 peer.dropped += 1;
                 return SendOutcome::dropped();
@@ -485,8 +546,15 @@ impl Sessions {
                 accepted: true,
             };
         }
+        let stored = frames.clone();
+        let mut out = start_pending(peer, stored, now, &cfg);
+        if let Some(acked) = piggy {
+            if let Some(first) = out.first_mut() {
+                first.attach_piggyback(acked);
+            }
+        }
         SendOutcome {
-            frames: start_pending(peer, frames, now, &cfg),
+            frames: out,
             accepted: true,
         }
     }
@@ -506,8 +574,22 @@ impl Sessions {
         let mut giving_up = Vec::new();
 
         for (call, peer) in self.peers.iter_mut() {
-            peer.reasm
-                .retain(|_, r| now.duration_since(r.started) < cfg.reassembly_timeout);
+            let expired: Vec<u16> = peer
+                .reasm
+                .iter()
+                .filter(|(_, r)| now.duration_since(r.started) >= cfg.reassembly_timeout)
+                .map(|(s, _)| *s)
+                .collect();
+            for seq in expired {
+                if let Some(r) = peer.reasm.remove(&seq) {
+                    if r.want_ack {
+                        out.transmit.push((
+                            call.clone(),
+                            ack_with_bitmap(seq, &bitmap_from_parts(&r.parts)),
+                        ));
+                    }
+                }
+            }
 
             if now.duration_since(peer.last_heard) > cfg.peer_idle_timeout {
                 out.lost.push(call.clone());
@@ -533,7 +615,10 @@ impl Sessions {
             }
             pending.attempts += 1;
             pending.next_retry = Some(now + backoff(&cfg, pending.attempts));
-            for f in &pending.frames {
+            for (i, f) in pending.frames.iter().enumerate() {
+                if pending.acked.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
                 let mut f = f.clone();
                 f.flags |= flags::RETRY;
                 out.transmit.push((call.clone(), f));
@@ -583,14 +668,147 @@ fn ack_for(seq: u16) -> AircFrame {
     AircFrame::new(Kind::Ack, seq, seq.to_be_bytes().to_vec())
 }
 
+fn ack_with_bitmap(seq: u16, bitmap: &[u8]) -> AircFrame {
+    let mut payload = seq.to_be_bytes().to_vec();
+    payload.extend_from_slice(bitmap);
+    AircFrame::new(Kind::Ack, seq, payload)
+}
+
+impl OwedAck {
+    fn to_frame(&self) -> AircFrame {
+        match &self.bitmap {
+            None => ack_for(self.seq),
+            Some(b) => ack_with_bitmap(self.seq, b),
+        }
+    }
+}
+
+fn owe_ack(peer: &mut Peer, seq: u16, bitmap: Option<Vec<u8>>) {
+    // A complete ACK replaces a partial one for the same seq; a newer seq
+    // (we process one frame at a time) replaces whatever was held.
+    peer.owed_ack = Some(OwedAck { seq, bitmap });
+}
+
+fn parse_ack_payload(payload: &[u8]) -> Option<(u16, Option<&[u8]>)> {
+    if payload.len() < 2 {
+        return None;
+    }
+    let seq = u16::from_be_bytes([payload[0], payload[1]]);
+    if payload.len() == 2 {
+        Some((seq, None))
+    } else {
+        Some((seq, Some(&payload[2..])))
+    }
+}
+
+fn bit_set(bits: &[u8], i: usize) -> bool {
+    let byte = i / 8;
+    let mask = 1u8 << (i % 8);
+    bits.get(byte).is_some_and(|b| b & mask != 0)
+}
+
+fn bitmap_from_parts(parts: &[Option<Vec<u8>>]) -> Vec<u8> {
+    let n = parts.len().div_ceil(8).max(1);
+    let mut b = vec![0u8; n];
+    for (i, p) in parts.iter().enumerate() {
+        if p.is_some() {
+            b[i / 8] |= 1 << (i % 8);
+        }
+    }
+    b
+}
+
+fn chunk_payload(payload: &[u8], max: usize, piggy: bool) -> Vec<Vec<u8>> {
+    if payload.is_empty() {
+        return vec![Vec::new()];
+    }
+    let first_max = if piggy {
+        max.saturating_sub(2).max(1)
+    } else {
+        max
+    };
+    if payload.len() <= first_max {
+        return vec![payload.to_vec()];
+    }
+    let mut out = vec![payload[..first_max].to_vec()];
+    for c in payload[first_max..].chunks(max) {
+        out.push(c.to_vec());
+    }
+    out
+}
+
+/// Mark fragments acknowledged. A 2-octet ACK (no bitmap) completes the
+/// message. A bitmap retransmits only the holes, immediately, if anything
+/// new was reported.
+fn apply_ack(
+    peer: &mut Peer,
+    seq: u16,
+    bitmap: Option<&[u8]>,
+    now: Instant,
+    cfg: &SessionConfig,
+) -> Vec<AircFrame> {
+    let missing = {
+        let Some(pending) = peer.pending.as_mut() else {
+            return Vec::new();
+        };
+        if pending.frames.first().map(|f| f.seq) != Some(seq) {
+            return Vec::new();
+        }
+        if let Some(bits) = bitmap {
+            let mut progress = false;
+            for (i, flag) in pending.acked.iter_mut().enumerate() {
+                if bit_set(bits, i) && !*flag {
+                    *flag = true;
+                    progress = true;
+                }
+            }
+            if !pending.acked.iter().all(|x| *x) {
+                if !progress {
+                    return Vec::new();
+                }
+                pending.attempts = 0;
+                pending.next_retry = None;
+                Some(
+                    pending
+                        .frames
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| !pending.acked[*i])
+                        .map(|(_, f)| {
+                            let mut f = f.clone();
+                            f.flags |= flags::RETRY;
+                            f
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+    if let Some(frames) = missing {
+        return frames;
+    }
+    peer.pending = None;
+    if let Some(next) = peer.queue.pop_front() {
+        start_pending(peer, next, now, cfg)
+    } else {
+        Vec::new()
+    }
+}
+
 fn start_pending(
     peer: &mut Peer,
     frames: Vec<AircFrame>,
     _now: Instant,
     _cfg: &SessionConfig,
 ) -> Vec<AircFrame> {
+    let n = frames.len();
     peer.pending = Some(Pending {
         frames: frames.clone(),
+        acked: vec![false; n],
         attempts: 0,
         next_retry: None,
     });
@@ -627,6 +845,10 @@ mod tests {
         "SM0ABC-7".parse().unwrap()
     }
 
+    fn take_acks(s: &mut Sessions) -> Vec<AircFrame> {
+        s.drain_acks().into_iter().map(|(_, f)| f).collect()
+    }
+
     #[test]
     fn fragments_and_reassembles() {
         let cfg = SessionConfig {
@@ -659,12 +881,17 @@ mod tests {
 
         let first = rx.on_receive(&call(), f.clone(), now, true);
         assert!(first.deliver.is_some());
-        assert_eq!(first.transmit.len(), 1);
+        assert!(first.transmit.is_empty());
+        assert_eq!(take_acks(&mut rx).len(), 1);
 
         let second = rx.on_receive(&call(), f, now, true);
         assert!(second.deliver.is_none());
         assert!(second.duplicate);
-        assert_eq!(second.transmit.len(), 1, "a repeat means our ACK was lost");
+        assert_eq!(
+            take_acks(&mut rx).len(),
+            1,
+            "a repeat means our ACK was lost"
+        );
     }
 
     #[test]
@@ -789,19 +1016,20 @@ mod tests {
         let first = rx.on_receive(&call(), frames[0].clone(), now, true);
         assert!(first.deliver.is_none());
         assert!(
-            first.transmit.is_empty(),
+            first.transmit.is_empty() && take_acks(&mut rx).is_empty(),
             "ACKing fragment 0 lets the sender drop the rest"
         );
 
         let second = rx.on_receive(&call(), frames[1].clone(), now, true);
         assert!(second.deliver.is_none());
-        assert!(second.transmit.is_empty());
+        assert!(take_acks(&mut rx).is_empty());
 
         let last = rx.on_receive(&call(), frames[2].clone(), now, true);
         assert_eq!(last.deliver.unwrap().payload, b"abcdefghij");
-        assert_eq!(last.transmit.len(), 1);
-        assert_eq!(last.transmit[0].kind, Kind::Ack);
-        assert_eq!(last.transmit[0].payload, frames[0].seq.to_be_bytes());
+        let acks = take_acks(&mut rx);
+        assert_eq!(acks.len(), 1);
+        assert_eq!(acks[0].kind, Kind::Ack);
+        assert_eq!(acks[0].payload, frames[0].seq.to_be_bytes());
     }
 
     #[test]
@@ -839,7 +1067,7 @@ mod tests {
         let out = rx.on_receive(&call(), f, now, false);
         assert!(out.deliver.is_some());
         assert!(
-            out.transmit.is_empty(),
+            out.transmit.is_empty() && take_acks(&mut rx).is_empty(),
             "ACK_REQ on a broadcast must not make every station key up"
         );
     }
@@ -880,5 +1108,150 @@ mod tests {
             "a restarted station with no epoch must not be wedged by seq 1"
         );
         assert!(!out.duplicate);
+    }
+
+    #[test]
+    fn a_lost_middle_fragment_is_the_only_one_retried() {
+        let cfg = SessionConfig {
+            paclen: HEADER_LEN + 4,
+            ack_timeout: Duration::from_secs(10),
+            max_retries: 3,
+            ..Default::default()
+        };
+        let mut tx = Sessions::new(cfg.clone());
+        let mut rx = Sessions::new(cfg);
+        let mut now = Instant::now();
+        let frames = tx.send(&call(), Kind::Msg, b"abcdefghij".to_vec(), true, now);
+        assert_eq!(frames.len(), 3);
+        tx.on_keyed(&call(), frames[0].seq, now);
+
+        rx.on_receive(&call(), frames[0].clone(), now, true);
+        rx.on_receive(&call(), frames[2].clone(), now, true);
+        assert!(
+            take_acks(&mut rx).is_empty(),
+            "holes are not a complete ACK"
+        );
+
+        now += Duration::from_secs(11);
+        let retry = tx.tick(now);
+        assert_eq!(retry.transmit.len(), 3, "first timeout still repeats all");
+        let retried: Vec<_> = retry.transmit.into_iter().map(|(_, f)| f).collect();
+        // First timeout still repeats everything. A RETRY of fragment 0 while
+        // 0 and 2 are already in hand produces a bitmap, not a complete ACK.
+        let sack = rx.on_receive(&call(), retried[0].clone(), now, true);
+        assert!(sack.deliver.is_none());
+        let acks = take_acks(&mut rx);
+        assert_eq!(acks.len(), 1);
+        assert!(
+            acks[0].payload.len() > 2,
+            "a RETRY of an incomplete set is a bitmap, not a complete ACK"
+        );
+
+        let missing = tx.on_receive(&call(), acks[0].clone(), now, true);
+        assert_eq!(missing.transmit.len(), 1);
+        assert_eq!(missing.transmit[0].frag_index, 1);
+
+        let last = rx.on_receive(&call(), missing.transmit[0].clone(), now, true);
+        assert_eq!(last.deliver.unwrap().payload, b"abcdefghij");
+        let done = take_acks(&mut rx);
+        assert_eq!(done.len(), 1);
+        assert_eq!(
+            done[0].payload.len(),
+            2,
+            "completion is still a 2-octet ACK"
+        );
+    }
+
+    #[test]
+    fn a_two_byte_ack_still_completes_every_fragment() {
+        let cfg = SessionConfig {
+            paclen: HEADER_LEN + 4,
+            ..Default::default()
+        };
+        let mut s = Sessions::new(cfg);
+        let now = Instant::now();
+        let frames = s.send(&call(), Kind::Msg, b"abcdefghij".to_vec(), true, now);
+        assert_eq!(frames.len(), 3);
+        let seq = frames[0].seq;
+        let ack = AircFrame::new(Kind::Ack, seq, seq.to_be_bytes().to_vec());
+        let out = s.on_receive(&call(), ack, now, true);
+        assert!(out.transmit.is_empty());
+        assert!(
+            !s.peer(&call()).unwrap().awaiting_ack(),
+            "legacy 2-octet ACK must still release the whole message"
+        );
+    }
+
+    #[test]
+    fn an_owed_ack_piggybacks_on_the_next_unicast() {
+        let mut s = Sessions::new(SessionConfig::default());
+        let now = Instant::now();
+        let incoming =
+            AircFrame::new(Kind::Hello, 3, encode_fields(&["client"])).with_flags(flags::ACK_REQ);
+        assert!(s.on_receive(&call(), incoming, now, true).deliver.is_some());
+
+        let welcome = s.send(
+            &call(),
+            Kind::Welcome,
+            encode_fields(&["gw", "hi"]),
+            true,
+            now,
+        );
+        assert_eq!(welcome.len(), 1);
+        assert_eq!(welcome[0].piggyback_seq, Some(3));
+        assert!(
+            take_acks(&mut s).is_empty(),
+            "the ACK rode on WELCOME; nothing left to key up for"
+        );
+    }
+
+    #[test]
+    fn an_owed_ack_goes_out_alone_if_nothing_else_is_queued() {
+        let mut s = Sessions::new(SessionConfig::default());
+        let now = Instant::now();
+        let incoming =
+            AircFrame::new(Kind::Msg, 9, encode_fields(&["#rf", "hi"])).with_flags(flags::ACK_REQ);
+        s.on_receive(&call(), incoming, now, true);
+        let acks = take_acks(&mut s);
+        assert_eq!(acks.len(), 1);
+        assert_eq!(acks[0].kind, Kind::Ack);
+        assert_eq!(acks[0].payload, 9u16.to_be_bytes());
+    }
+
+    #[test]
+    fn a_piggybacked_ack_releases_the_senders_queue() {
+        let mut s = Sessions::new(SessionConfig::default());
+        let now = Instant::now();
+        let first = s.send(&call(), Kind::Msg, b"one".to_vec(), true, now);
+        let queued = s.send(&call(), Kind::Msg, b"two".to_vec(), true, now);
+        assert!(queued.is_empty());
+        let seq = first[0].seq;
+        let mut reply = AircFrame::new(Kind::Msg, 50, encode_fields(&["#rf", "ok"]));
+        reply.attach_piggyback(seq);
+        let out = s.on_receive(&call(), reply, now, true);
+        assert_eq!(out.transmit.len(), 1);
+        assert_eq!(out.transmit[0].payload, b"two");
+    }
+
+    #[test]
+    fn reassembly_timeout_sends_a_partial_ack() {
+        let cfg = SessionConfig {
+            paclen: HEADER_LEN + 4,
+            reassembly_timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let mut tx = Sessions::new(cfg.clone());
+        let mut rx = Sessions::new(cfg);
+        let mut now = Instant::now();
+        let frames = tx.send(&call(), Kind::Msg, b"abcdefghij".to_vec(), true, now);
+        rx.on_receive(&call(), frames[0].clone(), now, true);
+        now += Duration::from_secs(6);
+        let tick = rx.tick(now);
+        assert_eq!(tick.transmit.len(), 1);
+        assert_eq!(tick.transmit[0].1.kind, Kind::Ack);
+        assert!(
+            tick.transmit[0].1.payload.len() > 2,
+            "the sender needs a bitmap, not a silent drop"
+        );
     }
 }

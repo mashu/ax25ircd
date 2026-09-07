@@ -5,8 +5,10 @@
 //! parts a unit test on either side skips.
 
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ax25ircd::airc::{AircFrame, Kind};
+use ax25ircd::audit::Audit;
 use ax25ircd::ax25::airtime::AirtimeConfig;
 use ax25ircd::ax25::kiss::{self, KissDecoder};
 use ax25ircd::ax25::tnc::{self, TncConfig};
@@ -229,6 +231,56 @@ fn hf_packet() -> AirtimeConfig {
         stuffing: 1.05,
         enabled: true,
     }
+}
+
+#[tokio::test]
+async fn keyed_frames_are_audited_with_airtime_and_duty() {
+    let path = std::env::temp_dir().join(format!(
+        "ax25ircd-tx-audit-{}.log",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let name = path.to_string_lossy().to_string();
+    let audit = Audit::open(Some(&name));
+    let (link, mut far) = TncConfig::loopback_link();
+    let (tnc, _rx) = tnc::spawn_with_audit(
+        TncConfig {
+            link,
+            max_frame: 512,
+            tx_pacing: Duration::from_millis(0),
+            airtime: hf_packet(),
+            ..TncConfig::default()
+        },
+        audit,
+    );
+    let mut dec = KissDecoder::new(1024);
+    let _ = drain(&mut far, &mut dec).await;
+
+    let info = AircFrame::new(Kind::Msg, 1, b"#rf\x1fhi".to_vec()).encode();
+    let ax = frame("SK0MT-1", &info);
+    let expected = tnc.airtime_for(ax.encode().len());
+    assert!(tnc.try_send(ax));
+    let _ = drain(&mut far, &mut dec).await;
+
+    let want_keyed = format!("keyed={:.1}s", expected.as_secs_f64());
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if text.contains("rf_tx") && text.contains(&want_keyed) {
+                assert!(text.contains("dest=AIRC"), "{text}");
+                assert!(text.contains("kind=Msg"), "{text}");
+                assert!(text.contains("class=chat"), "{text}");
+                assert!(text.contains("duty="), "{text}");
+                let _ = std::fs::remove_file(&path);
+                return;
+            }
+        }
+    }
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let _ = std::fs::remove_file(&path);
+    panic!("audit line missing keyed airtime ({want_keyed}): {text}");
 }
 
 #[tokio::test]

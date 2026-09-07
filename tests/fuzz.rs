@@ -497,8 +497,10 @@ fn reliable_delivery_survives_loss_reordering_and_duplication() {
                     if let Some(msg) = out.deliver {
                         delivered.push(msg.payload);
                     }
+                    // Follow-ups after a received ACK (the next queued message).
+                    in_flight.extend(out.transmit);
                     // ACKs travel back over the same lossy channel.
-                    for ack in out.transmit {
+                    for (_, ack) in rx.drain_acks() {
                         if rng.below(4) != 0 {
                             let back = tx.on_receive(&b, ack, now, true);
                             in_flight.extend(back.transmit);
@@ -510,7 +512,13 @@ fn reliable_delivery_survives_loss_reordering_and_duplication() {
             now += Duration::from_secs(6);
             let tick = tx.tick(now);
             in_flight.extend(tick.transmit.into_iter().map(|(_, f)| f));
-            let _ = rx.tick(now);
+            let rx_tick = rx.tick(now);
+            for (_, ack) in rx_tick.transmit {
+                if rng.below(4) != 0 {
+                    let back = tx.on_receive(&b, ack, now, true);
+                    in_flight.extend(back.transmit);
+                }
+            }
         }
 
         // Nothing invented, nothing corrupted.

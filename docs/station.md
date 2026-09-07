@@ -12,9 +12,10 @@ ax25irc-station --call SM0ABC-7 --gateway SK0MT-1 \
 ```
 
 Commands: `/join #chan`, `/part`, `/names`, `/msg <nick> <text>`, `/ping`,
-`/quit`. Anything else goes to the current channel. Chat is sent unreliably (a
-retransmission arriving thirty seconds late is noise); joins, private messages
-and requests are ACKed and retried.
+`/quit`. Anything else goes to the current channel. Chat is an unreliable
+broadcast to `AIRC`, so every station in range hears it once; joins, private
+messages to IRC nicks, and requests are unicast to the gateway and ACKed.
+`/msg SM0XYZ|1 …` is unicast to that callsign, not via the gateway.
 
 Serial TNCs need a build with `--features serial`.
 
@@ -69,5 +70,5 @@ while the channel monitor shows what it cost:
 
 ```
 SK0MT-1>AIRC:A1......#rf.alice.hello over the air
-SM0ABC-7>SK0MT-1:A1......#rf.morning all, 5 watts from Kista
+SM0ABC-7>AIRC:A1......#rf.morning all, 5 watts from Kista
 ```

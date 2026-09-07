@@ -44,7 +44,8 @@ Consequences that appear throughout the code:
   optionally join/part presence. Numerics, MODE, NOTICE, other CTCP, nick
   changes and (by default) JOIN/PART are not on that list, so they stay on IRC.
 * Channel traffic is transmitted **once**, as a broadcast, not once per
-  listening station.
+  listening station. RF stations send channel chat to `AIRC` as well, so they
+  hear each other without the gateway repeating.
 * Messages that arrive from the air are **not** re-transmitted: every station
   in range already heard them. Repeating is opt-in
   (`radio.repeat_rf_traffic`), for hidden-terminal situations only.
@@ -235,10 +236,15 @@ whatever the far end runs. So AIRC/1 does its own:
 | Channel messages, presence, ID | broadcast, unreliable, deduplicated by sequence number | one transmission serves every station in range |
 | Private messages, welcome, error, NAMES replies | unicast, ACKed, retried | it matters that this one station got it |
 
-Retransmission is stop-and-wait with **linear** backoff, one message in flight
-per station and a bounded queue behind it. Exponential backoff is wrong here:
-the usual cause of loss is a collision, not congestion at a router, and backing
-off to minutes turns a QSO into a mailbox.
+Retransmission is stop-and-wait *per message* with **linear** backoff, one
+message in flight per station and a bounded queue behind it. Fragments of that
+message use selective repeat: a bitmap ACK names the holes, and only those
+are resent. Exponential backoff is wrong here: the usual cause of loss is a
+collision, not congestion at a router, and backing off to minutes turns a QSO
+into a mailbox.
+
+An ACK that can ride on the next unicast to that station does so (`PIGGYACK`):
+one key-up instead of two. That is the cheaper path for QRP finals.
 
 Fragmentation is at the AIRC layer, not AX.25's: all fragments share a sequence
 number and carry `index`/`total`, reassembly is bounded by a timer, and a

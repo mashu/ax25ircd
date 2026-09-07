@@ -103,6 +103,10 @@ pub mod flags {
     pub const RETRY: u8 = 0x02;
     /// The text was truncated by a policy limit before transmission.
     pub const TRUNCATED: u8 = 0x04;
+    /// Payload starts with a two-octet sequence number being acknowledged,
+    /// then the real payload. Saves a second key-up when we already have
+    /// something to say to that station.
+    pub const PIGGYACK: u8 = 0x08;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +117,10 @@ pub struct AircFrame {
     pub frag_index: u8,
     pub frag_total: u8,
     pub payload: Vec<u8>,
+    /// Sequence number ACKed in this same frame when [`flags::PIGGYACK`] is
+    /// set. Stripped from [`Self::payload`] so [`Self::fields`] stays the
+    /// message; re-attached on encode.
+    pub piggyback_seq: Option<u16>,
 }
 
 impl AircFrame {
@@ -124,6 +132,7 @@ impl AircFrame {
             frag_index: 0,
             frag_total: 1,
             payload,
+            piggyback_seq: None,
         }
     }
 
@@ -132,18 +141,33 @@ impl AircFrame {
         self
     }
 
+    /// Acknowledge `seq` on this frame instead of sending a standalone ACK.
+    pub fn attach_piggyback(&mut self, seq: u16) {
+        self.piggyback_seq = Some(seq);
+        self.flags |= flags::PIGGYACK;
+    }
+
     pub fn wants_ack(&self) -> bool {
         self.flags & flags::ACK_REQ != 0
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(HEADER_LEN + self.payload.len());
+        let piggy = self.piggyback_seq;
+        let mut flags = self.flags & !flags::PIGGYACK;
+        if piggy.is_some() {
+            flags |= flags::PIGGYACK;
+        }
+        let extra = if piggy.is_some() { 2 } else { 0 };
+        let mut out = Vec::with_capacity(HEADER_LEN + extra + self.payload.len());
         out.extend_from_slice(&MAGIC);
         out.push(self.kind as u8);
-        out.push(self.flags);
+        out.push(flags);
         out.extend_from_slice(&self.seq.to_be_bytes());
         out.push(self.frag_index);
         out.push(self.frag_total);
+        if let Some(seq) = piggy {
+            out.extend_from_slice(&seq.to_be_bytes());
+        }
         out.extend_from_slice(&self.payload);
         out
     }
@@ -160,13 +184,24 @@ impl AircFrame {
         if frag_total == 0 || frag_index >= frag_total {
             return Err(AircError::BadFragment);
         }
+        let flags = buf[3];
+        let mut payload = buf[HEADER_LEN..].to_vec();
+        let mut piggyback_seq = None;
+        if flags & flags::PIGGYACK != 0 {
+            if payload.len() < 2 {
+                return Err(AircError::Truncated);
+            }
+            piggyback_seq = Some(u16::from_be_bytes([payload[0], payload[1]]));
+            payload.drain(..2);
+        }
         Ok(Self {
             kind: Kind::try_from(buf[2])?,
-            flags: buf[3],
+            flags,
             seq: u16::from_be_bytes([buf[4], buf[5]]),
             frag_index,
             frag_total,
-            payload: buf[HEADER_LEN..].to_vec(),
+            payload,
+            piggyback_seq,
         })
     }
 
@@ -238,6 +273,24 @@ mod tests {
             AircError::NotAirc
         );
         assert_eq!(AircFrame::decode(b"A1").unwrap_err(), AircError::Truncated);
+    }
+
+    #[test]
+    fn piggyback_is_stripped_from_fields() {
+        let mut f = AircFrame::new(Kind::Welcome, 7, encode_fields(&["gw", "hi"]));
+        f.attach_piggyback(0x1234);
+        let back = AircFrame::decode(&f.encode()).unwrap();
+        assert_eq!(back.piggyback_seq, Some(0x1234));
+        assert_eq!(back.flags & flags::PIGGYACK, flags::PIGGYACK);
+        assert_eq!(back.fields(), vec!["gw", "hi"]);
+        assert_eq!(back, f);
+    }
+
+    #[test]
+    fn piggyack_without_seq_is_truncated() {
+        let mut bytes = AircFrame::new(Kind::Msg, 1, vec![]).encode();
+        bytes[3] |= flags::PIGGYACK;
+        assert_eq!(AircFrame::decode(&bytes).unwrap_err(), AircError::Truncated);
     }
 
     #[test]

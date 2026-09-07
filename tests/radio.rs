@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ax25ircd::airc::{encode_fields, AircFrame, Kind};
-use ax25ircd::audit::Audit;
 use ax25ircd::ax25::kiss::{self, KissDecoder};
 use ax25ircd::ax25::tnc::{self, TncConfig};
 use ax25ircd::ax25::Ax25Frame;
@@ -68,7 +67,7 @@ impl Harness {
         let (link, far) = TncConfig::loopback_link();
         let (handle, rx) = tnc::spawn(TncConfig::from_config(&config, link));
         Harness {
-            radio: Radio::new(config, Some(handle), Audit::open(None)),
+            radio: Radio::new(config, Some(handle)),
             far,
             _rx: rx,
             decoder: KissDecoder::new(4096),
@@ -78,7 +77,7 @@ impl Harness {
     /// A radio with no TNC at all.
     fn headless(text: &str) -> Radio {
         let config = Arc::new(Config::from_toml(text).unwrap());
-        Radio::new(config, None, Audit::open(None))
+        Radio::new(config, None)
     }
 
     async fn transmitted(&mut self) -> Vec<AircFrame> {

@@ -294,8 +294,11 @@ impl Station {
             }
         }
         let outcome = self.sessions.tick(now);
-        for (_, f) in outcome.transmit {
-            self.transmit(f);
+        for (call, f) in outcome.transmit {
+            self.transmit_to(&call, f);
+        }
+        for (call, f) in self.sessions.drain_acks() {
+            self.transmit_to(&call, f);
         }
         !outcome.lost.is_empty()
     }
@@ -312,22 +315,44 @@ impl Station {
 }
 
 impl Station {
-    /// Queue a message for the gateway. Everything a station sends is unicast
-    /// to the gateway, so `reliable` is nearly always the right choice - the
-    /// exception is chat, where a stale retransmission is worse than a loss.
-    pub fn send(&mut self, kind: Kind, payload: Vec<u8>, reliable: bool) {
+    /// Queue a unicast for `dest`. Control traffic goes to the gateway;
+    /// a private message to another RF nick goes to that callsign.
+    pub fn send_to(&mut self, dest: &Callsign, kind: Kind, payload: Vec<u8>, reliable: bool) {
         let now = Instant::now();
-        let gateway = self.args.gateway.clone();
-        let frames = self.sessions.send(&gateway, kind, payload, reliable, now);
+        let frames = self.sessions.send(dest, kind, payload, reliable, now);
         for f in frames {
-            self.transmit(f);
+            self.transmit_to(dest, f);
+        }
+        for (call, f) in self.sessions.drain_acks() {
+            self.transmit_to(&call, f);
         }
     }
 
-    fn transmit(&mut self, frame: AircFrame) {
+    /// Queue a message for the gateway.
+    pub fn send(&mut self, kind: Kind, payload: Vec<u8>, reliable: bool) {
+        let gateway = self.args.gateway.clone();
+        self.send_to(&gateway, kind, payload, reliable);
+    }
+
+    /// Channel chat: one broadcast to `AIRC`, not a unicast to the gateway.
+    /// Every station in range hears it; the gateway ingests it as uplink.
+    fn send_chat(&mut self, payload: Vec<u8>) {
+        let now = Instant::now();
+        let dest = protocol_dest();
+        // Sequence numbers are per sender, not per destination. Borrowing the
+        // gateway peer for seq allocation is a lie about the AX.25 dest, but
+        // it keeps one space for unicast and broadcast.
+        let gateway = self.args.gateway.clone();
+        let frames = self.sessions.send(&gateway, Kind::Msg, payload, false, now);
+        for f in frames {
+            self.transmit_to(&dest, f);
+        }
+    }
+
+    fn transmit_to(&mut self, dest: &Callsign, frame: AircFrame) {
         match Ax25Frame::ui(
             self.args.call.clone(),
-            self.args.gateway.clone(),
+            dest.clone(),
             &self.args.path,
             frame.encode(),
         ) {
@@ -389,7 +414,11 @@ impl Station {
             }
             "/msg" | "/m" => match rest.split_once(' ') {
                 Some((who, text)) if !text.is_empty() => {
-                    self.send(Kind::Msg, encode_fields(&[who, text]), true);
+                    if let Some(dest) = rf_dest(who) {
+                        self.send_to(&dest, Kind::Msg, encode_fields(&[who, text]), true);
+                    } else {
+                        self.send(Kind::Msg, encode_fields(&[who, text]), true);
+                    }
                     self.say(format!("-> {who}: {text}"));
                 }
                 _ => self.say("usage: /msg <nick> <text>".into()),
@@ -404,16 +433,17 @@ impl Station {
                     self.say("join a channel first: /join #rf".into());
                     return true;
                 };
-                // Chat is sent unreliably: on a broadcast channel a
-                // retransmission arriving thirty seconds late is noise.
-                self.send(Kind::Msg, encode_fields(&[&chan, line]), false);
+                // Chat is a broadcast so every station in range hears it,
+                // not only the gateway. Unreliable: a retransmission arriving
+                // thirty seconds late is noise.
+                self.send_chat(encode_fields(&[&chan, line]));
             }
         }
         true
     }
 
     pub fn handle_rf(&mut self, ax: Ax25Frame) {
-        if ax.source.call != self.args.gateway {
+        if ax.source.call == self.args.call {
             return;
         }
         // Unicast traffic for somebody else on frequency is not ours to read
@@ -428,13 +458,11 @@ impl Station {
         };
         let now = Instant::now();
         self.last_rx = Some(now);
-        let gateway = self.args.gateway.clone();
+        let src = ax.source.call.clone();
         let addressed_to_us = *dest == self.args.call;
-        let outcome = self
-            .sessions
-            .on_receive(&gateway, frame, now, addressed_to_us);
+        let outcome = self.sessions.on_receive(&src, frame, now, addressed_to_us);
         for f in outcome.transmit {
-            self.transmit(f);
+            self.transmit_to(&src, f);
         }
         let Some(msg) = outcome.deliver else {
             return;
@@ -447,11 +475,20 @@ impl Station {
         };
         match msg.kind {
             Kind::Msg | Kind::Notice => {
-                let (target, from, text) = (
-                    f.first().cloned().unwrap_or_default(),
-                    f.get(1).cloned().unwrap_or_default(),
-                    f.get(2).cloned().unwrap_or_default(),
-                );
+                let from_call = src.to_nick();
+                let (target, from, text) = if f.len() >= 3 {
+                    (
+                        f.first().cloned().unwrap_or_default(),
+                        f.get(1).cloned().unwrap_or_default(),
+                        f.get(2).cloned().unwrap_or_default(),
+                    )
+                } else {
+                    (
+                        f.first().cloned().unwrap_or_default(),
+                        from_call,
+                        f.get(1).cloned().unwrap_or_default(),
+                    )
+                };
                 if target.starts_with('#') || target.starts_with('&') {
                     self.say(format!("{target} <{from}> {text}{stale}"));
                 } else {
@@ -507,6 +544,19 @@ impl Station {
             _ => {}
         }
     }
+}
+
+fn protocol_dest() -> Callsign {
+    "AIRC".parse().unwrap()
+}
+
+/// Direct RF when the nick is a callsign (`SM0XYZ|1` or `SM0XYZ-1`). IRC
+/// nicks go via the gateway.
+fn rf_dest(who: &str) -> Option<Callsign> {
+    who.parse::<Callsign>()
+        .ok()
+        .or_else(|| Callsign::from_nick(who).ok())
+        .filter(|c| c.looks_like_amateur_call())
 }
 
 pub fn human_age(secs: u64) -> String {
@@ -836,7 +886,7 @@ mod tests {
         s.handle_rf(other);
         assert!(
             s.drain_output().is_empty(),
-            "only the gateway is listened to"
+            "another station's unicast to the gateway is not ours to read"
         );
 
         // From the gateway, but unicast to somebody else. PROTOCOL.md §3.1:
@@ -885,6 +935,94 @@ mod tests {
         s.args.quiet = false;
         s.handle_rf(from_gateway(Kind::Pong, 42, &["x"]));
         assert!(s.drain_output().iter().any(|l| l.contains("pong")));
+    }
+
+    fn from_peer(kind: Kind, seq: u16, fields: &[&str]) -> Ax25Frame {
+        Ax25Frame::ui(
+            "SM0XYZ-9".parse().unwrap(),
+            "AIRC".parse().unwrap(),
+            &[],
+            AircFrame::new(kind, seq, encode_fields(fields)).encode(),
+        )
+        .unwrap()
+    }
+
+    async fn take_tx(far: &mut tokio::io::DuplexStream) -> Vec<Ax25Frame> {
+        use crate::ax25::kiss::KissDecoder;
+        use tokio::io::AsyncReadExt;
+        let mut decoder = KissDecoder::new(4096);
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match tokio::time::timeout(Duration::from_millis(150), far.read(&mut buf)).await {
+                Ok(Ok(n)) if n > 0 => {
+                    for kf in decoder.push(&buf[..n]) {
+                        if kf.command != crate::ax25::kiss::CMD_DATA {
+                            continue;
+                        }
+                        if let Ok(ax) = Ax25Frame::decode(&kf.payload) {
+                            out.push(ax);
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn channel_chat_is_a_broadcast_not_a_unicast_to_the_gateway() {
+        let (mut s, mut far) = station();
+        s.handle_input("/join #rf");
+        let _ = take_tx(&mut far).await;
+        s.handle_input("hello everyone");
+        let tx = take_tx(&mut far).await;
+        assert!(
+            tx.iter().any(|ax| ax.destination.call.to_string() == "AIRC"
+                && AircFrame::decode(&ax.info)
+                    .map(|f| f.kind == Kind::Msg
+                        && f.fields().last() == Some(&"hello everyone".into()))
+                    .unwrap_or(false)),
+            "channel chat must be addressed to AIRC so every station hears it: {:?}",
+            tx.iter()
+                .map(|ax| ax.destination.call.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !tx.iter()
+                .any(|ax| ax.destination.call.to_string() == "SK0MT-1"
+                    && AircFrame::decode(&ax.info)
+                        .map(|f| f.kind == Kind::Msg)
+                        .unwrap_or(false)),
+            "unicasting chat to the gateway hides it from every other station"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_broadcast_is_shown() {
+        let (mut s, _far) = station();
+        s.handle_rf(from_peer(Kind::Msg, 4, &["#rf", "from the hillside"]));
+        let out = s.drain_output();
+        assert!(
+            out.iter().any(|l| l == "#rf <SM0XYZ|9> from the hillside"),
+            "stations in range must hear each other without the gateway repeating: {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_direct_message_to_a_callsign_is_unicast_to_them() {
+        let (mut s, mut far) = station();
+        s.handle_input("/msg SM0XYZ|9 just you");
+        let tx = take_tx(&mut far).await;
+        assert!(
+            tx.iter()
+                .any(|ax| ax.destination.call.to_string() == "SM0XYZ-9"),
+            "a callsign nick is on the air, not an IRC hop through the gateway: {:?}",
+            tx.iter()
+                .map(|ax| ax.destination.call.to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

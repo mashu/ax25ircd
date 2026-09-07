@@ -21,6 +21,7 @@ use super::airtime::{AirtimeConfig, AirtimeShared, Governor, TxDecision};
 use super::frame::Ax25Frame;
 use super::kiss::{self, KissDecoder};
 use super::scheduler::{Class, Poll, Queued, Scheduler, SchedulerConfig};
+use crate::audit::Audit;
 use crate::callsign::Callsign;
 
 pub trait ReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -266,8 +267,73 @@ fn airc_seq(info: &[u8]) -> Option<u16> {
     }
 }
 
+/// AIRC kind name for the audit line. Names match [`crate::airc::Kind`]'s
+/// Debug form so a log that used to be written at enqueue still greps the
+/// same way. Unknown or non-AIRC payloads are `-`.
+fn airc_kind(info: &[u8]) -> &'static str {
+    if info.len() < 3 || info[0] != b'A' || info[1] != b'1' {
+        return "-";
+    }
+    match info[2] {
+        0x01 => "Hello",
+        0x02 => "Welcome",
+        0x03 => "Join",
+        0x04 => "Part",
+        0x05 => "Msg",
+        0x06 => "Notice",
+        0x07 => "Names",
+        0x08 => "NamesReply",
+        0x09 => "Ping",
+        0x0A => "Pong",
+        0x0B => "Ack",
+        0x0C => "Error",
+        0x0D => "Id",
+        0x0E => "Quit",
+        0x0F => "Presence",
+        0x10 => "Stored",
+        _ => "-",
+    }
+}
+
+/// A frame has just been written to the TNC. `keyed` is the modeled key-down
+/// time (TXDELAY + on-wire bits + TXTAIL), which is what the PA sees; KISS
+/// does not report actual PTT. `duty` is the sliding-window duty cycle after
+/// this transmission was counted.
+fn audit_keyed(audit: &Audit, item: &Queued<Ax25Frame>, bytes: usize, keyed: Duration, duty: f64) {
+    let dest = item.payload.destination.call.to_string();
+    let n = bytes.to_string();
+    let keyed_s = format!("{:.1}s", keyed.as_secs_f64());
+    let duty_s = format!("{:.1}%", duty);
+    let kind = airc_kind(&item.payload.info);
+    let event = if item.class == Class::Id {
+        "rf_id"
+    } else {
+        "rf_tx"
+    };
+    audit.event(
+        event,
+        &[
+            ("dest", &dest),
+            ("kind", kind),
+            ("bytes", &n),
+            ("class", item.class.as_str()),
+            ("keyed", &keyed_s),
+            ("duty", &duty_s),
+        ],
+    );
+}
+
 /// Start the TNC task. Received frames are delivered on the returned channel.
+///
+/// Keyed frames still reach `tracing` (`ax25ircd::audit`); pass
+/// [`spawn_with_audit`] when they should also hit the on-disk trail.
 pub fn spawn(config: TncConfig) -> (TncHandle, mpsc::Receiver<Ax25Frame>) {
+    spawn_with_audit(config, Audit::open(None))
+}
+
+/// Like [`spawn`], writing each keyed frame to `audit` with modeled key-down
+/// time and the sliding-window duty cycle.
+pub fn spawn_with_audit(config: TncConfig, audit: Audit) -> (TncHandle, mpsc::Receiver<Ax25Frame>) {
     let (tx_in, rx_in) = mpsc::channel::<Ax25Frame>(256);
     let (keyed_tx, keyed_rx) = mpsc::channel::<Keyed>(64);
     let airtime = Arc::new(AirtimeShared::default());
@@ -278,6 +344,7 @@ pub fn spawn(config: TncConfig) -> (TncHandle, mpsc::Receiver<Ax25Frame>) {
         keyed_tx,
         scheduler.clone(),
         airtime.clone(),
+        audit,
     ));
     let cost = config.airtime.clone();
     (
@@ -347,6 +414,7 @@ async fn run(
     keyed_tx: mpsc::Sender<Keyed>,
     scheduler: Arc<StdMutex<Scheduler<Ax25Frame>>>,
     shared: Arc<AirtimeShared>,
+    audit: Audit,
 ) {
     let mut state = Link { rx_sink };
     // The governor outlives individual TNC connections on purpose: airtime
@@ -366,6 +434,7 @@ async fn run(
                     &shared,
                     &scheduler,
                     &keyed_tx,
+                    &audit,
                 )
                 .await
                 {
@@ -397,6 +466,7 @@ async fn pump(
     shared: &AirtimeShared,
     scheduler: &StdMutex<Scheduler<Ax25Frame>>,
     keyed_tx: &mpsc::Sender<Keyed>,
+    audit: &Audit,
 ) -> io::Result<()> {
     let rx_sink = &state.rx_sink;
     // Push KISS parameters at connect.
@@ -555,13 +625,21 @@ async fn pump(
                                 .requeue(item, Instant::now(), Duration::ZERO);
                             return Err(e);
                         }
-                        let keyed = governor.record(bytes.len(), now);
+                        let recorded = governor.record(bytes.len(), now);
                         {
                             let mut sched = scheduler.lock().unwrap_or_else(|g| g.into_inner());
-                            sched.on_keyed(now, &item.account, keyed, item.expects_reply);
+                            sched.on_keyed(now, &item.account, recorded, item.expects_reply);
                             publish_queue(shared, &sched);
                         }
                         governor.publish_with(shared, now, config.max_frame);
+                        // `record` returns zero when the governor is off; the
+                        // cost model still knows how long the PA is keyed.
+                        let keyed = if recorded.is_zero() {
+                            item.cost
+                        } else {
+                            recorded
+                        };
+                        audit_keyed(audit, &item, bytes.len(), keyed, shared.duty_percent());
                         if let Some(seq) = airc_seq(&item.payload.info) {
                             let dest = item.payload.destination.call.clone();
                             let _ = keyed_tx.try_send(Keyed { dest, seq });

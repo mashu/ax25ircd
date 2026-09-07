@@ -51,19 +51,15 @@ impl Server {
         }
 
         // PROTOCOL.md §3.1: a receiver must check the AX.25 destination before
-        // processing a frame. We only act on traffic addressed to this
-        // gateway's callsign.
+        // processing a frame.
         //
-        // This is not politeness. Downlink MSG carries [target, from, text]
-        // and uplink MSG carries [target, text] — the same `kind`, different
-        // shape. Without this check, two gateways sharing a frequency read
-        // each other's downlink broadcasts as uplink traffic from a station,
-        // relay them, and transmit again: a feedback loop between two
-        // automatically controlled stations, bounded only by the rate limiter,
-        // that neither operator is watching. The same check also stops us
-        // consuming another station's unicast sequence numbers, which would
-        // make traffic genuinely meant for us look like duplicates.
-        if !self.frame_is_for_us(&frame) {
+        // Unicast to this gateway is ours. Broadcasts to a protocol address
+        // (`AIRC`) are station-to-station channel chat: ingest 2-field MSG as
+        // uplink, never ACK, never treat 3-field downlink as uplink (that is
+        // the two-gateway loop). Unicast to anyone else is ignored.
+        let for_us = self.frame_is_for_us(&frame);
+        let broadcast = self.frame_is_protocol_broadcast(&frame);
+        if !for_us && !broadcast {
             debug!(
                 target: "rf::monitor",
                 "not addressed to us: {}",
@@ -91,25 +87,37 @@ impl Server {
             return;
         }
 
-        let outcome = self.radio.sessions.on_receive(&src, airc, now, true);
+        let outcome = self.radio.sessions.on_receive(&src, airc, now, for_us);
         for f in outcome.transmit {
             self.transmit_airc(&src, f);
         }
         if let Some(msg) = outcome.deliver {
-            self.handle_airc_message(&src, msg, now);
+            let take = if broadcast {
+                uplink_chat_from_broadcast(&msg)
+            } else {
+                true
+            };
+            if take {
+                self.handle_airc_message(&src, msg, now);
+            }
         }
+        self.radio.drain_acks();
     }
 
     /// True when an AX.25 frame is addressed to this gateway.
-    ///
-    /// Stations always unicast to the gateway callsign (see
-    /// `ax25irc-station`), so that is the only address we act on. Frames
-    /// addressed to a protocol address such as `AIRC` or `ID` are broadcasts
-    /// — ours to *hear*, never ours to answer.
     fn frame_is_for_us(&self, frame: &Ax25Frame) -> bool {
         self.config
             .gateway_callsign()
             .is_some_and(|call| call == frame.destination.call)
+    }
+
+    /// True when the destination is a protocol address such as `AIRC`.
+    ///
+    /// `ID` is also a protocol address, but identification is logged above
+    /// and is never chat.
+    fn frame_is_protocol_broadcast(&self, frame: &Ax25Frame) -> bool {
+        let dest = &frame.destination.call;
+        !dest.looks_like_amateur_call() && dest.to_string() != "ID"
     }
 
     fn handle_airc_message(&mut self, src: &Callsign, msg: AircFrame, now: Instant) {
@@ -187,6 +195,12 @@ impl Server {
                 self.quit_user(&uid, &reason);
             }
             Kind::Msg | Kind::Notice => {
+                // Downlink is [target, from, text]. Uplink is [target, text].
+                // A 3-field MSG is another gateway's broadcast, not a station
+                // talking to us — treating it as uplink is the two-gateway loop.
+                if fields.len() >= 3 {
+                    return;
+                }
                 let (Some(target), Some(text)) = (fields.first(), fields.get(1)) else {
                     return;
                 };
@@ -587,4 +601,11 @@ impl Server {
         // the sender retransmitting a long one. They are never rationed.
         self.radio.transmit_direct(dst, frame, TxClass::Ack);
     }
+}
+
+/// Channel chat from a station is a broadcast `MSG`/`NOTICE` with the uplink
+/// shape `[target, text]`. Anything else on a protocol address is another
+/// gateway's downlink, a HELLO that belongs on unicast, or noise.
+fn uplink_chat_from_broadcast(msg: &AircFrame) -> bool {
+    matches!(msg.kind, Kind::Msg | Kind::Notice) && msg.fields().len() == 2
 }

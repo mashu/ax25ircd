@@ -31,7 +31,7 @@ payload.
 |---|---|---|
 | magic | 2 | ASCII `A1`. Distinguishes AIRC from APRS and other traffic on frequency. |
 | kind | 1 | Message type, table below. |
-| flags | 1 | Bit 0 `ACK_REQ`, bit 1 `RETRY`, bit 2 `TRUNCATED`. Other bits reserved, transmitted as 0, ignored on receipt. |
+| flags | 1 | Bit 0 `ACK_REQ`, bit 1 `RETRY`, bit 2 `TRUNCATED`, bit 3 `PIGGYACK`. Other bits reserved, transmitted as 0, ignored on receipt. |
 | seq | 2 | Sequence number, per sender, big endian, wraps, never 0. One space per station, covering both its unicast and its broadcast traffic. |
 | fidx | 1 | Fragment index, 0-based. |
 | ftot | 1 | Fragment count, ≥ 1. |
@@ -63,7 +63,7 @@ it (the receiving station has no other way to know who spoke).
 | `NAMES_REPLY` | 0x08 | down | channel, comma-separated nicks, topic? |
 | `PING` | 0x09 | up | token |
 | `PONG` | 0x0A | down | token |
-| `ACK` | 0x0B | both | 2 octets: the sequence number being acknowledged |
+| `ACK` | 0x0B | both | 2 octets: the sequence number being acknowledged. Optional extra octets are a fragment bitmap (see §5). |
 | `ERROR` | 0x0C | down | numeric-ish code, text |
 | `ID` | 0x0D | down | identification text |
 | `QUIT` | 0x0E | up | reason? |
@@ -71,6 +71,17 @@ it (the receiving station has no other way to know who spoke).
 | `STORED` | 0x10 | down | target, from, text, age in seconds |
 
 `ACK` is the only message whose payload is binary rather than text fields.
+A 2-octet payload means every fragment of that sequence arrived. Extra octets
+are a bitmap: bit *i* of the extra bytes is set when fragment *i* is in hand.
+Old implementations that only read the first two octets treat any ACK as
+complete; new senders therefore send a 2-octet ACK when the message is whole,
+and a bitmap only to fill holes.
+
+When `PIGGYACK` is set, the payload of a *non-ACK* frame begins with two
+octets — the sequence number being acknowledged — followed by the ordinary
+payload for that `kind`. The receiver applies that ACK, then processes the
+frame as usual. Partial (bitmap) ACKs are never piggybacked: they stay a
+standalone `ACK` frame.
 
 `STORED` is a `MSG` that was held while the station was out of range; the
 fourth field is how long it waited, in seconds, so a client can show
@@ -94,14 +105,23 @@ per sender, so consuming another station's unicast traffic pollutes the
 duplicate-suppression window and causes messages meant for you to be discarded
 as duplicates.
 
-The **gateway** applies the rule more strictly still: it acts only on frames
-addressed to its own callsign, and never on broadcasts. `MSG` is the same
-`kind` in both directions but a different shape — uplink `[target, text]`,
-downlink `[target, from, text]` — so a gateway that processed broadcasts would
-read another gateway's downlink as uplink traffic from a station, relay it, and
-transmit it again. Two gateways sharing a frequency would then key each other
-indefinitely, with nobody watching either of them. Stations always unicast to
-the gateway, so nothing is lost by the restriction.
+The **gateway** acts on frames addressed to its own callsign, and also on
+broadcasts to a protocol address such as `AIRC` when they are *uplink* channel
+chat: `MSG`/`NOTICE` with two fields, `[target, text]`. It never ACKs a
+broadcast. A three-field `MSG` (`[target, from, text]`) is another gateway's
+downlink; treating it as uplink would make two gateways on one frequency key
+each other indefinitely. Control traffic (`HELLO`, `JOIN`, `NAMES`, private
+`MSG` to an IRC nick) stays unicast to the gateway.
+
+Stations send channel chat as a broadcast to `AIRC`, not as a unicast to the
+gateway. Every station in range hears it once; the gateway bridges it to IRC
+and does not retransmit it. A private message to an RF callsign is unicast to
+that callsign.
+
+This is as far as the protocol goes toward a mesh. There is no ad-hoc routing
+and the digipeater path is still at most two hops. RF stations talk to each
+other on the shared broadcast; the gateway is an optional IRC bridge, not the
+radio hub. IRC users have no AX.25 address, so they still need a gateway.
 
 ## 3.2 What the gateway will and will not transmit
 
@@ -132,9 +152,13 @@ Two modes:
   address. Used for channel messages, presence and ID. One transmission
   reaches every station in range. Receivers deduplicate on (source, seq).
 * **Reliable unicast.** `flags.ACK_REQ` set, addressed to a station callsign.
-  The receiver replies with `ACK` carrying the sequence number. The sender
-  retries up to `max_retries` times with linear backoff (`ack_timeout`,
-  2×, 3×, capped at 4×), with `flags.RETRY` set on repeats, then gives up.
+  The receiver replies with `ACK` carrying the sequence number, or sets
+  `PIGGYACK` on the next unicast already going to that station. Piggybacking
+  is one keyed burst instead of ACK plus data — less TXDELAY, less stress on
+  QRP finals. The sender retries up to `max_retries` times with linear
+  backoff (`ack_timeout`, 2×, 3×, capped at 4×), with `flags.RETRY` set on
+  repeats, then gives up. Retries send only fragments the bitmap has not
+  marked received; a 2-octet ACK still means "all of them".
 
 One reliable message is in flight per peer at a time; further messages queue
 behind it and the queue is bounded (16 by default). A duplicate that has
@@ -148,10 +172,14 @@ If a payload exceeds `paclen - 8`, it is split. All fragments carry the same
 reassembled by concatenating payloads in index order. Fragmentation happens on
 raw octets, so a UTF-8 sequence may be split across fragments; decoding happens
 after reassembly. Incomplete reassembly buffers are discarded after a timeout
-(60 s by default).
+(60 s by default); if the message requested an ACK, the timeout is reported
+as a bitmap ACK so the sender can fill holes rather than starting over.
 
-Reliable fragmented messages are acknowledged as a whole: the ACK carries the
-shared sequence number and is sent when the last missing fragment arrives.
+Reliable fragmented messages are acknowledged as a whole when the last missing
+fragment arrives (a 2-octet ACK). A `RETRY` of an incomplete set, or a
+reassembly timeout, produces a bitmap ACK: the sender retransmits only the
+clear bits. That is selective repeat. Stop-and-wait still applies at the
+*message* level — one seq in flight per peer.
 
 ## 5.1 Held messages
 
@@ -198,7 +226,7 @@ for diagnostics; the gateway does not act on it.
 
 Station `SM0ABC-7` says "hi all" in `#rf`.
 
-AX.25 UI frame, `SM0ABC-7 > SK0MT-1` (the gateway callsign), `PID 0xF0`, information field:
+AX.25 UI frame, `SM0ABC-7 > AIRC` (the protocol broadcast address), `PID 0xF0`, information field:
 
 ```
 41 31 05 00 00 2A 00 01 23 72 66 1F 68 69 20 61 6C 6C

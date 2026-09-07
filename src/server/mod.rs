@@ -240,7 +240,18 @@ pub struct Server {
 impl Server {
     pub fn new(config: Arc<Config>, tnc: Option<TncHandle>) -> anyhow::Result<Self> {
         let audit = Audit::open(config.logging.audit_file.as_deref());
-        let radio = Radio::new(config.clone(), tnc, audit.clone());
+        Self::with_audit(config, tnc, audit)
+    }
+
+    /// Build the server with an audit trail that is already open. The TNC
+    /// task is started before this, so it has to share the same handle or
+    /// keyed frames would not reach the on-disk log.
+    pub fn with_audit(
+        config: Arc<Config>,
+        tnc: Option<TncHandle>,
+        audit: Audit,
+    ) -> anyhow::Result<Self> {
+        let radio = Radio::new(config.clone(), tnc);
 
         let mut state = State::default();
         for ch in &config.channels {

@@ -280,6 +280,20 @@ governor's next free slot.
 `RADIO STATUS` shows the duty percentage and any active cooldown to everyone;
 the full breakdown is control-operator only.
 
+Each frame that actually keys is also written to the audit log (and to
+`ax25ircd::audit` at info) at the moment it is handed to the TNC:
+
+```
+rf_tx dest=SA0KAM kind=Welcome bytes=88 class=control keyed=3.3s duty=1.2%
+```
+
+`keyed` is modeled key-down time — TXDELAY + on-wire bits (with a stuffing
+allowance) + TXTAIL — which is what the PA sees. KISS does not report PTT, so
+this is not a measurement from the radio. `duty` is the sliding-window duty
+cycle *after* that transmission was counted. The timestamp is when the frame
+keyed, not when it was queued; a message sitting behind the governor will
+show up here when it goes out, or not at all if it is dropped stale.
+
 ## What the operator can do while it is running
 
 `RADIO QUEUE` answers "what has been accepted but not yet transmitted?", in

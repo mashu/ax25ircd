@@ -24,7 +24,6 @@ use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 use crate::airc::{encode_fields, AircFrame, Kind, SessionConfig, Sessions};
-use crate::audit::Audit;
 use crate::ax25::{AirtimeShared, Ax25Frame, Class, Keyed, TncHandle};
 use crate::callsign::Callsign;
 use crate::config::Config;
@@ -63,15 +62,6 @@ impl TxClass {
         }
     }
 
-    fn as_str(self) -> &'static str {
-        match self {
-            TxClass::Ack => "ack",
-            TxClass::Control => "control",
-            TxClass::Direct => "direct",
-            TxClass::Chat => "chat",
-        }
-    }
-
     fn scheduler_class(self) -> Class {
         match self {
             TxClass::Ack => Class::Ack,
@@ -97,7 +87,6 @@ pub struct Stats {
 /// The station's transmit side.
 pub struct Radio {
     config: Arc<Config>,
-    audit: Audit,
     tnc: Option<TncHandle>,
     /// This station's own callsign and digipeater path, parsed once.
     ///
@@ -133,7 +122,7 @@ pub enum IdentifyResult {
 }
 
 impl Radio {
-    pub fn new(config: Arc<Config>, tnc: Option<TncHandle>, audit: Audit) -> Self {
+    pub fn new(config: Arc<Config>, tnc: Option<TncHandle>) -> Self {
         let sessions = Sessions::new(SessionConfig {
             paclen: config.radio.paclen,
             ack_timeout: Duration::from_secs(config.radio.ack_timeout_secs),
@@ -154,7 +143,6 @@ impl Radio {
             source: config.gateway_callsign(),
             path: config.rf_path(),
             config,
-            audit,
             tnc,
             sessions,
             mailbox,
@@ -243,6 +231,13 @@ impl Radio {
         self.transmit_direct(dst, frame, TxClass::Control);
     }
 
+    /// Standalone ACKs that were not piggybacked onto a later unicast.
+    pub fn drain_acks(&mut self) {
+        for (dst, frame) in self.sessions.drain_acks() {
+            self.transmit_direct(&dst, frame, TxClass::Ack);
+        }
+    }
+
     /// Octets this payload will actually put on the wire once fragmented.
     ///
     /// Fragmentation is not free and the naive estimate hides it: each
@@ -309,18 +304,6 @@ impl Radio {
             self.stats.rf_frames_tx += 1;
             self.stats.rf_bytes_tx += len as u64;
             self.transmitted_since_id = true;
-            let kind = format!("{:?}", frame.kind);
-            let n = len.to_string();
-            let dest_s = dest.to_string();
-            self.audit.event(
-                "rf_tx",
-                &[
-                    ("dest", &dest_s),
-                    ("kind", &kind),
-                    ("bytes", &n),
-                    ("class", class.as_str()),
-                ],
-            );
         } else {
             self.stats.rf_frames_dropped += 1;
         }
@@ -486,8 +469,6 @@ impl Radio {
         if tnc.try_send_id(ax) {
             self.stats.rf_frames_tx += 1;
             self.stats.rf_bytes_tx += len as u64;
-            let n = len.to_string();
-            self.audit.event("rf_id", &[("bytes", &n)]);
             true
         } else {
             self.stats.rf_frames_dropped += 1;

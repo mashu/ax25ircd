@@ -11,6 +11,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
+use crate::audit::Audit;
 use crate::ax25::tnc::{self, TncConfig, TncLink};
 use crate::config::{Config, TncSection};
 use crate::irc::client::{listen, ListenerOptions};
@@ -145,13 +146,15 @@ pub struct Gateway {
 /// test can build a gateway without binding a port.
 pub fn build(config: Arc<Config>) -> anyhow::Result<Gateway> {
     let mut loopback = None;
+    let audit = Audit::open(config.logging.audit_file.as_deref());
     let (tnc_handle, rf_rx) = if config.radio.enabled {
         let (link, far) = resolve_link(&config.radio.tnc)?;
         if far.is_some() {
             warn!("TNC kind is 'loopback': nothing will be transmitted");
             loopback = far;
         }
-        let (handle, rx) = tnc::spawn(TncConfig::from_config(&config, link));
+        let (handle, rx) =
+            tnc::spawn_with_audit(TncConfig::from_config(&config, link), audit.clone());
         if let Some(interlock) = config.radio.interlock.clone() {
             crate::interlock::spawn(interlock, handle.airtime().clone());
         }
@@ -167,7 +170,7 @@ pub fn build(config: Arc<Config>) -> anyhow::Result<Gateway> {
     };
 
     let (events, events_rx) = mpsc::channel::<Event>(1024);
-    let mut server = Server::new(config.clone(), tnc_handle)?;
+    let mut server = Server::with_audit(config.clone(), tnc_handle, audit)?;
     server.attach_events(events.clone());
 
     // Frames heard on the air become events like anything else.

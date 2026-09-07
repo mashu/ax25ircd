@@ -469,6 +469,36 @@ async fn a_channel_message_from_rf_reaches_irc() {
 }
 
 #[tokio::test]
+async fn a_broadcast_channel_message_from_rf_reaches_irc() {
+    let mut rf = Rf::new();
+    let a = rf.client(1, "alice");
+    rf.send(a, "JOIN #rf");
+    rf.drain(a);
+
+    rf.heard_to("SM0ABC-7", "AIRC", Kind::Msg, &["#rf", "from the hillside"]);
+    let lines = rf.drain(a);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("PRIVMSG #rf :from the hillside")),
+        "AIRC-destined uplink is how stations talk to each other: {lines:?}"
+    );
+
+    rf.heard_to(
+        "SK0AA-1",
+        "AIRC",
+        Kind::Msg,
+        &["#rf", "bob", "from the other gateway"],
+    );
+    assert!(
+        !rf.drain(a)
+            .iter()
+            .any(|l| l.contains("from the other gateway")),
+        "a 3-field broadcast is downlink, not uplink"
+    );
+}
+
+#[tokio::test]
 async fn irc_notice_and_ctcp_are_not_put_on_the_air() {
     let mut rf = Rf::new();
     let a = rf.client(1, "alice");
