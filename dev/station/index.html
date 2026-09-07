@@ -944,9 +944,10 @@
 <a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">                </span>--tnc<span class="w"> </span>serial:/dev/ttyUSB0@9600<span class="w"> </span>--path<span class="w"> </span>SK0MT-2
 </code></pre></div>
 <p>Commands: <code>/join #chan</code>, <code>/part</code>, <code>/names</code>, <code>/msg &lt;nick&gt; &lt;text&gt;</code>, <code>/ping</code>,
-<code>/quit</code>. Anything else goes to the current channel. Chat is sent unreliably (a
-retransmission arriving thirty seconds late is noise); joins, private messages
-and requests are ACKed and retried.</p>
+<code>/quit</code>. Anything else goes to the current channel. Chat is an unreliable
+broadcast to <code>AIRC</code>, so every station in range hears it once; joins, private
+messages to IRC nicks, and requests are unicast to the gateway and ACKed.
+<code>/msg SM0XYZ|1 …</code> is unicast to that callsign, not via the gateway.</p>
 <p>Serial TNCs need a build with <code>--features serial</code>.</p>
 <h3 id="airtime">Airtime<a class="headerlink" href="#airtime" title="Permanent link">&para;</a></h3>
 <p>The station client runs the same airtime governor as the gateway, with the same
@@ -984,7 +985,7 @@ joins; without it, messages stay on IRC until an RF nick is in the channel.</p>
 </code></pre></div>
 <p>while the channel monitor shows what it cost:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>SK0MT-1&gt;AIRC:A1......#rf.alice.hello over the air
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>SM0ABC-7&gt;SK0MT-1:A1......#rf.morning all, 5 watts from Kista
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>SM0ABC-7&gt;AIRC:A1......#rf.morning all, 5 watts from Kista
 </code></pre></div>
 
 

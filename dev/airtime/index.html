@@ -1487,23 +1487,33 @@ airtime already committed, and the ETA senders are quoted is that plus the
 governor's next free slot.</p>
 <p><code>RADIO STATUS</code> shows the duty percentage and any active cooldown to everyone;
 the full breakdown is control-operator only.</p>
+<p>Each frame that actually keys is also written to the audit log (and to
+<code>ax25ircd::audit</code> at info) at the moment it is handed to the TNC:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>rf_tx dest=SA0KAM kind=Welcome bytes=88 class=control keyed=3.3s duty=1.2%
+</code></pre></div>
+<p><code>keyed</code> is modeled key-down time — TXDELAY + on-wire bits (with a stuffing
+allowance) + TXTAIL — which is what the PA sees. KISS does not report PTT, so
+this is not a measurement from the radio. <code>duty</code> is the sliding-window duty
+cycle <em>after</em> that transmission was counted. The timestamp is when the frame
+keyed, not when it was queued; a message sitting behind the governor will
+show up here when it goes out, or not at all if it is dropped stale.</p>
 <h2 id="what-the-operator-can-do-while-it-is-running">What the operator can do while it is running<a class="headerlink" href="#what-the-operator-can-do-while-it-is-running" title="Permanent link">&para;</a></h2>
 <p><code>RADIO QUEUE</code> answers "what has been accepted but not yet transmitted?", in
 the three places something can be waiting:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>-!- transmit queue: 4 frame(s), 18.2s of airtime, next slot in 0.0s (budget 60s)
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>-!- Per-station (reliable, awaiting ACK):
-<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>-!-   SM0ABC-7: 2 message(s) awaiting acknowledgement, 0 dropped
-<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>-!- Held for stations out of range: 3 message(s). Refused for backlog since
-<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>    start: 11. Dropped at the transmitter: 0.
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>-!- transmit queue: 4 frame(s), 18.2s of airtime, next slot in 0.0s (budget 60s)
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>-!- Per-station (reliable, awaiting ACK):
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>-!-   SM0ABC-7: 2 message(s) awaiting acknowledgement, 0 dropped
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>-!- Held for stations out of range: 3 message(s). Refused for backlog since
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>    start: 11. Dropped at the transmitter: 0.
 </code></pre></div>
 <p><code>RADIO LIMIT</code> retunes the station without a restart, because the situations
 that call for it are live ones — the band opened, the finals are hot, somebody
 else needs the frequency — and restarting the gateway drops every station on
 it:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>/quote RADIO LIMIT DUTY 10          # down to 10% until further notice
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>/quote RADIO LIMIT DUTY off         # back to the configured limit
-<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>/quote RADIO LIMIT PACING 4000      # at least 4s between transmissions
-<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>/quote RADIO LIMIT PACING off
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>/quote RADIO LIMIT DUTY 10          # down to 10% until further notice
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>/quote RADIO LIMIT DUTY off         # back to the configured limit
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>/quote RADIO LIMIT PACING 4000      # at least 4s between transmissions
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>/quote RADIO LIMIT PACING off
 </code></pre></div>
 <p>Both are audited, both take effect on the next frame, and neither is written
 back to the configuration file — a restart returns to what is on disk. The
@@ -1518,11 +1528,11 @@ frames, not telemetry — there is no SWR reading, no PA temperature and no powe
 meter anywhere in that path. On a QMX the one port that could answer (CAT) is
 already held by Direwolf for PTT, and two processes cannot share a serial port.</p>
 <p>So the check is yours to supply:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="k">[radio.interlock]</span>
-<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="n">command</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/usr/local/bin/check-swr"</span>
-<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">args</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">"--max"</span><span class="p">,</span><span class="w"> </span><span class="s2">"2.5"</span><span class="p">]</span>
-<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="n">interval_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">30</span>
-<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="n">timeout_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="k">[radio.interlock]</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="n">command</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/usr/local/bin/check-swr"</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="n">args</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">"--max"</span><span class="p">,</span><span class="w"> </span><span class="s2">"2.5"</span><span class="p">]</span>
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="n">interval_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">30</span>
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="n">timeout_secs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span>
 </code></pre></div>
 <p>The command runs on a timer. While it fails, <strong>nothing is transmitted</strong>.
 Traffic already in the transmit queue is <em>held</em> until the check passes again,
@@ -1543,7 +1553,7 @@ void until it gives a station up for lost.</p>
 <p><code>RADIO STATUS</code> says so plainly when it is the interlock holding the station
 down, so it is never confused with <code>RADIO OFF</code>.</p>
 <h2 id="stopping-it">Stopping it<a class="headerlink" href="#stopping-it" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>/quote RADIO OFF
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>/quote RADIO OFF
 </code></pre></div>
 <p>This is the kill switch, and it is a real one:</p>
 <ol>

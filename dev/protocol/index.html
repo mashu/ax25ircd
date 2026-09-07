@@ -1165,7 +1165,7 @@ payload.</p>
 <tr>
 <td>flags</td>
 <td>1</td>
-<td>Bit 0 <code>ACK_REQ</code>, bit 1 <code>RETRY</code>, bit 2 <code>TRUNCATED</code>. Other bits reserved, transmitted as 0, ignored on receipt.</td>
+<td>Bit 0 <code>ACK_REQ</code>, bit 1 <code>RETRY</code>, bit 2 <code>TRUNCATED</code>, bit 3 <code>PIGGYACK</code>. Other bits reserved, transmitted as 0, ignored on receipt.</td>
 </tr>
 <tr>
 <td>seq</td>
@@ -1278,7 +1278,7 @@ it (the receiving station has no other way to know who spoke).</p>
 <td><code>ACK</code></td>
 <td>0x0B</td>
 <td>both</td>
-<td>2 octets: the sequence number being acknowledged</td>
+<td>2 octets: the sequence number being acknowledged. Optional extra octets are a fragment bitmap (see §5).</td>
 </tr>
 <tr>
 <td><code>ERROR</code></td>
@@ -1312,7 +1312,17 @@ it (the receiving station has no other way to know who spoke).</p>
 </tr>
 </tbody>
 </table>
-<p><code>ACK</code> is the only message whose payload is binary rather than text fields.</p>
+<p><code>ACK</code> is the only message whose payload is binary rather than text fields.
+A 2-octet payload means every fragment of that sequence arrived. Extra octets
+are a bitmap: bit <em>i</em> of the extra bytes is set when fragment <em>i</em> is in hand.
+Old implementations that only read the first two octets treat any ACK as
+complete; new senders therefore send a 2-octet ACK when the message is whole,
+and a bitmap only to fill holes.</p>
+<p>When <code>PIGGYACK</code> is set, the payload of a <em>non-ACK</em> frame begins with two
+octets — the sequence number being acknowledged — followed by the ordinary
+payload for that <code>kind</code>. The receiver applies that ACK, then processes the
+frame as usual. Partial (bitmap) ACKs are never piggybacked: they stay a
+standalone <code>ACK</code> frame.</p>
 <p><code>STORED</code> is a <code>MSG</code> that was held while the station was out of range; the
 fourth field is how long it waited, in seconds, so a client can show
 <code>[held 3h]</code> rather than pretending the message is fresh.</p>
@@ -1331,14 +1341,21 @@ processing a frame it <strong>must</strong> check the AX.25 destination address:
 per sender, so consuming another station's unicast traffic pollutes the
 duplicate-suppression window and causes messages meant for you to be discarded
 as duplicates.</p>
-<p>The <strong>gateway</strong> applies the rule more strictly still: it acts only on frames
-addressed to its own callsign, and never on broadcasts. <code>MSG</code> is the same
-<code>kind</code> in both directions but a different shape — uplink <code>[target, text]</code>,
-downlink <code>[target, from, text]</code> — so a gateway that processed broadcasts would
-read another gateway's downlink as uplink traffic from a station, relay it, and
-transmit it again. Two gateways sharing a frequency would then key each other
-indefinitely, with nobody watching either of them. Stations always unicast to
-the gateway, so nothing is lost by the restriction.</p>
+<p>The <strong>gateway</strong> acts on frames addressed to its own callsign, and also on
+broadcasts to a protocol address such as <code>AIRC</code> when they are <em>uplink</em> channel
+chat: <code>MSG</code>/<code>NOTICE</code> with two fields, <code>[target, text]</code>. It never ACKs a
+broadcast. A three-field <code>MSG</code> (<code>[target, from, text]</code>) is another gateway's
+downlink; treating it as uplink would make two gateways on one frequency key
+each other indefinitely. Control traffic (<code>HELLO</code>, <code>JOIN</code>, <code>NAMES</code>, private
+<code>MSG</code> to an IRC nick) stays unicast to the gateway.</p>
+<p>Stations send channel chat as a broadcast to <code>AIRC</code>, not as a unicast to the
+gateway. Every station in range hears it once; the gateway bridges it to IRC
+and does not retransmit it. A private message to an RF callsign is unicast to
+that callsign.</p>
+<p>This is as far as the protocol goes toward a mesh. There is no ad-hoc routing
+and the digipeater path is still at most two hops. RF stations talk to each
+other on the shared broadcast; the gateway is an optional IRC bridge, not the
+radio hub. IRC users have no AX.25 address, so they still need a gateway.</p>
 <h2 id="32-what-the-gateway-will-and-will-not-transmit">3.2 What the gateway will and will not transmit<a class="headerlink" href="#32-what-the-gateway-will-and-will-not-transmit" title="Permanent link">&para;</a></h2>
 <p>The gateway is an automatically controlled station on a shared, thermally
 limited channel, so its side of the protocol is deliberately quieter than the
@@ -1365,9 +1382,13 @@ distinguish them by whether the second field is a count or a list.</p>
   address. Used for channel messages, presence and ID. One transmission
   reaches every station in range. Receivers deduplicate on (source, seq).</li>
 <li><strong>Reliable unicast.</strong> <code>flags.ACK_REQ</code> set, addressed to a station callsign.
-  The receiver replies with <code>ACK</code> carrying the sequence number. The sender
-  retries up to <code>max_retries</code> times with linear backoff (<code>ack_timeout</code>,
-  2×, 3×, capped at 4×), with <code>flags.RETRY</code> set on repeats, then gives up.</li>
+  The receiver replies with <code>ACK</code> carrying the sequence number, or sets
+  <code>PIGGYACK</code> on the next unicast already going to that station. Piggybacking
+  is one keyed burst instead of ACK plus data — less TXDELAY, less stress on
+  QRP finals. The sender retries up to <code>max_retries</code> times with linear
+  backoff (<code>ack_timeout</code>, 2×, 3×, capped at 4×), with <code>flags.RETRY</code> set on
+  repeats, then gives up. Retries send only fragments the bitmap has not
+  marked received; a 2-octet ACK still means "all of them".</li>
 </ul>
 <p>One reliable message is in flight per peer at a time; further messages queue
 behind it and the queue is bounded (16 by default). A duplicate that has
@@ -1379,9 +1400,13 @@ retransmission is that the previous ACK was lost.</p>
 reassembled by concatenating payloads in index order. Fragmentation happens on
 raw octets, so a UTF-8 sequence may be split across fragments; decoding happens
 after reassembly. Incomplete reassembly buffers are discarded after a timeout
-(60 s by default).</p>
-<p>Reliable fragmented messages are acknowledged as a whole: the ACK carries the
-shared sequence number and is sent when the last missing fragment arrives.</p>
+(60 s by default); if the message requested an ACK, the timeout is reported
+as a bitmap ACK so the sender can fill holes rather than starting over.</p>
+<p>Reliable fragmented messages are acknowledged as a whole when the last missing
+fragment arrives (a 2-octet ACK). A <code>RETRY</code> of an incomplete set, or a
+reassembly timeout, produces a bitmap ACK: the sender retransmits only the
+clear bits. That is selective repeat. Stop-and-wait still applies at the
+<em>message</em> level — one seq in flight per peer.</p>
 <h2 id="51-held-messages">5.1 Held messages<a class="headerlink" href="#51-held-messages" title="Permanent link">&para;</a></h2>
 <p>If a station is not in range when someone sends it a private message, the
 gateway may hold the message and deliver it as a <code>STORED</code> frame on next
@@ -1417,7 +1442,7 @@ number it has already seen, rather than wedging the station.</p>
 for diagnostics; the gateway does not act on it.</p>
 <h2 id="7-worked-example">7. Worked example<a class="headerlink" href="#7-worked-example" title="Permanent link">&para;</a></h2>
 <p>Station <code>SM0ABC-7</code> says "hi all" in <code>#rf</code>.</p>
-<p>AX.25 UI frame, <code>SM0ABC-7 &gt; SK0MT-1</code> (the gateway callsign), <code>PID 0xF0</code>, information field:</p>
+<p>AX.25 UI frame, <code>SM0ABC-7 &gt; AIRC</code> (the protocol broadcast address), <code>PID 0xF0</code>, information field:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>41 31 05 00 00 2A 00 01 23 72 66 1F 68 69 20 61 6C 6C
 <a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a> A  1  ^  ^  ^^^^^  ^  ^  #  r  f  ␟  h  i     a  l  l
 <a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>       |  |    |    |  └── ftot = 1
