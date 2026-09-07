@@ -975,8 +975,9 @@ licence.</p>
 <p>Then connect irssi to <strong>only</strong> this server (<code>irssi -! -c 127.0.0.1 -p 6667 -n alice</code>),
 <code>/quote CALLSIGN SM0XYZ</code>, join <code>#rf</code>. That lets you speak on IRC. Type in the
 station client to see <code>SM0ABC|7</code> talk in the channel. To key the virtual
-transmitter from IRC, register the nick and have a control operator
-<code>RADIO GRANT</code> it — see <a href="../usage/">usage.md</a>.</p>
+transmitter from IRC, <code>OPER</code> or <code>RADIO GRANT</code> a registered nick — see
+<a href="../usage/">usage.md</a>. With RF-TX you can CQ even before the station client
+joins; without it, messages stay on IRC until an RF nick is in the channel.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>#rf &lt;alice&gt; hello over the air
 <a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>*alice* direct to you
 <a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>-- #rf members: SM0ABC|7,alice

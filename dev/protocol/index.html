@@ -1212,7 +1212,7 @@ it (the receiving station has no other way to know who spoke).</p>
 <td><code>HELLO</code></td>
 <td>0x01</td>
 <td>up</td>
-<td>(optional) client name/version</td>
+<td>client name/version?, session epoch as 4 hex digits?</td>
 </tr>
 <tr>
 <td><code>WELCOME</code></td>
@@ -1406,6 +1406,15 @@ interesting.</p>
 plausible amateur callsign creates the station's presence, and a <code>MSG</code> to a
 bridged channel auto-joins it. A station that loses its <code>JOIN</code> in a collision
 should not lose its conversation too.</p>
+<p>A station that has restarted <strong>must</strong> send <code>HELLO</code> again. The optional second
+field is a 16-bit session epoch, four uppercase hex digits, chosen randomly
+at process start. A <code>HELLO</code> with a different epoch than last time clears that
+station's duplicate-suppression window, so seq 1 after a reboot is not
+mistaken for a replay of the previous session. A client that omits the epoch
+is still accepted; the gateway will re-deliver a <code>HELLO</code> whose sequence
+number it has already seen, rather than wedging the station.</p>
+<p>A <code>HELLO</code> may also carry a client name and version string in the first field
+for diagnostics; the gateway does not act on it.</p>
 <h2 id="7-worked-example">7. Worked example<a class="headerlink" href="#7-worked-example" title="Permanent link">&para;</a></h2>
 <p>Station <code>SM0ABC-7</code> says "hi all" in <code>#rf</code>.</p>
 <p>AX.25 UI frame, <code>SM0ABC-7 &gt; SK0MT-1</code> (the gateway callsign), <code>PID 0xF0</code>, information field:</p>
@@ -1427,8 +1436,9 @@ it. When <code>alice</code> (identified as <code>SM0XYZ</code>) replies, the gat
 <h2 id="8-version-negotiation">8. Version negotiation<a class="headerlink" href="#8-version-negotiation" title="Permanent link">&para;</a></h2>
 <p>The magic contains the version digit. A future AIRC/2 uses <code>A2</code>; an AIRC/1
 implementation ignores it as foreign traffic, which is the correct behaviour on
-a shared channel. <code>HELLO</code> may carry a client name and version string for
-diagnostics; the gateway does not act on it.</p>
+a shared channel. <code>HELLO</code>'s first field may carry a client name and version
+for diagnostics; the gateway does not act on it. The optional second field is
+the session epoch described in §6.</p>
 <h2 id="9-what-is-deliberately-absent">9. What is deliberately absent<a class="headerlink" href="#9-what-is-deliberately-absent" title="Permanent link">&para;</a></h2>
 <p>No compression, no encryption, no binary-packed text, no dictionary coding of
 nicknames or channels. All of these would save airtime; all of them make it

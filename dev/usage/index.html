@@ -1358,8 +1358,8 @@ the nick that owns the grant.</p>
 stations heard on the air. An internet user cannot take them.</p>
 <h2 id="what-is-transmitted">What is transmitted<a class="headerlink" href="#what-is-transmitted" title="Permanent link">&para;</a></h2>
 <p>Radiation is an <strong>allowlist</strong>. Only these IRC events can key the transmitter,
-and only after RF-TX, CALLSIGN, a <code>+r</code> channel with a station on frequency,
-and the usual airtime gate:</p>
+and only after RF-TX, CALLSIGN, a <code>+r</code> channel, and the usual airtime gate.
+Chat may CQ into an empty channel; TOPIC still waits for an RF member.</p>
 <table>
 <thead>
 <tr>
@@ -1422,8 +1422,10 @@ on the internet even in <code>#rf</code>.</p>
 <li><strong>Claim a callsign</strong> if it was not restored by <code>IDENTIFY</code>.
    <code>/quote CALLSIGN SM0XYZ</code>.</li>
 </ol>
-<p>Then join <code>#rf</code>. If an RF station is in the channel and the transmitter is on,
-<code>PRIVMSG #rf</code> is radiated. You will get a NOTICE when it actually goes out.</p>
+<p>Then join <code>#rf</code>. If the transmitter is on and you have RF-TX plus a CALLSIGN,
+<code>PRIVMSG #rf</code> is radiated — including as CQ when no RF station has joined
+yet. You will get a NOTICE when it actually goes out. Chat from users
+without RF-TX stays on IRC until a station is in the channel.</p>
 <p>A control operator (<code>OPER</code>) has RF-TX for that session without a grant. They
 still need <code>CALLSIGN</code> before their text is radiated. On a public
 <code>listen.bind</code>, <code>[[opers]]</code> passwords must be Argon2id hashes from
@@ -1516,8 +1518,11 @@ again each session. The mailbox is a cache, not a mail server.</p>
 </tr>
 </tbody>
 </table>
-<p>A <code>+r</code> message is radiated only if the transmitter is on, at least one RF
-station is in the channel, the sender has RF-TX, and they have a CALLSIGN.</p>
+<p>A <code>+r</code> message is radiated if the transmitter is on, the sender has RF-TX and
+a CALLSIGN, and <strong>either</strong> an RF station is already in the channel <strong>or</strong> the
+sender is calling CQ into an empty one (so a station on frequency can hear
+the gateway and join). Chat from users without RF-TX stays on IRC. TOPIC
+still waits for an RF member — do not CQ a topic into silence.</p>
 <h2 id="user-and-member-flags">User and member flags<a class="headerlink" href="#user-and-member-flags" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
