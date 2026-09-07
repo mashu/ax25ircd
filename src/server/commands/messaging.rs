@@ -111,8 +111,14 @@ impl Server {
             let mut text = text;
             let mut truncated = false;
             let air = chat_for_air(&text, notice);
-            let mut allow_rf =
-                air.is_some() && chan.rf && chan.has_rf_members() && self.radio.available();
+            // Keep the empty-channel lock for ordinary users: there is nobody
+            // listening, so their chat stays on IRC. RF-TX (OPER or GRANT) may
+            // still CQ, otherwise a station on frequency can never hear the
+            // gateway and join.
+            let mut allow_rf = air.is_some()
+                && chan.rf
+                && self.radio.available()
+                && (chan.has_rf_members() || self.user_may_tx_rf(uid));
             let mut rf_flooded = false;
             if allow_rf {
                 if !self.policy.rf_channel_rate_ok(
@@ -141,9 +147,7 @@ impl Server {
                 }
             } else if !rf_flooded && chan.rf && air.is_some() {
                 let why = self.channel_air_line(&chan.name);
-                if !why.is_empty() {
-                    self.notice_user(uid, &why);
-                }
+                self.notice_air_reason(uid, &chan.name, &why);
             }
             let d = Delivery::Privmsg {
                 from_nick: sender.nick.clone(),
@@ -165,12 +169,17 @@ impl Server {
                 } else {
                     format!("about {}s of queue ahead of it", eta.as_secs())
                 };
+                let n = chan.rf_member_count();
+                let audience = if n == 0 {
+                    "CQ: no RF station in the channel yet.".to_string()
+                } else {
+                    format!("{n} station(s) on frequency.")
+                };
                 self.notice_user(
                     uid,
                     &format!(
-                        "Queued for RF ({}), {when}. {} station(s) on frequency.",
-                        self.config.radio.callsign,
-                        self.radio.sessions.peers().count()
+                        "Queued for RF ({}), {when}. {audience}",
+                        self.config.radio.callsign
                     ),
                 );
             }

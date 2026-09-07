@@ -25,7 +25,7 @@ use tracing::{debug, warn};
 
 use crate::airc::{encode_fields, AircFrame, Kind, SessionConfig, Sessions};
 use crate::audit::Audit;
-use crate::ax25::{AirtimeShared, Ax25Frame, TncHandle};
+use crate::ax25::{AirtimeShared, Ax25Frame, Class, Keyed, TncHandle};
 use crate::callsign::Callsign;
 use crate::config::Config;
 
@@ -71,6 +71,15 @@ impl TxClass {
             TxClass::Chat => "chat",
         }
     }
+
+    fn scheduler_class(self) -> Class {
+        match self {
+            TxClass::Ack => Class::Ack,
+            TxClass::Control => Class::Control,
+            TxClass::Direct => Class::Direct,
+            TxClass::Chat => Class::Chat,
+        }
+    }
 }
 
 #[derive(Default, Debug, Clone)]
@@ -112,6 +121,7 @@ pub struct Radio {
     /// controlled station must identify the series of transmissions it made,
     /// and must not identify when it has made none — that is just QRM.
     transmitted_since_id: bool,
+    keyed_rx: Option<tokio::sync::mpsc::Receiver<Keyed>>,
 }
 
 /// Result of an operator or automatic identification attempt.
@@ -129,6 +139,7 @@ impl Radio {
             ack_timeout: Duration::from_secs(config.radio.ack_timeout_secs),
             max_retries: config.radio.max_retries,
             peer_idle_timeout: Duration::from_secs(config.radio.peer_idle_timeout_secs),
+            max_peers: config.radio.max_peers,
             ..Default::default()
         });
         let mailbox = Mailbox::new(
@@ -137,6 +148,7 @@ impl Radio {
             config.radio.mailbox_total,
             Duration::from_secs(config.radio.mailbox_ttl_secs),
         );
+        let keyed_rx = tnc.as_ref().and_then(|t| t.take_keyed());
         Self {
             enabled: config.radio.enabled && tnc.is_some(),
             source: config.gateway_callsign(),
@@ -149,6 +161,24 @@ impl Radio {
             stats: Stats::default(),
             last_id: None,
             transmitted_since_id: false,
+            keyed_rx,
+        }
+    }
+
+    /// Start ACK clocks for frames the TNC has just keyed.
+    pub fn drain_keyed(&mut self, now: Instant) {
+        let events: Vec<Keyed> = match &mut self.keyed_rx {
+            Some(rx) => {
+                let mut out = Vec::new();
+                while let Ok(k) = rx.try_recv() {
+                    out.push(k);
+                }
+                out
+            }
+            None => Vec::new(),
+        };
+        for k in events {
+            self.sessions.on_keyed(&k.dest, k.seq, now);
         }
     }
 
@@ -273,7 +303,9 @@ impl Radio {
             }
         };
         let len = ax.encode().len();
-        if tnc.try_send(ax) {
+        let expects_reply = frame.wants_ack();
+        let account = dest.to_string();
+        if tnc.enqueue(ax, class.scheduler_class(), &account, expects_reply) {
             self.stats.rf_frames_tx += 1;
             self.stats.rf_bytes_tx += len as u64;
             self.transmitted_since_id = true;
@@ -534,10 +566,20 @@ impl Radio {
             self.stats.rf_frames_dropped += 1;
             return;
         }
+        if !self.backlog_has_room(self.wire_octets(payload.len()), class) {
+            self.stats.rf_frames_refused += 1;
+            return;
+        }
         // Airtime admission is in seconds; the TNC queue is in frames.
         // A burst of fragments can fill the channel after the backlog check
         // still said yes, and broadcasts are not retried.
-        if chunks.len() > self.tnc.as_ref().map(|t| t.tx_room()).unwrap_or(0) {
+        if chunks.len()
+            > self
+                .tnc
+                .as_ref()
+                .map(|t| t.tx_room_in(class.scheduler_class()))
+                .unwrap_or(0)
+        {
             self.stats.rf_frames_refused += 1;
             return;
         }
@@ -589,7 +631,13 @@ impl Radio {
             } else {
                 payload.len().div_ceil(max).max(1)
             };
-            if fragments > self.tnc.as_ref().map(|t| t.tx_room()).unwrap_or(0) {
+            if fragments
+                > self
+                    .tnc
+                    .as_ref()
+                    .map(|t| t.tx_room_in(class.scheduler_class()))
+                    .unwrap_or(0)
+            {
                 self.stats.rf_frames_refused += 1;
                 return false;
             }

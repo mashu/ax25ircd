@@ -159,8 +159,8 @@ stations heard on the air. An internet user cannot take them.
 ## What is transmitted
 
 Radiation is an **allowlist**. Only these IRC events can key the transmitter,
-and only after RF-TX, CALLSIGN, a `+r` channel with a station on frequency,
-and the usual airtime gate:
+and only after RF-TX, CALLSIGN, a `+r` channel, and the usual airtime gate.
+Chat may CQ into an empty channel; TOPIC still waits for an RF member.
 
 | On the list | |
 |---|---|
@@ -219,8 +219,10 @@ Three things. The nick does **not** have to look like a callsign.
 3. **Claim a callsign** if it was not restored by `IDENTIFY`.
    `/quote CALLSIGN SM0XYZ`.
 
-Then join `#rf`. If an RF station is in the channel and the transmitter is on,
-`PRIVMSG #rf` is radiated. You will get a NOTICE when it actually goes out.
+Then join `#rf`. If the transmitter is on and you have RF-TX plus a CALLSIGN,
+`PRIVMSG #rf` is radiated — including as CQ when no RF station has joined
+yet. You will get a NOTICE when it actually goes out. Chat from users
+without RF-TX stays on IRC until a station is in the channel.
 
 A control operator (`OPER`) has RF-TX for that session without a grant. They
 still need `CALLSIGN` before their text is radiated. On a public
@@ -291,8 +293,11 @@ Set in `[[channels]]` in the config. Reloaded on start. Only `OPER` can change
 | `+k` / `+l` | Key / limit, as usual. |
 | `+n` | Always on. No external messages. |
 
-A `+r` message is radiated only if the transmitter is on, at least one RF
-station is in the channel, the sender has RF-TX, and they have a CALLSIGN.
+A `+r` message is radiated if the transmitter is on, the sender has RF-TX and
+a CALLSIGN, and **either** an RF station is already in the channel **or** the
+sender is calling CQ into an empty one (so a station on frequency can hear
+the gateway and join). Chat from users without RF-TX stays on IRC. TOPIC
+still waits for an RF member — do not CQ a topic into silence.
 
 ## User and member flags
 

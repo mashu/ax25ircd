@@ -7,6 +7,7 @@ pub mod mailbox;
 pub mod radio;
 pub mod state;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -232,6 +233,8 @@ pub struct Server {
     /// IRC connection password (`PASS`). Starts as `server.password`; OPER
     /// `PASSWD` changes it for this process. A restart reloads the file.
     connection_password: Option<String>,
+    /// Last time we told this user why a `+r` message stayed on IRC.
+    air_notices: HashMap<(UserId, String), Instant>,
 }
 
 impl Server {
@@ -246,6 +249,10 @@ impl Server {
             if !ch.topic.is_empty() {
                 chan.topic = Some(ch.topic.clone());
                 chan.topic_setter = config.server.name.clone();
+                chan.topic_time = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
             }
             chan.operators = ch.operators.iter().map(|n| lower(n)).collect();
         }
@@ -286,6 +293,7 @@ impl Server {
             events: None,
             started: SystemTime::now(),
             connection_password,
+            air_notices: HashMap::new(),
         })
     }
 
@@ -404,6 +412,8 @@ impl Server {
     }
 
     fn tick(&mut self, now: Instant) {
+        // ACK timers start at key-down, not at queue time.
+        self.radio.drain_keyed(now);
         // Do not burn ACK retries against a transmitter that cannot key up.
         // The original is held in the TNC until the interlock recovers (or
         // `max_hold`); counting those seconds as failed attempts would mark
@@ -493,7 +503,14 @@ impl Server {
                 .user(&uid)
                 .map(|u| u.prefix())
                 .unwrap_or_default();
-            let _ = self.state.set_nick(&uid, &guest);
+            if !self.state.set_nick(&uid, &guest) {
+                self.notice_user(&uid, "This nick is registered. Disconnecting.");
+                if let UserId::Ip(id) = uid {
+                    self.send_raw(id, "ERROR :Identify timeout on a registered nick".into());
+                }
+                self.quit_user(&uid, "Identify timeout");
+                continue;
+            }
             let d = Delivery::NickChange {
                 old_nick: old.clone(),
                 prefix,
@@ -616,6 +633,9 @@ impl Server {
                 channel,
                 topic,
             }) => {
+                if !self.policy.topic_rate_ok(&channel, Instant::now()) {
+                    return;
+                }
                 let payload = encode_fields(&[channel, nick, &topic]);
                 self.radio.broadcast(Kind::Notice, payload, TxClass::Chat);
             }
@@ -624,6 +644,9 @@ impl Server {
                 channel,
                 join,
             }) => {
+                if !self.policy.presence_rate_ok(&channel, Instant::now()) {
+                    return;
+                }
                 let mark = if join { "+" } else { "-" };
                 let payload = encode_fields(&[channel, nick, mark]);
                 self.radio.broadcast(Kind::Presence, payload, TxClass::Chat);
@@ -665,6 +688,13 @@ impl Server {
                 rf_done = true;
             }
             self.deliver(&uid, d);
+        }
+        // CQ: radiate even when no RF nick is in the channel. Channel chat is
+        // a broadcast, so there is no destination callsign to hang this on.
+        if allow_rf && !rf_done {
+            if let Some(call) = self.config.gateway_callsign() {
+                self.deliver_rf(&call, d);
+            }
         }
     }
 
@@ -718,6 +748,7 @@ impl Server {
             Vec::new()
         };
         self.state.remove_user(uid);
+        self.air_notices.retain(|(u, _), _| u != uid);
         if let UserId::Ip(id) = uid {
             self.clients.disconnect(*id);
         }
@@ -733,7 +764,7 @@ impl Server {
             {
                 self.notice_rf_audience(
                     &ch,
-                    "No RF station remains in this channel. Messages stay on IRC until one joins.",
+                    "No RF station remains in this channel. Users with RF-TX can still CQ.",
                 );
             }
         }
@@ -829,7 +860,8 @@ impl Server {
         }
         if !chan.has_rf_members() {
             return format!(
-                "{channel} is +r, transmitter ON ({}). No RF station is in the channel, so messages stay on IRC until one joins.",
+                "{channel} is +r, transmitter ON ({}). No RF station is in the channel yet. \
+                 Users with RF-TX can still CQ; others stay on IRC.",
                 self.config.radio.callsign
             );
         }
@@ -891,7 +923,9 @@ impl Server {
                 "{channel} is +rm: bridged to amateur radio. CALLSIGN grants +v \
                  (speak on IRC). Messages go on the air only after a control \
                  operator grants RF-TX to a registered nick (RADIO GRANT) — \
-                 everyone else is heard on IRC only."
+                 everyone else is heard on IRC only. You do not need channel \
+                 operator (+o) to chat. With RF-TX you may CQ even if no \
+                 station has joined yet."
             ),
         );
         let status = self.radio.status_line();
@@ -900,6 +934,24 @@ impl Server {
         if !air.is_empty() {
             self.notice_user(uid, &air);
         }
+    }
+
+    /// Why a `+r` message stayed on IRC. Once per user per channel per ten
+    /// minutes: repeating the same sentence on every line doubles the
+    /// client's traffic and does not change what they should do.
+    pub fn notice_air_reason(&mut self, uid: &UserId, channel: &str, why: &str) {
+        if why.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let key = (uid.clone(), lower(channel));
+        if let Some(at) = self.air_notices.get(&key) {
+            if now.duration_since(*at) < Duration::from_secs(600) {
+                return;
+            }
+        }
+        self.air_notices.insert(key, now);
+        self.notice_user(uid, why);
     }
 
     pub fn notice_rf_audience(&mut self, channel: &str, text: &str) {

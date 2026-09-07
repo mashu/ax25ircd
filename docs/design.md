@@ -214,9 +214,11 @@ Channels carry one extra mode: `+r`, "bridged to RF".
   station radiates is not a user-level decision.
 * Channels created on the fly by `JOIN` are never `+r`.
 * An RF station that joins a non-`+r` channel is told `404`.
-* A message to a `+r` channel is radiated only if at least one RF station is
-  in it, the sender holds RF-TX, and they have a CALLSIGN. Nobody listening,
-  or an ordinary IRC client without RF-TX, means the text stays on IRC.
+* A message to a `+r` channel is radiated if the sender holds RF-TX and a
+  CALLSIGN, and either an RF station is already in the channel or they are
+  calling CQ into an empty one. The empty-channel lock remains for everyone
+  else: ordinary IRC chat is not a reason to key the transmitter. TOPIC
+  still requires an RF member.
 
 Everything else (`+m`, `+t`, `+k`, `+l`, `+o`, `+v`) behaves as usual and
 applies to both populations.
@@ -363,8 +365,8 @@ private message is not retried.
 
 * **Multiple RF ports** (2 m + 70 cm, or 1200 + 9600 baud) with per-channel
   port mapping. The TNC layer already carries a KISS port number.
-* **FX.25 / IL2P** forward error correction, where the TNC supports it — pure
-  win on a weak-signal channel and legally uncontroversial.
+* **FX.25 / IL2P** in the TNC (Direwolf `FX25TX 1`). The gateway still sends
+  AX.25 UI frames over KISS; FEC is the modem's job.
 * **Digest mode**: a station on a handheld subscribes to a channel and receives
   a periodic summary instead of every message.
 * **APRS interop**: answer APRS messages addressed to the gateway, so anyone

@@ -60,7 +60,9 @@ impl SessionConfig {
 struct Pending {
     frames: Vec<AircFrame>,
     attempts: u32,
-    next_retry: Instant,
+    /// `None` until the TNC reports the frame keyed. A backlog must not
+    /// manufacture an ACK timeout.
+    next_retry: Option<Instant>,
 }
 
 struct Reassembly {
@@ -87,6 +89,9 @@ pub struct Peer {
     /// Channels this station was KICKed from. A following MSG must not
     /// silently rejoin — that made KICK a no-op on RF.
     kicked: HashSet<String>,
+    /// Session epoch from the last HELLO. A new epoch is a restart: clear
+    /// the dedup window rather than ACKing seq 1 forever.
+    epoch: u16,
 }
 
 impl Peer {
@@ -103,6 +108,7 @@ impl Peer {
             seen: VecDeque::new(),
             reasm: HashMap::new(),
             kicked: HashSet::new(),
+            epoch: 0,
         }
     }
 
@@ -249,7 +255,10 @@ impl Sessions {
 
     /// Unlike [`Sessions::touch`], evicts the quietest peer if the table is
     /// full so a legitimate outgoing message is never dropped on the floor.
-    pub fn force_touch(&mut self, call: &Callsign, now: Instant) -> &mut Peer {
+    pub fn force_touch(&mut self, call: &Callsign, now: Instant) -> Option<&mut Peer> {
+        if self.config.max_peers == 0 {
+            return None;
+        }
         if !self.peers.contains_key(call) && self.peers.len() >= self.config.max_peers {
             if let Some(oldest) = self
                 .peers
@@ -261,7 +270,7 @@ impl Sessions {
                 self.evicted.push(oldest);
             }
         }
-        self.touch(call, now).expect("force_touch made room")
+        self.touch(call, now)
     }
 
     pub fn forget(&mut self, call: &Callsign) {
@@ -269,12 +278,33 @@ impl Sessions {
     }
 
     /// Handle a frame received from `src`.
-    pub fn on_receive(&mut self, src: &Callsign, frame: AircFrame, now: Instant) -> RxOutcome {
+    ///
+    /// `addressed_to_us` is the AX.25 destination check. Broadcasts (to
+    /// `AIRC` / `ID`) must never be ACKed: a single `ACK_REQ` bit on a
+    /// broadcast would make every station in range key up at once.
+    pub fn on_receive(
+        &mut self,
+        src: &Callsign,
+        frame: AircFrame,
+        now: Instant,
+        addressed_to_us: bool,
+    ) -> RxOutcome {
         let cfg = self.config.clone();
-        let Some(peer) = self.touch(src, now) else {
+        let Some(peer) = self.force_touch(src, now) else {
             return RxOutcome::default();
         };
         let mut out = RxOutcome::default();
+
+        if frame.kind == Kind::Hello {
+            let epoch = hello_epoch(&frame);
+            if epoch != peer.epoch {
+                peer.seen.clear();
+                peer.reasm.clear();
+                peer.pending = None;
+                peer.queue.clear();
+                peer.epoch = epoch;
+            }
+        }
 
         if frame.kind == Kind::Ack {
             let acked = frame
@@ -297,14 +327,22 @@ impl Sessions {
             // A duplicate of an already-delivered message is still ACKed:
             // the usual reason for a repeat is that our ACK was lost.
             // Incomplete fragments are not in `seen` and are not ACKed.
-            if frame.wants_ack() {
+            if addressed_to_us && frame.wants_ack() {
                 out.transmit.push(ack_for(frame.seq));
+            }
+            // HELLO is the start of a session. A restarted station whose
+            // sequence space overlapped (no epoch, or the same seq as last
+            // time) must not be ACKed and ignored for half an hour. A true
+            // retry of HELLO only costs a second WELCOME.
+            if frame.kind == Kind::Hello {
+                out.duplicate = false;
+                out.deliver = Some(frame);
             }
             return out;
         }
 
         if frame.frag_total == 1 {
-            if frame.wants_ack() {
+            if addressed_to_us && frame.wants_ack() {
                 out.transmit.push(ack_for(frame.seq));
             }
             remember_seq(peer, frame.seq, cfg.dedup_window);
@@ -355,7 +393,7 @@ impl Sessions {
         let (kind, flg) = (entry.kind, entry.flags);
         peer.reasm.remove(&frame.seq);
         remember_seq(peer, frame.seq, cfg.dedup_window);
-        if frame.wants_ack() || flg & flags::ACK_REQ != 0 {
+        if addressed_to_us && (frame.wants_ack() || flg & flags::ACK_REQ != 0) {
             out.transmit.push(ack_for(frame.seq));
         }
         out.deliver = Some(AircFrame::new(kind, frame.seq, payload).with_flags(flg));
@@ -403,7 +441,9 @@ impl Sessions {
     ) -> SendOutcome {
         let cfg = self.config.clone();
         let seq = self.next_seq();
-        let peer = self.force_touch(dst, now);
+        let Some(peer) = self.force_touch(dst, now) else {
+            return SendOutcome::dropped();
+        };
         let chunks: Vec<&[u8]> = if payload.is_empty() {
             vec![&[]]
         } else {
@@ -481,7 +521,10 @@ impl Sessions {
             let Some(pending) = peer.pending.as_mut() else {
                 continue;
             };
-            if now < pending.next_retry {
+            let Some(deadline) = pending.next_retry else {
+                continue;
+            };
+            if now < deadline {
                 continue;
             }
             if pending.attempts >= cfg.max_retries {
@@ -489,7 +532,7 @@ impl Sessions {
                 continue;
             }
             pending.attempts += 1;
-            pending.next_retry = now + backoff(&cfg, pending.attempts);
+            pending.next_retry = Some(now + backoff(&cfg, pending.attempts));
             for f in &pending.frames {
                 let mut f = f.clone();
                 f.flags |= flags::RETRY;
@@ -517,6 +560,23 @@ impl Sessions {
         }
         out
     }
+
+    /// The TNC has keyed a unicast frame. Start (or restart) the ACK clock
+    /// from this moment, not from enqueue.
+    pub fn on_keyed(&mut self, dest: &Callsign, seq: u16, now: Instant) {
+        let cfg = self.config.clone();
+        let Some(peer) = self.peers.get_mut(dest) else {
+            return;
+        };
+        let Some(pending) = peer.pending.as_mut() else {
+            return;
+        };
+        if pending.frames.first().map(|f| f.seq) != Some(seq) {
+            return;
+        }
+        let attempt = pending.attempts.max(1);
+        pending.next_retry = Some(now + backoff(&cfg, attempt));
+    }
 }
 
 fn ack_for(seq: u16) -> AircFrame {
@@ -526,15 +586,22 @@ fn ack_for(seq: u16) -> AircFrame {
 fn start_pending(
     peer: &mut Peer,
     frames: Vec<AircFrame>,
-    now: Instant,
-    cfg: &SessionConfig,
+    _now: Instant,
+    _cfg: &SessionConfig,
 ) -> Vec<AircFrame> {
     peer.pending = Some(Pending {
         frames: frames.clone(),
         attempts: 0,
-        next_retry: now + backoff(cfg, 1),
+        next_retry: None,
     });
     frames
+}
+
+fn hello_epoch(frame: &AircFrame) -> u16 {
+    frame
+        .field(1)
+        .and_then(|s| u16::from_str_radix(s.trim(), 16).ok())
+        .unwrap_or(0)
 }
 
 fn backoff(cfg: &SessionConfig, attempt: u32) -> Duration {
@@ -575,7 +642,7 @@ mod tests {
 
         let mut delivered = None;
         for f in frames {
-            let out = rx.on_receive(&call(), f, now);
+            let out = rx.on_receive(&call(), f, now, true);
             if out.deliver.is_some() {
                 delivered = out.deliver;
             }
@@ -590,11 +657,11 @@ mod tests {
         let f =
             AircFrame::new(Kind::Msg, 9, encode_fields(&["#rf", "hi"])).with_flags(flags::ACK_REQ);
 
-        let first = rx.on_receive(&call(), f.clone(), now);
+        let first = rx.on_receive(&call(), f.clone(), now, true);
         assert!(first.deliver.is_some());
         assert_eq!(first.transmit.len(), 1);
 
-        let second = rx.on_receive(&call(), f, now);
+        let second = rx.on_receive(&call(), f, now, true);
         assert!(second.deliver.is_none());
         assert!(second.duplicate);
         assert_eq!(second.transmit.len(), 1, "a repeat means our ACK was lost");
@@ -609,10 +676,9 @@ mod tests {
         };
         let mut s = Sessions::new(cfg);
         let mut now = Instant::now();
-        assert_eq!(
-            s.send(&call(), Kind::Msg, b"x".to_vec(), true, now).len(),
-            1
-        );
+        let frames = s.send(&call(), Kind::Msg, b"x".to_vec(), true, now);
+        assert_eq!(frames.len(), 1);
+        s.on_keyed(&call(), frames[0].seq, now);
 
         now += Duration::from_secs(11);
         assert_eq!(s.tick(now).transmit.len(), 1);
@@ -633,12 +699,11 @@ mod tests {
         };
         let mut s = Sessions::new(cfg);
         let mut now = Instant::now();
-        assert_eq!(
-            s.send(&call(), Kind::Msg, b"x".to_vec(), true, now).len(),
-            1
-        );
+        let frames = s.send(&call(), Kind::Msg, b"x".to_vec(), true, now);
+        assert_eq!(frames.len(), 1);
 
-        // Well past every retry deadline, but the transmitter cannot key up.
+        // Well past every retry deadline, but the frame has not keyed, so
+        // there is no retry clock yet.
         now += Duration::from_secs(120);
         let out = s.tick_retries(now, false);
         assert!(out.transmit.is_empty());
@@ -651,7 +716,11 @@ mod tests {
             "the session must still be waiting"
         );
 
-        // Once it can transmit, the first retry is still available.
+        // Key-down starts the clock. A retry is not due until ack_timeout later.
+        s.on_keyed(&call(), frames[0].seq, now);
+        let out = s.tick_retries(now, true);
+        assert!(out.transmit.is_empty());
+        now += Duration::from_secs(11);
         let out = s.tick_retries(now, true);
         assert_eq!(out.transmit.len(), 1);
         assert!(out.lost.is_empty());
@@ -667,7 +736,7 @@ mod tests {
 
         let seq = first[0].seq;
         let ack = AircFrame::new(Kind::Ack, seq, seq.to_be_bytes().to_vec());
-        let out = s.on_receive(&call(), ack, now);
+        let out = s.on_receive(&call(), ack, now, true);
         assert_eq!(out.transmit.len(), 1);
         assert_eq!(out.transmit[0].payload, b"two");
     }
@@ -717,18 +786,18 @@ mod tests {
         let frames = tx.send(&call(), Kind::Msg, b"abcdefghij".to_vec(), true, now);
         assert_eq!(frames.len(), 3);
 
-        let first = rx.on_receive(&call(), frames[0].clone(), now);
+        let first = rx.on_receive(&call(), frames[0].clone(), now, true);
         assert!(first.deliver.is_none());
         assert!(
             first.transmit.is_empty(),
             "ACKing fragment 0 lets the sender drop the rest"
         );
 
-        let second = rx.on_receive(&call(), frames[1].clone(), now);
+        let second = rx.on_receive(&call(), frames[1].clone(), now, true);
         assert!(second.deliver.is_none());
         assert!(second.transmit.is_empty());
 
-        let last = rx.on_receive(&call(), frames[2].clone(), now);
+        let last = rx.on_receive(&call(), frames[2].clone(), now, true);
         assert_eq!(last.deliver.unwrap().payload, b"abcdefghij");
         assert_eq!(last.transmit.len(), 1);
         assert_eq!(last.transmit[0].kind, Kind::Ack);
@@ -759,5 +828,57 @@ mod tests {
             1,
             "the quietest station must be reported so IRC can drop the ghost"
         );
+    }
+
+    #[test]
+    fn a_broadcast_is_never_acked() {
+        let mut rx = Sessions::new(SessionConfig::default());
+        let now = Instant::now();
+        let f =
+            AircFrame::new(Kind::Msg, 9, encode_fields(&["#rf", "hi"])).with_flags(flags::ACK_REQ);
+        let out = rx.on_receive(&call(), f, now, false);
+        assert!(out.deliver.is_some());
+        assert!(
+            out.transmit.is_empty(),
+            "ACK_REQ on a broadcast must not make every station key up"
+        );
+    }
+
+    #[test]
+    fn hello_with_a_new_epoch_clears_the_dedup_window() {
+        let mut rx = Sessions::new(SessionConfig::default());
+        let now = Instant::now();
+        let first =
+            AircFrame::new(Kind::Msg, 1, encode_fields(&["#rf", "old"])).with_flags(flags::ACK_REQ);
+        assert!(rx.on_receive(&call(), first, now, true).deliver.is_some());
+
+        let hello = AircFrame::new(Kind::Hello, 2, encode_fields(&["client/1", "00AB"]));
+        assert!(rx.on_receive(&call(), hello, now, true).deliver.is_some());
+
+        let again = AircFrame::new(Kind::Msg, 1, encode_fields(&["#rf", "after restart"]))
+            .with_flags(flags::ACK_REQ);
+        let out = rx.on_receive(&call(), again, now, true);
+        assert!(
+            out.deliver.is_some(),
+            "a new epoch must forget the old seq window, not ACK-and-drop seq 1"
+        );
+        assert!(!out.duplicate);
+    }
+
+    #[test]
+    fn hello_without_epoch_is_still_delivered_if_seq_was_seen() {
+        let mut rx = Sessions::new(SessionConfig::default());
+        let now = Instant::now();
+        let first =
+            AircFrame::new(Kind::Msg, 1, encode_fields(&["#rf", "old"])).with_flags(flags::ACK_REQ);
+        assert!(rx.on_receive(&call(), first, now, true).deliver.is_some());
+
+        let hello = AircFrame::new(Kind::Hello, 1, encode_fields(&["legacy-client"]));
+        let out = rx.on_receive(&call(), hello, now, true);
+        assert!(
+            out.deliver.is_some(),
+            "a restarted station with no epoch must not be wedged by seq 1"
+        );
+        assert!(!out.duplicate);
     }
 }

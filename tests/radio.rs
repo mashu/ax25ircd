@@ -93,7 +93,7 @@ impl Harness {
         let mut out = Vec::new();
         let mut buf = [0u8; 4096];
         loop {
-            match tokio::time::timeout(Duration::from_millis(150), self.far.read(&mut buf)).await {
+            match tokio::time::timeout(Duration::from_millis(800), self.far.read(&mut buf)).await {
                 Ok(Ok(n)) if n > 0 => {
                     for kf in self.decoder.push(&buf[..n]) {
                         if kf.command != kiss::CMD_DATA {
@@ -477,7 +477,9 @@ async fn a_retransmission_is_sent_without_a_fresh_admission_check() {
         true,
         TxClass::Direct,
     );
-    let _ = h.transmitted().await;
+    let sent = h.transmitted().await;
+    let seq = sent.first().expect("the original should have gone out").seq;
+    h.radio.sessions.on_keyed(&station(), seq, Instant::now());
 
     // The backlog is now full, but the exchange is already part-way done:
     // dropping the retry would leave the peer waiting for something that will

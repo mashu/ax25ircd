@@ -129,6 +129,10 @@ pub struct RadioConfig {
     pub max_retries: u32,
     #[serde(default = "default_idle_timeout")]
     pub peer_idle_timeout_secs: u64,
+    /// Stations remembered at once. A flood of unique sources cannot grow
+    /// forever; the quietest peer is evicted when the table is full.
+    #[serde(default = "default_max_peers")]
+    pub max_peers: usize,
     /// Relay channel join/part notices to RF stations. Cheap on a quiet
     /// channel, expensive on a busy one.
     #[serde(default)]
@@ -296,6 +300,7 @@ impl DutyConfig {
             cooldown: Duration::from_secs(self.cooldown_secs),
             hourly_budget: Duration::from_secs(self.hourly_airtime_secs),
             max_hold: Duration::from_secs(self.max_hold_secs.max(1)),
+            stuffing: 1.05,
         }
     }
 }
@@ -622,6 +627,9 @@ impl Config {
         if self.radio.paclen < 32 || self.radio.paclen > 256 {
             anyhow::bail!("radio.paclen must be between 32 and 256");
         }
+        if self.radio.max_peers == 0 {
+            anyhow::bail!("radio.max_peers must be at least 1");
+        }
         if self.policy.max_rf_fragments == 0 {
             anyhow::bail!("policy.max_rf_fragments must be at least 1");
         }
@@ -723,6 +731,15 @@ impl Config {
                     biggest.as_secs_f64(),
                     allowance.as_secs_f64(),
                     air.window.as_secs()
+                );
+            }
+            if biggest > air.max_continuous {
+                anyhow::bail!(
+                    "radio.duty: a full-length frame is {:.1}s of airtime but max_continuous_secs \
+                     is {}; a single frame would exceed the continuous-run limit. Raise \
+                     max_continuous_secs or lower paclen.",
+                    biggest.as_secs_f64(),
+                    duty.max_continuous_secs
                 );
             }
             if !air.hourly_budget.is_zero() && biggest > air.hourly_budget {
@@ -898,6 +915,9 @@ fn default_max_retries() -> u32 {
 }
 fn default_idle_timeout() -> u64 {
     1800
+}
+fn default_max_peers() -> usize {
+    256
 }
 fn default_tnc_kind() -> String {
     "tcp".into()
@@ -1080,6 +1100,29 @@ name = "#rf"
 rf = true
 "##;
         assert!(Config::from_toml(text).is_err());
+    }
+
+    #[test]
+    fn a_frame_longer_than_max_continuous_is_refused() {
+        let text = r##"
+[server]
+name = "test.example"
+[radio]
+enabled = true
+callsign = "SM0ABC-1"
+paclen = 128
+[[channels]]
+name = "#rf"
+rf = true
+[radio.duty]
+enabled = true
+baud = 300
+max_continuous_secs = 3
+max_duty_percent = 25
+window_secs = 600
+"##;
+        let err = Config::from_toml(text).unwrap_err().to_string();
+        assert!(err.contains("max_continuous_secs"), "{err}");
     }
 
     #[test]

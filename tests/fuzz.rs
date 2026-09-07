@@ -251,7 +251,7 @@ fn the_session_layer_survives_a_hostile_peer() {
         // so cover the legal range and let reassembly deal with the rest.
         f.frag_total = 1 + (rng.below(8)) as u8;
         f.frag_index = (rng.below(f.frag_total as usize)) as u8;
-        s.on_receive(call, f, now);
+        s.on_receive(call, f, now, true);
 
         if i % 500 == 0 {
             now += Duration::from_secs(1);
@@ -493,14 +493,14 @@ fn reliable_delivery_survives_loss_reordering_and_duplication() {
                 }
                 let repeats = if rng.below(6) == 0 { 2 } else { 1 };
                 for _ in 0..repeats {
-                    let out = rx.on_receive(&a, f.clone(), now);
+                    let out = rx.on_receive(&a, f.clone(), now, true);
                     if let Some(msg) = out.deliver {
                         delivered.push(msg.payload);
                     }
                     // ACKs travel back over the same lossy channel.
                     for ack in out.transmit {
                         if rng.below(4) != 0 {
-                            let back = tx.on_receive(&b, ack, now);
+                            let back = tx.on_receive(&b, ack, now, true);
                             in_flight.extend(back.transmit);
                         }
                     }
@@ -549,10 +549,9 @@ fn a_peer_that_never_acknowledges_is_eventually_given_up_on() {
     let call: Callsign = "SM0ABC-7".parse().unwrap();
     let mut now = Instant::now();
 
-    assert_eq!(
-        s.send(&call, Kind::Msg, b"hello".to_vec(), true, now).len(),
-        1
-    );
+    let frames = s.send(&call, Kind::Msg, b"hello".to_vec(), true, now);
+    assert_eq!(frames.len(), 1);
+    s.on_keyed(&call, frames[0].seq, now);
     let mut transmissions = 1;
     let mut lost = false;
     for _ in 0..40 {

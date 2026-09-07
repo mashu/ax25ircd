@@ -41,6 +41,8 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use tokio::sync::Notify;
+
 /// Octets AX.25/KISS adds around the frame we hand to the TNC: opening and
 /// closing flags plus the 16-bit FCS. Small, but at 300 baud it is 100 ms.
 const FRAMING_OCTETS: usize = 4;
@@ -88,6 +90,11 @@ pub struct AirtimeConfig {
     pub hourly_budget: Duration,
     /// A frame held longer than this is dropped rather than transmitted late.
     pub max_hold: Duration,
+    /// Multiplier on the on-wire bit time to cover HDLC bit-stuffing. The
+    /// flags and FCS are counted exactly; stuffing is payload-dependent and
+    /// can add ~20 % on pathological bytes. Under-counting key-down is the
+    /// one error this model must not make, so the default is 5 %.
+    pub stuffing: f64,
 }
 
 impl Default for AirtimeConfig {
@@ -104,6 +111,7 @@ impl Default for AirtimeConfig {
             cooldown: Duration::from_secs(60),
             hourly_budget: Duration::from_secs(900),
             max_hold: Duration::from_secs(120),
+            stuffing: 1.05,
         }
     }
 }
@@ -194,6 +202,9 @@ pub struct AirtimeShared {
     pub deferred: AtomicU64,
     pub dropped_stale: AtomicU64,
     pub dropped_inhibited: AtomicU64,
+    /// Wakes the TNC pump when inhibit, duty, pacing, or the interlock
+    /// changes, so `RADIO OFF` is not stuck behind a thirty-second deferral.
+    pub wake: Notify,
 }
 
 impl Default for AirtimeShared {
@@ -219,6 +230,7 @@ impl Default for AirtimeShared {
             deferred: AtomicU64::new(0),
             dropped_stale: AtomicU64::new(0),
             dropped_inhibited: AtomicU64::new(0),
+            wake: Notify::const_new(),
         }
     }
 }
@@ -270,12 +282,14 @@ impl AirtimeShared {
             Some(p) => u64::from(p.min((HARD_MAX_DUTY * 100.0) as u32)),
         };
         self.duty_pct_override.store(stored, Ordering::Relaxed);
+        self.wake.notify_waiters();
         (stored > 0).then_some(stored as u32)
     }
 
     pub fn set_pacing_override(&self, ms: Option<u64>) {
         self.pacing_ms_override
             .store(ms.unwrap_or(0), Ordering::Relaxed);
+        self.wake.notify_waiters();
     }
 
     pub fn pacing(&self, configured: Duration) -> Duration {
@@ -436,9 +450,12 @@ impl Governor {
     /// Key-down time a frame of `octets` will cost, TXDELAY and TXTAIL
     /// included. This is what the PA actually experiences.
     pub fn airtime_for(&self, octets: usize) -> Duration {
-        let baud = self.cfg.baud.max(1) as u64;
-        let bits = (octets + FRAMING_OCTETS) as u64 * 8;
-        self.cfg.txdelay + Duration::from_micros(bits * 1_000_000 / baud) + self.cfg.txtail
+        let baud = self.cfg.baud.max(1) as f64;
+        let bits = (octets + FRAMING_OCTETS) as f64 * 8.0;
+        let stuffed = bits * self.cfg.stuffing.max(1.0);
+        self.cfg.txdelay
+            + Duration::from_micros((stuffed * 1_000_000.0 / baud) as u64)
+            + self.cfg.txtail
     }
 
     /// The longest window we have to remember bursts for.
@@ -714,6 +731,7 @@ mod tests {
             cooldown: Duration::from_secs(60),
             hourly_budget: Duration::ZERO,
             max_hold: Duration::from_secs(120),
+            stuffing: 1.05,
             enabled: true,
         }
     }
@@ -724,8 +742,9 @@ mod tests {
         // 128 octets of info plus AX.25 addressing is ~158 octets on the wire.
         // (158 + 4) * 8 / 300 = 4.32 s, plus 0.7 s of TXDELAY/TXTAIL.
         let t = g.airtime_for(158);
+        // 4.32 s of bits × 1.05 stuffing + 0.7 s of TXDELAY/TXTAIL ≈ 5.24 s.
         assert!(
-            t > Duration::from_millis(4900) && t < Duration::from_millis(5100),
+            t > Duration::from_millis(5100) && t < Duration::from_millis(5400),
             "{t:?}"
         );
     }

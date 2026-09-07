@@ -4,12 +4,14 @@ pub mod address;
 pub mod airtime;
 pub mod frame;
 pub mod kiss;
+pub mod scheduler;
 pub mod tnc;
 
 pub use address::Address;
 pub use airtime::{AirtimeConfig, AirtimeShared, DeferReason, Governor, TxDecision};
 pub use frame::{Ax25Frame, CONTROL_UI, PID_NO_L3};
-pub use tnc::{TncConfig, TncHandle, TncLink};
+pub use scheduler::{Class, Poll, Queued, Scheduler, SchedulerConfig};
+pub use tnc::{Keyed, TncConfig, TncHandle, TncLink};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Ax25Error {

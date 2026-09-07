@@ -115,6 +115,7 @@ pub async fn run_once(config: &InterlockConfig) -> Check {
 pub fn spawn(config: InterlockConfig, shared: Arc<AirtimeShared>) {
     // Until the first check succeeds, the transmitter stays down.
     shared.interlock_ok.store(false, Ordering::Release);
+    shared.wake.notify_waiters();
     info!(
         command = %config.command,
         "transmit interlock enabled; the transmitter stays inhibited until it passes"
@@ -129,6 +130,7 @@ pub fn spawn(config: InterlockConfig, shared: Arc<AirtimeShared>) {
             // Log transitions, not every poll: this runs every thirty seconds
             // for the life of the process.
             if last_ok != Some(ok) {
+                shared.wake.notify_waiters();
                 if ok {
                     info!("transmit interlock passed; transmitting is permitted again");
                 } else {

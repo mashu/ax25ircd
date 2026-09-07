@@ -20,6 +20,7 @@ use crate::airc::{encode_fields, AircFrame, Kind, Sessions};
 use crate::ax25::tnc::{self, TncLink};
 use crate::ax25::AirtimeConfig;
 use crate::ax25::Ax25Frame;
+use crate::ax25::Keyed;
 use crate::callsign::Callsign;
 
 pub struct Args {
@@ -209,6 +210,14 @@ fn parse_inner<I: IntoIterator<Item = String>>(argv: I) -> anyhow::Result<Option
     }))
 }
 
+fn random_epoch() -> u16 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(1);
+    (nanos as u16) ^ ((nanos >> 16) as u16)
+}
+
 pub struct Station {
     pub args: Args,
     tnc: tnc::TncHandle,
@@ -219,16 +228,25 @@ pub struct Station {
     /// Collected rather than printed, so the protocol logic can be tested by
     /// asserting on what the station would have said. `main` drains it.
     output: Vec<String>,
+    epoch: u16,
+    last_rx: Option<Instant>,
+    last_hello: Instant,
+    keyed_rx: Option<tokio::sync::mpsc::Receiver<Keyed>>,
 }
 
 impl Station {
     pub fn new(args: Args, tnc: tnc::TncHandle, sessions: Sessions) -> Self {
+        let keyed_rx = tnc.take_keyed();
         Self {
             args,
             tnc,
             sessions,
             current: None,
             output: Vec::new(),
+            epoch: random_epoch(),
+            last_rx: None,
+            last_hello: Instant::now(),
+            keyed_rx,
         }
     }
 
@@ -250,11 +268,46 @@ impl Station {
     }
 
     pub fn tick(&mut self, now: Instant) -> bool {
+        let keyed: Vec<Keyed> = match &mut self.keyed_rx {
+            Some(rx) => {
+                let mut out = Vec::new();
+                while let Ok(k) = rx.try_recv() {
+                    out.push(k);
+                }
+                out
+            }
+            None => Vec::new(),
+        };
+        for k in keyed {
+            self.sessions.on_keyed(&k.dest, k.seq, now);
+        }
+        // Resend HELLO after we have been in a QSO and then gone quiet — a
+        // HELLO lost in a collision is the one frame later traffic cannot
+        // recover. Do not fire on a station that has never heard anyone:
+        // the initial HELLO is already in flight and has its own ACK timer.
+        if let Some(heard) = self.last_rx {
+            if now.saturating_duration_since(heard) > Duration::from_secs(5 * 60)
+                && now.saturating_duration_since(self.last_hello) > Duration::from_secs(60)
+            {
+                self.send_hello();
+                self.last_hello = now;
+            }
+        }
         let outcome = self.sessions.tick(now);
         for (_, f) in outcome.transmit {
             self.transmit(f);
         }
         !outcome.lost.is_empty()
+    }
+
+    pub fn send_hello(&mut self) {
+        let epoch = format!("{:04X}", self.epoch);
+        self.send(
+            Kind::Hello,
+            encode_fields(&["ax25irc-station/1", &epoch]),
+            true,
+        );
+        self.last_hello = Instant::now();
     }
 }
 
@@ -374,8 +427,12 @@ impl Station {
             return;
         };
         let now = Instant::now();
+        self.last_rx = Some(now);
         let gateway = self.args.gateway.clone();
-        let outcome = self.sessions.on_receive(&gateway, frame, now);
+        let addressed_to_us = *dest == self.args.call;
+        let outcome = self
+            .sessions
+            .on_receive(&gateway, frame, now, addressed_to_us);
         for f in outcome.transmit {
             self.transmit(f);
         }
@@ -844,6 +901,10 @@ mod tests {
     async fn a_gateway_that_stops_answering_is_reported() {
         let (mut s, _far) = station();
         s.handle_input("/join #rf"); // reliable, so it waits for an ACK
+                                     // The ACK clock starts at key-down. Give the loopback TNC a moment
+                                     // to actually transmit so `on_keyed` can start it.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        s.tick(Instant::now());
         let mut now = Instant::now();
         let mut lost = false;
         for _ in 0..10 {

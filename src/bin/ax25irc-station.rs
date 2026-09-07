@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
     let channel = args.channel.clone();
     let mut station = Station::new(args, tnc, sessions);
 
-    station.send(Kind::Hello, encode_fields(&["ax25irc-station/1"]), true);
+    station.send_hello();
     if let Some(chan) = channel {
         station.send(Kind::Join, encode_fields(&[&chan]), true);
         station.set_channel(Some(chan));

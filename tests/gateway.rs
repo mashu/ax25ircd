@@ -237,7 +237,7 @@ impl Harness {
         let mut out = Vec::new();
         let mut buf = [0u8; 4096];
         loop {
-            match tokio::time::timeout(Duration::from_millis(150), self.far.read(&mut buf)).await {
+            match tokio::time::timeout(Duration::from_millis(500), self.far.read(&mut buf)).await {
                 Ok(Ok(0)) | Err(_) => break,
                 Ok(Ok(n)) => {
                     for kf in self.decoder.push(&buf[..n]) {
@@ -640,6 +640,68 @@ async fn callsign_alone_does_not_radiate() {
     assert!(
         tx.iter().all(|(_, a)| a.kind != Kind::Msg),
         "ordinary IRC clients must not key the transmitter"
+    );
+}
+
+#[tokio::test]
+async fn rf_tx_can_cq_when_no_station_has_joined() {
+    let mut h = Harness::new().await;
+    h.oper_and_callsign();
+    h.send("JOIN #rf");
+    h.drain_client();
+    let _ = h.transmitted().await;
+
+    h.send("PRIVMSG #rf :cq cq anyone on frequency");
+    let lines = h.drain_client();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("Queued for RF") && l.contains("CQ")),
+        "the sender should be told this is a CQ into an empty channel: {lines:?}"
+    );
+    let tx = h.transmitted().await;
+    let msg = tx.iter().find(|(_, a)| a.kind == Kind::Msg);
+    assert!(
+        msg.is_some(),
+        "OPER + CALLSIGN must be able to CQ so a station on frequency can hear the gateway: {:?}",
+        tx.iter().map(|(_, a)| a.kind).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        msg.unwrap().1.fields(),
+        vec!["#rf", "alice", "cq cq anyone on frequency"]
+    );
+}
+
+#[tokio::test]
+async fn without_rf_tx_an_empty_channel_stays_on_irc() {
+    let mut h = Harness::new().await;
+    h.send("CALLSIGN SM0XYZ");
+    h.send("JOIN #rf");
+    h.drain_client();
+    let _ = h.transmitted().await;
+
+    h.send("PRIVMSG #rf :hello");
+    let lines = h.drain_client();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("No RF station") || l.contains("can still CQ")),
+        "the empty-channel lock must still apply without RF-TX: {lines:?}"
+    );
+    let tx = h.transmitted().await;
+    assert!(
+        tx.iter().all(|(_, a)| a.kind != Kind::Msg),
+        "ordinary chat must not key an empty frequency: {:?}",
+        tx.iter().map(|(_, a)| a.kind).collect::<Vec<_>>()
+    );
+
+    h.send("PRIVMSG #rf :hello again");
+    let again = h.drain_client();
+    assert!(
+        again
+            .iter()
+            .all(|l| !l.contains("No RF station") && !l.contains("can still CQ")),
+        "the same explanation must not be repeated on every line: {again:?}"
     );
 }
 

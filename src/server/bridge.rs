@@ -30,6 +30,21 @@ impl Server {
         }
         let src = frame.source.call.clone();
 
+        // Identification is addressed to `ID`, not to us. Log it before the
+        // destination check or the Kind::Id arm is dead.
+        if frame.destination.call.to_string() == "ID" {
+            if let Ok(airc) = AircFrame::decode(&frame.info) {
+                if airc.kind == Kind::Id {
+                    info!(
+                        target: "rf::monitor",
+                        %src,
+                        "identification: {}",
+                        airc.fields().join(" ")
+                    );
+                }
+            }
+        }
+
         // Our own transmission coming back through a digipeater.
         if self.config.gateway_callsign().as_ref() == Some(&src) {
             return;
@@ -76,7 +91,7 @@ impl Server {
             return;
         }
 
-        let outcome = self.radio.sessions.on_receive(&src, airc, now);
+        let outcome = self.radio.sessions.on_receive(&src, airc, now, true);
         for f in outcome.transmit {
             self.transmit_airc(&src, f);
         }
@@ -232,9 +247,7 @@ impl Server {
                     TxClass::Control,
                 );
             }
-            Kind::Id => {
-                info!(target: "rf::monitor", %src, "identification: {}", fields.join(" "));
-            }
+            Kind::Id => {}
             // Replies we never expect to receive, and ACKs, which the session
             // layer has already consumed.
             Kind::Ack
@@ -273,10 +286,9 @@ impl Server {
                 return false;
             }
         }
-        self.radio
-            .sessions
-            .force_touch(call, Instant::now())
-            .registered = true;
+        if let Some(peer) = self.radio.sessions.force_touch(call, Instant::now()) {
+            peer.registered = true;
+        }
         true
     }
 

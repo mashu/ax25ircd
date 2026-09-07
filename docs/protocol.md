@@ -52,7 +52,7 @@ it (the receiving station has no other way to know who spoke).
 
 | Kind | Value | Direction | Payload fields |
 |---|---|---|---|
-| `HELLO` | 0x01 | up | (optional) client name/version |
+| `HELLO` | 0x01 | up | client name/version?, session epoch as 4 hex digits? |
 | `WELCOME` | 0x02 | down | server name, first MOTD line |
 | `JOIN` | 0x03 | up | channel |
 | `PART` | 0x04 | up | channel, reason? |
@@ -183,6 +183,17 @@ plausible amateur callsign creates the station's presence, and a `MSG` to a
 bridged channel auto-joins it. A station that loses its `JOIN` in a collision
 should not lose its conversation too.
 
+A station that has restarted **must** send `HELLO` again. The optional second
+field is a 16-bit session epoch, four uppercase hex digits, chosen randomly
+at process start. A `HELLO` with a different epoch than last time clears that
+station's duplicate-suppression window, so seq 1 after a reboot is not
+mistaken for a replay of the previous session. A client that omits the epoch
+is still accepted; the gateway will re-deliver a `HELLO` whose sequence
+number it has already seen, rather than wedging the station.
+
+A `HELLO` may also carry a client name and version string in the first field
+for diagnostics; the gateway does not act on it.
+
 ## 7. Worked example
 
 Station `SM0ABC-7` says "hi all" in `#rf`.
@@ -214,8 +225,9 @@ it. When `alice` (identified as `SM0XYZ`) replies, the gateway broadcasts:
 
 The magic contains the version digit. A future AIRC/2 uses `A2`; an AIRC/1
 implementation ignores it as foreign traffic, which is the correct behaviour on
-a shared channel. `HELLO` may carry a client name and version string for
-diagnostics; the gateway does not act on it.
+a shared channel. `HELLO`'s first field may carry a client name and version
+for diagnostics; the gateway does not act on it. The optional second field is
+the session epoch described in §6.
 
 ## 9. What is deliberately absent
 

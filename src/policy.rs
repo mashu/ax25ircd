@@ -102,6 +102,8 @@ pub struct Policy {
     rf_channel: RateLimiter,
     ip_cmds: RateLimiter,
     identify: RateLimiter,
+    topic: RateLimiter,
+    presence: RateLimiter,
 }
 
 impl Policy {
@@ -111,6 +113,12 @@ impl Policy {
         let rf_channel = RateLimiter::new(config.rf_channel_msgs_per_min, config.rf_channel_burst);
         let ip_cmds = RateLimiter::new(config.ip_cmds_per_min, config.ip_cmd_burst);
         let identify = RateLimiter::new(config.identify_per_min, config.identify_burst);
+        // Topic and presence are cheap individually and expensive as a flood.
+        // Their own buckets, so a chatty channel does not also lock out a
+        // genuine topic change, and join/part cycling cannot fill the chat
+        // backlog.
+        let topic = RateLimiter::new(6, 2);
+        let presence = RateLimiter::new(12, 4);
         Self {
             config,
             rf_out,
@@ -118,6 +126,8 @@ impl Policy {
             rf_channel,
             ip_cmds,
             identify,
+            topic,
+            presence,
         }
     }
 
@@ -160,6 +170,14 @@ impl Policy {
 
     pub fn identify_rate_ok(&mut self, key: &str, now: Instant) -> bool {
         self.identify.check(key, now)
+    }
+
+    pub fn topic_rate_ok(&mut self, channel: &str, now: Instant) -> bool {
+        self.topic.check(channel, now)
+    }
+
+    pub fn presence_rate_ok(&mut self, channel: &str, now: Instant) -> bool {
+        self.presence.check(channel, now)
     }
 
     /// Check and normalise a message body that is about to be transmitted.

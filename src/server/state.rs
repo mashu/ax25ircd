@@ -187,6 +187,10 @@ impl Channel {
     pub fn has_rf_members(&self) -> bool {
         self.members.keys().any(|u| u.is_rf())
     }
+
+    pub fn rf_member_count(&self) -> usize {
+        self.members.keys().filter(|u| u.is_rf()).count()
+    }
 }
 
 #[derive(Default)]

@@ -9,8 +9,8 @@
 
 use std::io;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream};
 use tokio::net::TcpStream;
@@ -20,6 +20,8 @@ use tracing::{debug, info, warn};
 use super::airtime::{AirtimeConfig, AirtimeShared, Governor, TxDecision};
 use super::frame::Ax25Frame;
 use super::kiss::{self, KissDecoder};
+use super::scheduler::{Class, Poll, Queued, Scheduler, SchedulerConfig};
+use crate::callsign::Callsign;
 
 pub trait ReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> ReadWrite for T {}
@@ -119,16 +121,20 @@ impl TncConfig {
     }
 }
 
+/// A frame that has just been written to the TNC. The session layer starts
+/// its ACK clock here, not at enqueue: a message sitting behind the governor
+/// must not be declared lost before it has keyed.
+#[derive(Clone, Debug)]
+pub struct Keyed {
+    pub dest: Callsign,
+    pub seq: u16,
+}
+
 /// Handle used by the rest of the server to transmit.
 #[derive(Clone)]
 pub struct TncHandle {
-    tx: mpsc::Sender<Ax25Frame>,
-    /// Station identification only. Kept separate from `tx` because an ID is
-    /// not ordinary traffic: it is the one transmission a station is
-    /// *required* to make, so it must not sit behind a backlog, and it must
-    /// still go out when the operator has inhibited everything else — a
-    /// station signing off owes the band its callsign.
-    priority: mpsc::Sender<Ax25Frame>,
+    scheduler: Arc<StdMutex<Scheduler<Ax25Frame>>>,
+    keyed_rx: Arc<StdMutex<Option<mpsc::Receiver<Keyed>>>>,
     airtime: Arc<AirtimeShared>,
     /// A copy of the governor's cost model, so the sender can price a frame
     /// before committing to it. The governor itself lives in the TNC task.
@@ -142,11 +148,22 @@ impl TncHandle {
         &self.airtime
     }
 
+    /// Take the key-down event stream. Once, at startup; later calls return
+    /// `None`.
+    pub fn take_keyed(&self) -> Option<mpsc::Receiver<Keyed>> {
+        self.keyed_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
     /// Stop transmitting *now*. Frames already queued are discarded rather
     /// than radiated later: an operator who says "off" means off, not
-    /// "off once the backlog has drained".
+    /// "off once the backlog has drained". Identification is kept so a
+    /// sign-off can still go out.
     pub fn set_inhibit(&self, inhibit: bool) {
         self.airtime.inhibit.store(inhibit, Ordering::Release);
+        self.airtime.wake.notify_waiters();
     }
 
     pub fn inhibited(&self) -> bool {
@@ -157,13 +174,7 @@ impl TncHandle {
     /// is not stuck behind chat, but still waits for the airtime clock and
     /// the governor — an ID is key-down time like anything else.
     pub fn try_send_id(&self, frame: Ax25Frame) -> bool {
-        match self.priority.try_send(frame) {
-            Ok(()) => true,
-            Err(e) => {
-                warn!("station ID could not be queued: {e}");
-                false
-            }
-        }
+        self.enqueue(frame, Class::Id, "id", false)
     }
 
     /// Key-down time a frame of this size will cost.
@@ -182,69 +193,124 @@ impl TncHandle {
         self.airtime.eta()
     }
 
-    /// How many ordinary frames `try_send` will still accept. Identification
-    /// uses a separate queue and is not counted here.
-    pub fn tx_room(&self) -> usize {
-        self.tx.capacity()
+    /// How many frames of this class `enqueue` will still accept.
+    pub fn tx_room_in(&self, class: Class) -> usize {
+        self.scheduler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .room_in(class)
     }
 
-    /// Queue a frame for transmission. Returns false if the transmit queue is
-    /// full, which is a normal condition on a congested channel and must be
-    /// handled by the caller (usually: drop, count, and tell the user).
-    ///
-    /// The frame's airtime is added to the published backlog here and removed
-    /// by the TNC task when the frame is radiated or dropped, so both sides
-    /// of the channel keep the figure honest.
+    /// How many ordinary (chat) frames `try_send` will still accept.
+    pub fn tx_room(&self) -> usize {
+        self.tx_room_in(Class::Chat)
+    }
+
+    /// Queue a frame as channel conversation. Tests and the station client
+    /// use this; the gateway passes an explicit class via [`TncHandle::enqueue`].
     pub fn try_send(&self, frame: Ax25Frame) -> bool {
-        let cost = self.airtime_for(frame.encode().len()).as_millis() as u64;
-        match self.tx.try_send(frame) {
+        let account = frame.destination.call.to_string();
+        self.enqueue(frame, Class::Chat, &account, false)
+    }
+
+    /// Queue a frame in a specific class. Returns false if that class is full,
+    /// which is a normal condition on a congested channel and must be handled
+    /// by the caller (usually: drop, count, and tell the user).
+    pub fn enqueue(
+        &self,
+        frame: Ax25Frame,
+        class: Class,
+        account: &str,
+        expects_reply: bool,
+    ) -> bool {
+        let cost = self.airtime_for(frame.encode().len());
+        let item = Queued {
+            payload: frame,
+            class,
+            account: account.to_string(),
+            cost,
+            queued_at: Instant::now(),
+            expects_reply,
+        };
+        let mut sched = self.scheduler.lock().unwrap_or_else(|e| e.into_inner());
+        match sched.push(item) {
             Ok(()) => {
-                self.airtime.queued_ms.fetch_add(cost, Ordering::Relaxed);
-                self.airtime.queued_frames.fetch_add(1, Ordering::Relaxed);
+                publish_queue(&self.airtime, &sched);
+                self.airtime.wake.notify_waiters();
                 true
             }
-            Err(e) => {
-                warn!("TX queue full, dropping frame: {e}");
+            Err(_) => {
+                warn!("TX queue full ({})", class.as_str());
                 false
             }
         }
     }
 }
 
-/// Subtract a frame's airtime from the published backlog once it has left the
-/// queue, whether it was transmitted or dropped. Saturating, because the two
-/// sides update independently and a negative backlog is meaningless.
-fn release_queued(shared: &AirtimeShared, governor: &Governor, octets: usize) {
-    let cost = governor.airtime_for(octets).as_millis() as u64;
-    let _ = shared
+fn publish_queue(shared: &AirtimeShared, sched: &Scheduler<Ax25Frame>) {
+    shared
         .queued_ms
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |q| {
-            Some(q.saturating_sub(cost))
-        });
-    let _ = shared
+        .store(sched.queued_airtime().as_millis() as u64, Ordering::Relaxed);
+    shared
         .queued_frames
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-            Some(n.saturating_sub(1))
-        });
+        .store(sched.len() as u64, Ordering::Relaxed);
+}
+
+/// Sequence number of an AIRC payload, if the information field is one.
+/// Kept here so the TNC layer does not have to depend on `airc`.
+fn airc_seq(info: &[u8]) -> Option<u16> {
+    if info.len() >= 8 && info[0] == b'A' && info[1] == b'1' {
+        Some(u16::from_be_bytes([info[4], info[5]]))
+    } else {
+        None
+    }
 }
 
 /// Start the TNC task. Received frames are delivered on the returned channel.
 pub fn spawn(config: TncConfig) -> (TncHandle, mpsc::Receiver<Ax25Frame>) {
-    let (tx_out, rx_out) = mpsc::channel::<Ax25Frame>(config.tx_queue_depth);
-    let (tx_id, rx_id) = mpsc::channel::<Ax25Frame>(4);
     let (tx_in, rx_in) = mpsc::channel::<Ax25Frame>(256);
+    let (keyed_tx, keyed_rx) = mpsc::channel::<Keyed>(64);
     let airtime = Arc::new(AirtimeShared::default());
-    tokio::spawn(run(config.clone(), rx_out, rx_id, tx_in, airtime.clone()));
+    let scheduler = Arc::new(StdMutex::new(Scheduler::new(scheduler_from_tnc(&config))));
+    tokio::spawn(run(
+        config.clone(),
+        tx_in,
+        keyed_tx,
+        scheduler.clone(),
+        airtime.clone(),
+    ));
     let cost = config.airtime.clone();
     (
         TncHandle {
-            tx: tx_out,
-            priority: tx_id,
+            scheduler,
+            keyed_rx: Arc::new(StdMutex::new(Some(keyed_rx))),
             airtime,
             cost,
         },
         rx_in,
     )
+}
+
+/// Scheduler timings derived from the same numbers the governor prices with.
+/// A 3.5 s reply window is right at 300 baud and a test failure at 9600.
+fn scheduler_from_tnc(config: &TncConfig) -> SchedulerConfig {
+    let mut cfg = SchedulerConfig::default();
+    cfg.max_hold = config.airtime.max_hold;
+    cfg.min_gap = config.tx_pacing;
+    let gov = Governor::new(config.airtime.clone());
+    // Tests set tx_pacing to zero so a frame that was transmitted is not
+    // mistaken for one that was not. Shrink the half-duplex guards to match;
+    // production pacing (seconds) keeps the 300-baud-sized windows.
+    if config.tx_pacing.is_zero() {
+        cfg.reply_window = Duration::from_millis(20);
+        cfg.rx_guard = Duration::from_millis(20);
+    } else {
+        cfg.reply_window = gov.airtime_for(40) + Duration::from_millis(200);
+        cfg.rx_guard = config.airtime.txdelay + Duration::from_millis(80);
+    }
+    cfg.depth[Class::Chat as usize] = config.tx_queue_depth.max(1);
+    cfg.depth[Class::Id as usize] = 4;
+    cfg
 }
 
 async fn connect(link: &TncLink) -> io::Result<Box<dyn ReadWrite>> {
@@ -269,37 +335,20 @@ async fn connect(link: &TncLink) -> io::Result<Box<dyn ReadWrite>> {
     }
 }
 
-/// Everything that survives a reconnect: the frames waiting to go out, the
-/// one the pump is holding, and where received frames go.
-///
-/// Grouped so a link failure cannot lose any of it. The held frame in
-/// particular has already reserved airtime in the published backlog, so
-/// dropping it would leak that reservation permanently.
+/// Where received frames go. The transmit scheduler outlives reconnects the
+/// same way: a dropped TNC must not forget a sign-off ID or a held message.
 struct Link {
-    tx_queue: mpsc::Receiver<Ax25Frame>,
-    id_queue: mpsc::Receiver<Ax25Frame>,
     rx_sink: mpsc::Sender<Ax25Frame>,
-    pending: Option<(Ax25Frame, tokio::time::Instant)>,
-    /// Identification that arrived while the interlock was down. Lives on
-    /// `Link` so a TNC reconnect cannot forget a sign-off that has not keyed
-    /// yet.
-    held_id: Option<Ax25Frame>,
 }
 
 async fn run(
     config: TncConfig,
-    tx_queue: mpsc::Receiver<Ax25Frame>,
-    id_queue: mpsc::Receiver<Ax25Frame>,
     rx_sink: mpsc::Sender<Ax25Frame>,
+    keyed_tx: mpsc::Sender<Keyed>,
+    scheduler: Arc<StdMutex<Scheduler<Ax25Frame>>>,
     shared: Arc<AirtimeShared>,
 ) {
-    let mut state = Link {
-        tx_queue,
-        id_queue,
-        rx_sink,
-        pending: None,
-        held_id: None,
-    };
+    let mut state = Link { rx_sink };
     // The governor outlives individual TNC connections on purpose: airtime
     // already radiated does not stop counting because Direwolf restarted.
     let mut governor = Governor::new(config.airtime.clone());
@@ -309,14 +358,30 @@ async fn run(
             Ok(link) => {
                 info!(?config.link, "TNC connected");
                 backoff = Duration::from_secs(1);
-                if let Err(e) = pump(&config, link, &mut state, &mut governor, &shared).await {
+                if let Err(e) = pump(
+                    &config,
+                    link,
+                    &mut state,
+                    &mut governor,
+                    &shared,
+                    &scheduler,
+                    &keyed_tx,
+                )
+                .await
+                {
                     warn!("TNC link closed: {e}");
                 }
             }
             Err(e) => warn!("TNC connect failed: {e}"),
         }
         if matches!(config.link, TncLink::Loopback(_)) {
-            // Nothing to reconnect to; the harness is gone.
+            // Nothing to reconnect to; the harness is gone. Release anything
+            // still queued so admission control cannot see a phantom backlog.
+            let mut sched = scheduler.lock().unwrap_or_else(|e| e.into_inner());
+            let leftover = sched.drain();
+            publish_queue(&shared, &sched);
+            drop(sched);
+            let _ = leftover;
             return;
         }
         tokio::time::sleep(backoff).await;
@@ -330,14 +395,10 @@ async fn pump(
     state: &mut Link,
     governor: &mut Governor,
     shared: &AirtimeShared,
+    scheduler: &StdMutex<Scheduler<Ax25Frame>>,
+    keyed_tx: &mpsc::Sender<Keyed>,
 ) -> io::Result<()> {
-    let Link {
-        tx_queue,
-        id_queue,
-        rx_sink,
-        pending,
-        held_id,
-    } = state;
+    let rx_sink = &state.rx_sink;
     // Push KISS parameters at connect.
     //
     // TXDELAY and TXTAIL come from the airtime config rather than a separate
@@ -373,54 +434,60 @@ async fn pump(
 
     let mut decoder = KissDecoder::new(config.max_frame);
     let mut buf = vec![0u8; 4096];
-    // Earliest the pacing gate lets us key up again. A fresh connection has
-    // not transmitted yet, so the gate starts open.
-    let mut next_tx = tokio::time::Instant::now();
 
     loop {
-        // Discard anything queued while the transmitter is inhibited. This is
-        // the operator's kill switch: it must take effect on the frames that
-        // are already in flight, not just on the next one.
-        //
-        // The safety interlock is not a kill switch. A failing SWR check
-        // must not throw away the queue — that is traffic already admitted,
-        // and shredding it makes the session layer retry into a void until
-        // it gives the station up for lost. Hold instead; `max_hold` still
-        // drops what has waited too long.
         if shared.inhibit.load(Ordering::Acquire) {
-            if let Some((frame, _)) = pending.take() {
-                release_queued(shared, governor, frame.encode().len());
-                shared.dropped_inhibited.fetch_add(1, Ordering::Relaxed);
-            }
-            while let Ok(frame) = tx_queue.try_recv() {
-                release_queued(shared, governor, frame.encode().len());
-                shared.dropped_inhibited.fetch_add(1, Ordering::Relaxed);
+            let dropped = scheduler
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .drain_except(Class::Id);
+            if !dropped.is_empty() {
+                shared
+                    .dropped_inhibited
+                    .fetch_add(dropped.len() as u64, Ordering::Relaxed);
+                let sched = scheduler.lock().unwrap_or_else(|e| e.into_inner());
+                publish_queue(shared, &sched);
             }
         }
 
-        // Pick up any live override a control operator has set. Cheap enough
-        // to do every time round, and it means `RADIO LIMIT` takes effect on
-        // the next frame rather than the next restart.
         governor.set_duty(shared.duty_limit(config.airtime.max_duty));
         let pacing = shared.pacing(config.tx_pacing);
+        scheduler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_min_gap(pacing);
 
-        let now_tx = tokio::time::Instant::now();
-        let far_future = now_tx + Duration::from_secs(3600);
-        let mut wake = far_future;
-        if pending.is_some() {
-            wake = next_tx;
-        }
-        if let Some((_, queued_at)) = pending.as_ref() {
-            // Wake to drop stale data even when an ID owns the transmitter.
-            wake = wake.min(*queued_at + config.airtime.max_hold);
-        }
-        if held_id.is_some() {
-            if shared.interlock_failed() {
-                wake = wake.min(now_tx + Duration::from_millis(200));
-            } else {
-                wake = wake.min(next_tx);
+        let now = Instant::now();
+        let expired = scheduler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .expire(now);
+        if !expired.is_empty() {
+            shared
+                .dropped_stale
+                .fetch_add(expired.len() as u64, Ordering::Relaxed);
+            for item in &expired {
+                warn!(
+                    "dropping a frame held {:?} — stale traffic is worse than no traffic",
+                    now.saturating_duration_since(item.queued_at)
+                );
             }
+            let sched = scheduler.lock().unwrap_or_else(|e| e.into_inner());
+            publish_queue(shared, &sched);
         }
+
+        let poll = scheduler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .poll(now);
+        let interlock = shared.interlock_failed();
+        let now_tx = tokio::time::Instant::now();
+        let wake = match poll {
+            Poll::Idle => now_tx + Duration::from_secs(3600),
+            Poll::Wait(d) => now_tx + d,
+            Poll::Ready if interlock => now_tx + Duration::from_millis(200),
+            Poll::Ready => now_tx,
+        };
 
         tokio::select! {
             read = link.read(&mut buf) => {
@@ -433,12 +500,15 @@ async fn pump(
                         continue;
                     }
                     if kf.port != config.kiss_port {
-                        // Another radio port on the same TNC. Not ours.
                         continue;
                     }
                     match Ax25Frame::decode(&kf.payload) {
                         Ok(frame) => {
                             debug!(target: "rf::rx", "{}", frame.to_monitor_line());
+                            scheduler
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .on_heard(Instant::now());
                             if rx_sink.send(frame).await.is_err() {
                                 return Ok(());
                             }
@@ -447,179 +517,84 @@ async fn pump(
                     }
                 }
             }
-            Some(frame) = id_queue.recv(), if held_id.is_none() => {
-                // Identification jumps the data queue so RADIO OFF can sign
-                // off without waiting for chat to drain. It does not jump
-                // the airtime clock: the pump keys it through the same
-                // `next_tx` gate and governor as data. The safety interlock
-                // still holds it. Only one ID is held; a second waits in
-                // the channel so it cannot overwrite a sign-off.
+            _ = shared.wake.notified() => {}
+            _ = tokio::time::sleep_until(wake) => {
                 if shared.interlock_failed() {
-                    warn!("station ID held: the safety interlock is not satisfied");
-                }
-                *held_id = Some(frame);
-            }
-            Some(frame) = tx_queue.recv(), if pending.is_none() => {
-                *pending = Some((frame, tokio::time::Instant::now()));
-            }
-            _ = tokio::time::sleep_until(wake), if pending.is_some() || held_id.is_some() => {
-                if held_id.is_some() {
-                    // An ID waiting for the airtime clock still owns the
-                    // transmitter: data must not slip out in front of it.
-                    // It must still be dropped as stale — otherwise an ID
-                    // held by the interlock would keep a two-minute-old
-                    // chat line until it was safe, then radiate it.
-                    if let Some((_, queued_at)) = pending.as_ref() {
-                        if queued_at.elapsed() > config.airtime.max_hold {
-                            let (frame, queued_at) = pending.take().expect("pending");
-                            let waited = queued_at.elapsed();
-                            release_queued(shared, governor, frame.encode().len());
-                            shared.dropped_stale.fetch_add(1, Ordering::Relaxed);
-                            warn!(
-                                "dropping a frame held {waited:?} behind station ID — stale traffic is worse than no traffic"
-                            );
-                        }
-                    }
-                    if !shared.interlock_failed()
-                        && tokio::time::Instant::now() >= next_tx
-                    {
-                        if let Some(frame) = held_id.take() {
-                            key_id(
-                                &mut link,
-                                config,
-                                governor,
-                                shared,
-                                frame,
-                                &mut next_tx,
-                                pacing,
-                                held_id,
-                            )
-                            .await?;
-                        }
-                    }
                     continue;
                 }
-                let Some((frame, queued_at)) = pending.take() else {
+                let now = Instant::now();
+                let item = {
+                    let mut sched = scheduler.lock().unwrap_or_else(|e| e.into_inner());
+                    match sched.poll(now) {
+                        Poll::Ready => sched.pop(now),
+                        _ => None,
+                    }
+                };
+                let Some(item) = item else {
                     continue;
                 };
-                if shared.inhibit.load(Ordering::Acquire) {
-                    release_queued(shared, governor, frame.encode().len());
+                if shared.inhibit.load(Ordering::Acquire) && item.class != Class::Id {
                     shared.dropped_inhibited.fetch_add(1, Ordering::Relaxed);
+                    let sched = scheduler.lock().unwrap_or_else(|e| e.into_inner());
+                    publish_queue(shared, &sched);
                     continue;
                 }
-                if shared.interlock_failed() {
-                    let waited = queued_at.elapsed();
-                    if waited > config.airtime.max_hold {
-                        release_queued(shared, governor, frame.encode().len());
-                        shared.dropped_stale.fetch_add(1, Ordering::Relaxed);
-                        warn!(
-                            "dropping a frame held {waited:?} by the safety interlock — stale traffic is worse than no traffic"
-                        );
-                        continue;
-                    }
-                    shared.deferred.fetch_add(1, Ordering::Relaxed);
-                    next_tx = tokio::time::Instant::now() + Duration::from_millis(200);
-                    *pending = Some((frame, queued_at));
-                    continue;
-                }
-                let bytes = frame.encode();
+                let bytes = item.payload.encode();
                 if bytes.len() > config.max_frame {
                     warn!("refusing to transmit oversized frame ({} bytes)", bytes.len());
-                    release_queued(shared, governor, bytes.len());
+                    let sched = scheduler.lock().unwrap_or_else(|e| e.into_inner());
+                    publish_queue(shared, &sched);
                     continue;
                 }
-                let now = std::time::Instant::now();
                 match governor.check(bytes.len(), now) {
                     TxDecision::Send => {
-                        if let Err(e) = write_kiss_bytes(&mut link, config, &frame, &bytes).await {
-                            // The frame has already reserved airtime. Put it
-                            // back so a reconnect still owes it, rather than
-                            // leaking the reservation and losing the message.
-                            *pending = Some((frame, queued_at));
+                        if let Err(e) = write_kiss_bytes(&mut link, config, &item.payload, &bytes).await {
+                            scheduler
+                                .lock()
+                                .unwrap_or_else(|g| g.into_inner())
+                                .requeue(item, Instant::now(), Duration::ZERO);
                             return Err(e);
                         }
                         let keyed = governor.record(bytes.len(), now);
-                        release_queued(shared, governor, bytes.len());
+                        {
+                            let mut sched = scheduler.lock().unwrap_or_else(|g| g.into_inner());
+                            sched.on_keyed(now, &item.account, keyed, item.expects_reply);
+                            publish_queue(shared, &sched);
+                        }
                         governor.publish_with(shared, now, config.max_frame);
-                        // Pace on whichever is longer: the operator's minimum
-                        // gap, or the time this transmission actually occupies
-                        // the channel. Without the latter the "gap" would
-                        // start while we were still keyed.
-                        next_tx = tokio::time::Instant::now() + pacing.max(keyed);
+                        if let Some(seq) = airc_seq(&item.payload.info) {
+                            let dest = item.payload.destination.call.clone();
+                            let _ = keyed_tx.try_send(Keyed { dest, seq });
+                        }
                     }
                     TxDecision::Defer(delay, reason) => {
                         governor.publish_with(shared, now, config.max_frame);
-                        let waited = queued_at.elapsed();
-                        if waited + delay > config.airtime.max_hold {
-                            release_queued(shared, governor, bytes.len());
+                        let waited = now.saturating_duration_since(item.queued_at);
+                        if item.class != Class::Id
+                            && item.class != Class::Ack
+                            && waited + delay > config.airtime.max_hold
+                        {
                             shared.dropped_stale.fetch_add(1, Ordering::Relaxed);
                             warn!(
                                 "dropping a frame held {:?} by {} — stale traffic is worse than no traffic",
                                 waited,
                                 reason.as_str()
                             );
+                            let sched = scheduler.lock().unwrap_or_else(|g| g.into_inner());
+                            publish_queue(shared, &sched);
                             continue;
                         }
                         shared.deferred.fetch_add(1, Ordering::Relaxed);
                         debug!("holding a frame for {:?} ({})", delay, reason.as_str());
-                        next_tx = tokio::time::Instant::now() + delay;
-                        *pending = Some((frame, queued_at));
+                        scheduler
+                            .lock()
+                            .unwrap_or_else(|g| g.into_inner())
+                            .requeue(item, now, delay);
                     }
                 }
             }
-            else => return Ok(()),
         }
     }
-}
-
-/// Key an identification frame. Jumps the data queue, not the airtime clock:
-/// waits for `next_tx`, asks the governor, records the burst. Never dropped
-/// as stale, and not discarded by the operator inhibit.
-async fn key_id(
-    link: &mut Box<dyn ReadWrite>,
-    config: &TncConfig,
-    governor: &mut Governor,
-    shared: &AirtimeShared,
-    frame: Ax25Frame,
-    next_tx: &mut tokio::time::Instant,
-    pacing: Duration,
-    held_id: &mut Option<Ax25Frame>,
-) -> io::Result<()> {
-    if shared.interlock_failed() {
-        *held_id = Some(frame);
-        return Ok(());
-    }
-    if tokio::time::Instant::now() < *next_tx {
-        *held_id = Some(frame);
-        return Ok(());
-    }
-    let bytes = frame.encode();
-    if bytes.len() > config.max_frame {
-        warn!(
-            "refusing to transmit oversized station ID ({} bytes)",
-            bytes.len()
-        );
-        return Ok(());
-    }
-    let now = std::time::Instant::now();
-    match governor.check(bytes.len(), now) {
-        TxDecision::Send => {
-            if let Err(e) = write_kiss_bytes(link, config, &frame, &bytes).await {
-                *held_id = Some(frame);
-                return Err(e);
-            }
-            let keyed = governor.record(bytes.len(), now);
-            governor.publish_with(shared, now, config.max_frame);
-            *next_tx = tokio::time::Instant::now() + pacing.max(keyed);
-        }
-        TxDecision::Defer(delay, reason) => {
-            debug!("holding station ID for {:?} ({})", delay, reason.as_str());
-            shared.deferred.fetch_add(1, Ordering::Relaxed);
-            *next_tx = tokio::time::Instant::now() + delay;
-            *held_id = Some(frame);
-        }
-    }
-    Ok(())
 }
 
 async fn write_kiss_bytes(

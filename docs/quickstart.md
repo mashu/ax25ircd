@@ -91,6 +91,9 @@ CHANNEL  0
 MODEM    1200
 KISSPORT 8001
 TXDELAY  30
+# Optional: AX.25 with FEC. The KISS payload is still AX.25; ax25ircd does
+# not implement FX.25 itself. Enable this in Direwolf, not in the gateway.
+# FX25TX 1
 ```
 
 Then the same `[radio]` / `[radio.tnc]` block as in section 2. Start Direwolf

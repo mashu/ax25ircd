@@ -226,6 +226,7 @@ fn hf_packet() -> AirtimeConfig {
         window: Duration::from_secs(600),
         hourly_budget: Duration::ZERO,
         max_hold: Duration::from_secs(120),
+        stuffing: 1.05,
         enabled: true,
     }
 }
