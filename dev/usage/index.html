@@ -648,6 +648,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#from-a-stock-aprs-radio" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From a stock APRS radio
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#control-operator-accounts-bans-server-password" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1147,6 +1158,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#from-a-stock-aprs-radio" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From a stock APRS radio
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#control-operator-accounts-bans-server-password" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1408,6 +1430,8 @@ nick (or you <code>OPER</code>). The hub prints frames in <code>axlisten</code> 
   Appears as a reserved nick derived from the AX.25 source (<code>SM0ABC-7</code> →
   <code>SM0ABC|7</code>). No <code>REGISTER</code>, no <code>RADIO GRANT</code>. Restrict with
   <code>policy.allow_callsigns</code> / <code>deny_callsigns</code>.</li>
+<li><strong>APRS radio</strong> — a stock HT or app, no AIRC. Messages the gateway callsign
+  to put a line into a channel (below). Same RF nick as an AIRC station.</li>
 </ul>
 <p>Speaking on IRC and radiating are separate. Without RF-TX your messages stay
 on the internet even in <code>#rf</code>.</p>
@@ -1439,15 +1463,30 @@ still need <code>CALLSIGN</code> before their text is radiated. On a public
 <p>If <code>allow_callsigns</code> is empty, any plausible amateur callsign may use the RF
 side. A non-empty list is a closed system. <code>deny_callsigns</code> bans a station
 (SSID 0 bans every SSID of that call).</p>
+<h2 id="from-a-stock-aprs-radio">From a stock APRS radio<a class="headerlink" href="#from-a-stock-aprs-radio" title="Permanent link">&para;</a></h2>
+<p>AIRC is not required. Message the gateway callsign (<code>SK0MT-1</code> in the example
+config) from any APRS HT or app:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>#rf hello from the trail
+</code></pre></div>
+<p>The gateway ACKs so the radio's retry cycle stops, the station appears in
+the channel as <code>SM0ABC|7</code>, and the line shows up on IRC. AIRC stations
+already in <code>#rf</code> hear a translated copy; they did not decode the APRS
+frame. Messages to anyone else are ignored.</p>
+<p>Position reports and status beacons heard on frequency are shown in the
+channel as a NOTICE (<code>-SM0ABC|7- 59°30.00N 018°03.00E - QTH</code>). They are
+never put back on the air. They do not join the channel.</p>
+<p><code>?</code> or <code>HELP</code> is answered with <code>send #chan text</code>. With <code>radio.aprs_channel = "#rf"</code>, a line that has no <code>#channel</code> prefix goes there, and that is also where beacons are shown (otherwise the first <code>+r</code> channel). <code>radio.aprs = false</code> turns the whole path off.</p>
+<p>The same <code>allow_callsigns</code> / <code>deny_callsigns</code> lists apply. A kicked station
+is refused (<code>rej</code>), not injected.</p>
 <h2 id="control-operator-accounts-bans-server-password">Control operator: accounts, bans, server password<a class="headerlink" href="#control-operator-accounts-bans-server-password" title="Permanent link">&para;</a></h2>
 <p>After <code>/oper</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>ACCOUNTS                 list registered nicks, bound callsigns, RF-TX
-<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>DROPNICK &lt;nick&gt;          unregister a nick (no password); online user is told
-<a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>UNCLAIM &lt;callsign&gt;       release a bound callsign so someone else may claim it
-<a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a>KLINE &lt;host&gt; [reason]    ban that IP; drop matching clients; stored in nicks.json
-<a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a>UNKLINE &lt;host&gt;
-<a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a>KLINES                   list IP bans
-<a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a>PASSWD &lt;password|off&gt;    set or clear the IRC connection password for this process
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>ACCOUNTS                 list registered nicks, bound callsigns, RF-TX
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>DROPNICK &lt;nick&gt;          unregister a nick (no password); online user is told
+<a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>UNCLAIM &lt;callsign&gt;       release a bound callsign so someone else may claim it
+<a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a>KLINE &lt;host&gt; [reason]    ban that IP; drop matching clients; stored in nicks.json
+<a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a>UNKLINE &lt;host&gt;
+<a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a>KLINES                   list IP bans
+<a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a>PASSWD &lt;password|off&gt;    set or clear the IRC connection password for this process
 </code></pre></div>
 <p>In irssi: <code>/quote ACCOUNTS</code>, <code>/quote KLINE 203.0.113.9 :abuse</code>,
 <code>/quote PASSWD secret</code>, <code>/quote PASSWD off</code>.</p>
@@ -1557,48 +1596,48 @@ still waits for an RF member — do not CQ a topic into silence.</p>
 </table>
 <h2 id="commands">Commands<a class="headerlink" href="#commands" title="Permanent link">&para;</a></h2>
 <p>RFC 1459 / 2812 client commands this server implements:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>PASS NICK USER QUIT PING PONG
-<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>JOIN PART PRIVMSG NOTICE TOPIC NAMES LIST WHO WHOIS WHOWAS MODE
-<a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>MOTD LUSERS AWAY KICK INVITE ISON USERHOST
-<a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a>VERSION TIME ADMIN INFO HELP STATS LINKS CAP
-<a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a>OPER KILL
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>PASS NICK USER QUIT PING PONG
+<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>JOIN PART PRIVMSG NOTICE TOPIC NAMES LIST WHO WHOIS WHOWAS MODE
+<a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>MOTD LUSERS AWAY KICK INVITE ISON USERHOST
+<a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a>VERSION TIME ADMIN INFO HELP STATS LINKS CAP
+<a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a>OPER KILL
 </code></pre></div>
 <p>Not implemented (deliberately): server linking (<code>SERVER</code>, <code>SQUIT</code>, <code>CONNECT</code>),
 services, SASL, DCC, STARTTLS, IRCv3 capabilities (<code>sasl</code>, <code>server-time</code>,
 <code>echo-message</code>, …). <code>CAP LS</code> advertises an empty list; the client sends
 <code>CAP END</code> and continues. Local extensions:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>OPER &lt;name&gt; &lt;pass&gt;   control operator this session ([[opers]] in the config)
-<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>CALLSIGN &lt;call&gt;      claim a callsign; +v on +r. Required before radiation.
-<a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>CALLSIGN             show the current claim
-<a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a>REGISTER &lt;password&gt;  bind this nick (and current CALLSIGN) so nobody else can use them
-<a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a>IDENTIFY &lt;password&gt;  prove you own it; bind this session's CALLSIGN, or restore the stored one
-<a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a>UNREGISTER &lt;password&gt;
-<a id="__codelineno-15-7" name="__codelineno-15-7" href="#__codelineno-15-7"></a>RADIO                transmitter status (anyone)
-<a id="__codelineno-15-8" name="__codelineno-15-8" href="#__codelineno-15-8"></a>KICK &lt;chan&gt; &lt;nick&gt;   channel op or OPER
-<a id="__codelineno-15-9" name="__codelineno-15-9" href="#__codelineno-15-9"></a>KILL &lt;nick&gt;          OPER only
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>OPER &lt;name&gt; &lt;pass&gt;   control operator this session ([[opers]] in the config)
+<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>CALLSIGN &lt;call&gt;      claim a callsign; +v on +r. Required before radiation.
+<a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a>CALLSIGN             show the current claim
+<a id="__codelineno-16-4" name="__codelineno-16-4" href="#__codelineno-16-4"></a>REGISTER &lt;password&gt;  bind this nick (and current CALLSIGN) so nobody else can use them
+<a id="__codelineno-16-5" name="__codelineno-16-5" href="#__codelineno-16-5"></a>IDENTIFY &lt;password&gt;  prove you own it; bind this session's CALLSIGN, or restore the stored one
+<a id="__codelineno-16-6" name="__codelineno-16-6" href="#__codelineno-16-6"></a>UNREGISTER &lt;password&gt;
+<a id="__codelineno-16-7" name="__codelineno-16-7" href="#__codelineno-16-7"></a>RADIO                transmitter status (anyone)
+<a id="__codelineno-16-8" name="__codelineno-16-8" href="#__codelineno-16-8"></a>KICK &lt;chan&gt; &lt;nick&gt;   channel op or OPER
+<a id="__codelineno-16-9" name="__codelineno-16-9" href="#__codelineno-16-9"></a>KILL &lt;nick&gt;          OPER only
 </code></pre></div>
 <p>After <code>OPER</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>RADIO STATUS              transmitter, frames, stations heard, duty cycle
-<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>RADIO DUTY                airtime spent, backlog, limits in force, PA cooldown
-<a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a>RADIO QUEUE               everything accepted but not yet transmitted
-<a id="__codelineno-16-4" name="__codelineno-16-4" href="#__codelineno-16-4"></a>RADIO LIMIT DUTY &lt;1-50|off&gt;    lower the duty cycle now, no restart
-<a id="__codelineno-16-5" name="__codelineno-16-5" href="#__codelineno-16-5"></a>RADIO LIMIT PACING &lt;ms|off&gt;    widen the gap between transmissions
-<a id="__codelineno-16-6" name="__codelineno-16-6" href="#__codelineno-16-6"></a>RADIO OFF / ON            kill switch; purges the transmit queue
-<a id="__codelineno-16-7" name="__codelineno-16-7" href="#__codelineno-16-7"></a>RADIO ID                  identify now (rate-limited to id_interval)
-<a id="__codelineno-16-8" name="__codelineno-16-8" href="#__codelineno-16-8"></a>RADIO HEARD               stations, last heard, queue depth
-<a id="__codelineno-16-9" name="__codelineno-16-9" href="#__codelineno-16-9"></a>RADIO MAIL                held private messages (in memory, expires)
-<a id="__codelineno-16-10" name="__codelineno-16-10" href="#__codelineno-16-10"></a>RADIO KICK &lt;callsign&gt;     drop an RF station's presence
-<a id="__codelineno-16-11" name="__codelineno-16-11" href="#__codelineno-16-11"></a>RADIO GRANT &lt;nick&gt;        persist RF-TX on a registered nick
-<a id="__codelineno-16-12" name="__codelineno-16-12" href="#__codelineno-16-12"></a>RADIO REVOKE &lt;nick&gt;       take it away (also persisted)
-<a id="__codelineno-16-13" name="__codelineno-16-13" href="#__codelineno-16-13"></a>ACCOUNTS / DROPNICK / UNCLAIM / KLINE / UNKLINE / KLINES / PASSWD
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>RADIO STATUS              transmitter, frames, stations heard, duty cycle
+<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>RADIO DUTY                airtime spent, backlog, limits in force, PA cooldown
+<a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a>RADIO QUEUE               everything accepted but not yet transmitted
+<a id="__codelineno-17-4" name="__codelineno-17-4" href="#__codelineno-17-4"></a>RADIO LIMIT DUTY &lt;1-50|off&gt;    lower the duty cycle now, no restart
+<a id="__codelineno-17-5" name="__codelineno-17-5" href="#__codelineno-17-5"></a>RADIO LIMIT PACING &lt;ms|off&gt;    widen the gap between transmissions
+<a id="__codelineno-17-6" name="__codelineno-17-6" href="#__codelineno-17-6"></a>RADIO OFF / ON            kill switch; purges the transmit queue
+<a id="__codelineno-17-7" name="__codelineno-17-7" href="#__codelineno-17-7"></a>RADIO ID                  identify now (rate-limited to id_interval)
+<a id="__codelineno-17-8" name="__codelineno-17-8" href="#__codelineno-17-8"></a>RADIO HEARD               stations, last heard, queue depth
+<a id="__codelineno-17-9" name="__codelineno-17-9" href="#__codelineno-17-9"></a>RADIO MAIL                held private messages (in memory, expires)
+<a id="__codelineno-17-10" name="__codelineno-17-10" href="#__codelineno-17-10"></a>RADIO KICK &lt;callsign&gt;     drop an RF station's presence
+<a id="__codelineno-17-11" name="__codelineno-17-11" href="#__codelineno-17-11"></a>RADIO GRANT &lt;nick&gt;        persist RF-TX on a registered nick
+<a id="__codelineno-17-12" name="__codelineno-17-12" href="#__codelineno-17-12"></a>RADIO REVOKE &lt;nick&gt;       take it away (also persisted)
+<a id="__codelineno-17-13" name="__codelineno-17-13" href="#__codelineno-17-13"></a>ACCOUNTS / DROPNICK / UNCLAIM / KLINE / UNKLINE / KLINES / PASSWD
 </code></pre></div>
 <h2 id="held-messages">Held messages<a class="headerlink" href="#held-messages" title="Permanent link">&para;</a></h2>
 <p>A private message to a callsign that is not on frequency is held and delivered
 when the station is next heard, carrying its age. Bounded and expiring; gone
 on restart. See <code>mailbox_*</code> in the config.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>-&gt; PRIVMSG SM0ABC|7 :meet on 145.500 at 1900
-<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>&lt;- NOTICE: SM0ABC-7 is not on frequency. Held for delivery when the station
-<a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a>   is next heard (1 waiting, dropped after 24h).
+<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a>-&gt; PRIVMSG SM0ABC|7 :meet on 145.500 at 1900
+<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>&lt;- NOTICE: SM0ABC-7 is not on frequency. Held for delivery when the station
+<a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>   is next heard (1 waiting, dropped after 24h).
 </code></pre></div>
 <h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h2>
 <p>Every option is documented inline in <code>ax25ircd.example.toml</code>. Unknown keys are

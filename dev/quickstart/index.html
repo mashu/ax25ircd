@@ -1056,6 +1056,8 @@ port 8001.</p>
 </code></pre></div>
 <p>Then the same <code>[radio]</code> / <code>[radio.tnc]</code> block as in section 2. Start Direwolf
 first, then ax25ircd.</p>
+<p>A stock APRS radio can message the gateway callsign with <code>#rf hello</code> to put
+a line into a bridged channel. See <a href="../usage/">usage.md</a>.</p>
 <p>Serial hardware TNCs: <code>cargo build --release --features serial</code> and
 <code>radio.tnc.kind = "serial"</code>.</p>
 <h2 id="4-qrp-labs-qmx-or-qmx">4. QRP Labs QMX (or QMX+)<a class="headerlink" href="#4-qrp-labs-qmx-or-qmx" title="Permanent link">&para;</a></h2>

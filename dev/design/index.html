@@ -818,6 +818,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#62-aprs-interop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.2 APRS interop
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#7-failure-modes" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1170,6 +1181,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#62-aprs-interop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.2 APRS interop
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#7-failure-modes" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1258,11 +1280,13 @@
 <h1 id="ax25irc-design">AX25IRC design<a class="headerlink" href="#ax25irc-design" title="Permanent link">&para;</a></h1>
 <h2 id="1-what-this-is">1. What this is<a class="headerlink" href="#1-what-this-is" title="Permanent link">&para;</a></h2>
 <p>An IRC server that is simultaneously an AX.25 packet radio gateway. Two
-populations share the same channels:</p>
+populations share the same channels, and a third can write into them:</p>
 <ul>
 <li><strong>IP users</strong> with an ordinary IRC client (irssi) over TCP or TLS.</li>
 <li><strong>RF stations</strong> with a radio and a TNC, speaking a compact protocol (AIRC/1)
   carried in AX.25 UI frames.</li>
+<li><strong>APRS radios</strong> that message the gateway callsign. No AIRC client; a line
+  of the form <code>#rf hello</code> is injected into that channel.</li>
 </ul>
 <p>A message sent in a bridged channel reaches both. Nothing else does: the design
 is mostly about deciding what is <em>not</em> worth putting on the air.</p>
@@ -1327,17 +1351,18 @@ respect. See <a href="../regulatory/">regulatory.md</a> for the detail; the desi
 <a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>                    │ ax25::frame    addresses, UI frames       │
 <a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>                    │ airc::frame    AIRC/1 codec               │
 <a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>                    │ airc::session  seq, ACK, fragments, dedup │
-<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>                    └───────────────┬──────────────────────────┘
-<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>                                    │ AircFrame
-<a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>                    ┌───────────────▼──────────────────────────┐
-<a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a>                    │ bridge         RF ⇄ IRC translation       │
-<a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>                    │ policy         airtime + legality gates   │
-<a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a>                    └───────────────┬──────────────────────────┘
-<a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a>                                    │ Delivery
-<a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a>                    ┌───────────────▼──────────────────────────┐
-<a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a>   IRC client ─TCP─►│ server         users, channels, event loop│
-<a id="__codelineno-2-19" name="__codelineno-2-19" href="#__codelineno-2-19"></a>                    │ irc::client    RFC 1459 line protocol     │
-<a id="__codelineno-2-20" name="__codelineno-2-20" href="#__codelineno-2-20"></a>                    └──────────────────────────────────────────┘
+<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>                    │ aprs           stock APRS messages to us  │
+<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>                    └───────────────┬──────────────────────────┘
+<a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>                                    │ AircFrame
+<a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a>                    ┌───────────────▼──────────────────────────┐
+<a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>                    │ bridge         RF ⇄ IRC translation       │
+<a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a>                    │ policy         airtime + legality gates   │
+<a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a>                    └───────────────┬──────────────────────────┘
+<a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a>                                    │ Delivery
+<a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a>                    ┌───────────────▼──────────────────────────┐
+<a id="__codelineno-2-19" name="__codelineno-2-19" href="#__codelineno-2-19"></a>   IRC client ─TCP─►│ server         users, channels, event loop│
+<a id="__codelineno-2-20" name="__codelineno-2-20" href="#__codelineno-2-20"></a>                    │ irc::client    RFC 1459 line protocol     │
+<a id="__codelineno-2-21" name="__codelineno-2-21" href="#__codelineno-2-21"></a>                    └──────────────────────────────────────────┘
 </code></pre></div>
 <h3 id="31-concurrency">3.1 Concurrency<a class="headerlink" href="#31-concurrency" title="Permanent link">&para;</a></h3>
 <p>One task owns all mutable state. Everything else — each client connection, the
@@ -1536,6 +1561,26 @@ channel eventually becomes somebody's free mail server. Held messages pass the
 same policy screen as live traffic <em>at the time they are accepted</em>, so nothing
 can be smuggled onto the air by waiting.</p>
 <p><code>RADIO MAIL</code> shows the control operator what is waiting for whom.</p>
+<h2 id="62-aprs-interop">6.2 APRS interop<a class="headerlink" href="#62-aprs-interop" title="Permanent link">&para;</a></h2>
+<p>A stock APRS radio (Kenwood, Yaesu, APRSdroid) does not speak AIRC. It can
+still put a line into a bridged channel by sending an APRS <strong>message</strong> whose
+addressee is the gateway callsign:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>:SK0MT-1  :#rf hello from the trail{01
+</code></pre></div>
+<p>The AX.25 destination is a TOCALL (<code>APRS</code>, <code>APK004</code>, …); the addressee lives
+in the information field. The gateway ACKs (<code>ack01</code>) so the radio stops
+retrying — silence would cost more airtime than the ACK — and injects the
+text into <code>#rf</code>. AIRC stations already in that channel get a translated
+broadcast; they did not decode the APRS frame. Messages to anyone else are
+ignored.</p>
+<p>Position reports (<code>! = / @</code>, compressed, Mic-E) and status beacons (<code>&gt;</code>)
+heard on frequency are shown on IRC as a channel NOTICE. That costs no
+airtime and is never retransmitted: every station already heard the beacon.
+They do not join the channel and they do not get an ACK. The listen
+channel is <code>radio.aprs_channel</code> if set, otherwise the first <code>+r</code> channel.</p>
+<p><code>?</code> or <code>HELP</code> is answered with a one-line hint, not injected. A configured
+<code>radio.aprs_channel</code> accepts a bare line with no <code>#channel</code> prefix. Off
+with <code>radio.aprs = false</code>.</p>
 <h2 id="7-failure-modes">7. Failure modes<a class="headerlink" href="#7-failure-modes" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -1578,8 +1623,16 @@ can be smuggled onto the air by waiting.</p>
 <td>logged in monitor format, ignored; never fatal</td>
 </tr>
 <tr>
-<td>Non-AIRC traffic on frequency (APRS, NET/ROM)</td>
+<td>Non-AIRC traffic on frequency (NET/ROM)</td>
 <td>logged at debug, ignored</td>
+</tr>
+<tr>
+<td>APRS position or status beacon</td>
+<td>shown on IRC as NOTICE; never retransmitted</td>
+</tr>
+<tr>
+<td>APRS message addressed to the gateway</td>
+<td>ACKed so the radio stops retrying; <code>#chan text</code> is injected into that channel</td>
 </tr>
 <tr>
 <td>Frame from an implausible callsign</td>
@@ -1622,11 +1675,11 @@ can be smuggled onto the air by waiting.</p>
 <h2 id="8-operating-it">8. Operating it<a class="headerlink" href="#8-operating-it" title="Permanent link">&para;</a></h2>
 <p>Typical deployment with Direwolf (step-by-step, including QMX:
 <a href="../quickstart/">quickstart.md</a>, <a href="../qmx/">qmx.md</a>):</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>[direwolf]  ADEVICE plughw:1,0 / MODEM 1200 / KISSPORT 8001
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>     │  KISS over TCP :8001
-<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>[ax25ircd]  radio.tnc.kind = "tcp", port 8001
-<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>     │  TCP :6667 on localhost (operator console)
-<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>     │  TLS :6697 for internet clients
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>[direwolf]  ADEVICE plughw:1,0 / MODEM 1200 / KISSPORT 8001
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>     │  KISS over TCP :8001
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>[ax25ircd]  radio.tnc.kind = "tcp", port 8001
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>     │  TCP :6667 on localhost (operator console)
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>     │  TLS :6697 for internet clients
 </code></pre></div>
 <p>Internet clients that speak or OPER use implicit TLS (<code>[listen.tls]</code>). A
 plaintext connection from off the machine is listen-only. TLS protects the
@@ -1634,22 +1687,22 @@ hop between the user and the gateway, and stops there. Everything that
 reaches the antenna is in the clear, by law and by design. The server says this
 to every user at registration.</p>
 <p>Control operator console (requires <code>OPER</code>):</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>RADIO STATUS            transmitter state, frames, bytes, stations heard
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>RADIO OFF | ON          kill switch
-<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>RADIO ID                identify now
-<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>RADIO HEARD             stations, last heard, queue depth, drops
-<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>RADIO MAIL              held private messages
-<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>RADIO KICK &lt;callsign&gt;   remove a station's presence
-<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>RADIO GRANT &lt;nick&gt;      persist RF-TX on a registered nick
-<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>RADIO REVOKE &lt;nick&gt;     take it away
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>RADIO STATUS            transmitter state, frames, bytes, stations heard
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>RADIO OFF | ON          kill switch
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>RADIO ID                identify now
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>RADIO HEARD             stations, last heard, queue depth, drops
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>RADIO MAIL              held private messages
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>RADIO KICK &lt;callsign&gt;   remove a station's presence
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>RADIO GRANT &lt;nick&gt;      persist RF-TX on a registered nick
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>RADIO REVOKE &lt;nick&gt;     take it away
 </code></pre></div>
 <h2 id="81-development-without-a-radio">8.1 Development without a radio<a class="headerlink" href="#81-development-without-a-radio" title="Permanent link">&para;</a></h2>
 <p><code>ax25irc-kisshub</code> is a virtual channel: every TCP client that connects is a
 station on the same frequency, and a KISS frame from one is delivered to all
 the others. With it, the whole system runs on a laptop:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>ax25irc-kisshub<span class="w"> </span>--bind<span class="w"> </span><span class="m">127</span>.0.0.1:8001<span class="w"> </span><span class="p">&amp;</span>
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>ax25ircd<span class="w"> </span>-c<span class="w"> </span>ax25ircd.toml<span class="w"> </span><span class="p">&amp;</span>
-<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>ax25irc-station<span class="w"> </span>--call<span class="w"> </span>SM0ABC-7<span class="w"> </span>--gateway<span class="w"> </span>SK0MT-1<span class="w"> </span>--channel<span class="w"> </span><span class="s1">'#rf'</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>ax25irc-kisshub<span class="w"> </span>--bind<span class="w"> </span><span class="m">127</span>.0.0.1:8001<span class="w"> </span><span class="p">&amp;</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>ax25ircd<span class="w"> </span>-c<span class="w"> </span>ax25ircd.toml<span class="w"> </span><span class="p">&amp;</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>ax25irc-station<span class="w"> </span>--call<span class="w"> </span>SM0ABC-7<span class="w"> </span>--gateway<span class="w"> </span>SK0MT-1<span class="w"> </span>--channel<span class="w"> </span><span class="s1">'#rf'</span>
 </code></pre></div>
 <p>The hub prints every frame in <code>axlisten</code> monitor format, which is how the
 sequence-space bug described in <a href="../protocol/">protocol.md</a> §3.1 was found: the gateway
@@ -1666,8 +1719,9 @@ integration tests in <code>tests/gateway.rs</code> drive a real <code>Server</co
 codec on one side and a fake IRC client on the other, and assert on actual
 transmitted bytes: that a station's JOIN appears on IRC, that a message heard
 on the air is <em>not</em> re-transmitted, that an unidentified IP user's message
-never reaches the antenna, that ciphertext is refused, and that an ACKed
-private message is not retried.</p>
+never reaches the antenna, that ciphertext is refused, that an ACKed
+private message is not retried, and that an APRS message to the gateway
+callsign is ACKed and injected while a beacon on the same frequency is not.</p>
 <h2 id="10-deliberate-non-goals">10. Deliberate non-goals<a class="headerlink" href="#10-deliberate-non-goals" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>Server linking.</strong> IRC's server-to-server protocol assumes cheap, reliable
@@ -1685,8 +1739,6 @@ private message is not retried.</p>
   AX.25 UI frames over KISS; FEC is the modem's job.</li>
 <li><strong>Digest mode</strong>: a station on a handheld subscribes to a channel and receives
   a periodic summary instead of every message.</li>
-<li><strong>APRS interop</strong>: answer APRS messages addressed to the gateway, so anyone
-  with a stock APRS radio can send a line into a channel.</li>
 <li><strong>IRCv3 <code>server-time</code>, <code>echo-message</code>, <code>chghost</code></strong> on the IP side, where they
   cost nothing.</li>
 </ul>

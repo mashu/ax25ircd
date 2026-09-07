@@ -1137,6 +1137,10 @@ with <code>PID = 0xF0</code> ("no layer 3 protocol").</p>
 </ul>
 <p>The AX.25 source address is the sender's identity. AIRC never repeats it in the
 payload.</p>
+<p>APRS messages (information field starting with <code>:</code>) addressed to the gateway
+are a separate path; so are position and status beacons shown on IRC. See
+<a href="../design/">design.md</a> §6.2. They are not AIRC. Messages to anyone else stay
+ignored.</p>
 <h2 id="2-frame-format">2. Frame format<a class="headerlink" href="#2-frame-format" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a> 0      1      2      3      4      5      6      7      8 ...
 <a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>+------+------+------+------+------+------+------+------+---------------+
