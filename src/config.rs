@@ -177,6 +177,17 @@ pub struct RadioConfig {
     /// Member lists are never sent unasked.
     #[serde(default = "default_rf_names_max")]
     pub rf_names_max: usize,
+    /// Answer APRS messages addressed to this gateway so a stock APRS radio
+    /// can put a line into a bridged channel. On by default: a radio that
+    /// gets no ACK retries, which is more airtime than the ACK. Set false
+    /// to ignore APRS the way other foreign traffic is ignored.
+    #[serde(default = "default_true")]
+    pub aprs: bool,
+    /// Channel used when the APRS message text has no `#channel` prefix.
+    /// Empty (the default) means the prefix is required. Must name a
+    /// configured `+r` channel.
+    #[serde(default)]
+    pub aprs_channel: String,
     /// External transmit interlock: a command that decides whether it is safe
     /// to key up at all. See [`InterlockConfig`].
     #[serde(default)]
@@ -655,6 +666,25 @@ impl Config {
         if self.channels.iter().all(|c| !c.rf) {
             anyhow::bail!("radio.enabled is true but no channel has rf = true");
         }
+        if !self.radio.aprs_channel.is_empty() {
+            if !crate::irc::message::is_channel_name(&self.radio.aprs_channel) {
+                anyhow::bail!(
+                    "radio.aprs_channel ({}) is not a channel name",
+                    self.radio.aprs_channel
+                );
+            }
+            let want = crate::irc::message::lower(&self.radio.aprs_channel);
+            let bridged = self
+                .channels
+                .iter()
+                .any(|c| c.rf && crate::irc::message::lower(&c.name) == want);
+            if !bridged {
+                anyhow::bail!(
+                    "radio.aprs_channel ({}) must be a configured channel with rf = true",
+                    self.radio.aprs_channel
+                );
+            }
+        }
 
         let duty = &self.radio.duty;
         if !duty.enabled && self.radio.tnc.kind != "loopback" {
@@ -761,6 +791,16 @@ impl Config {
                 .map_err(|e| anyhow::anyhow!("policy callsign {c}: {e}"))?;
         }
         Ok(())
+    }
+
+    /// Channel that receives APRS positions, status beacons, and messages
+    /// that have no `#channel` prefix. `radio.aprs_channel` if set, otherwise
+    /// the first configured `+r` channel.
+    pub fn aprs_listen_channel(&self) -> Option<&str> {
+        if !self.radio.aprs_channel.is_empty() {
+            return Some(self.radio.aprs_channel.as_str());
+        }
+        self.channels.iter().find(|c| c.rf).map(|c| c.name.as_str())
     }
 
     pub fn gateway_callsign(&self) -> Option<Callsign> {
@@ -1269,5 +1309,22 @@ tx_pacing_ms = 0
         std::fs::write(&path, "MODEM 300\nTXDELAY 40\nTXTAIL 30\n").unwrap();
         Config::from_toml(&text).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn aprs_channel_must_be_a_bridged_channel() {
+        let text = r##"
+[server]
+name = "test.example"
+[radio]
+enabled = true
+callsign = "SM0ABC-1"
+aprs_channel = "#nope"
+[[channels]]
+name = "#rf"
+rf = true
+"##;
+        let err = Config::from_toml(text).unwrap_err().to_string();
+        assert!(err.contains("aprs_channel"), "{err}");
     }
 }

@@ -7,7 +7,8 @@
 //!                    ├─ ax25::tnc       the link: framing, pacing, reconnect
 //!                    ├─ ax25::frame     AX.25 UI frames, callsign addressing
 //!                    ├─ airc::frame     AIRC/1, the compact on-air protocol
-//!                    └─ airc::session   sequencing, ACKs, fragmentation
+//!                    ├─ airc::session   sequencing, ACKs, fragmentation
+//!                    └─ aprs            stock APRS messages addressed to us
 //!                              │
 //!                    server::radio      may this be transmitted, and when?
 //!                    server::bridge     what a frame heard on the air means
@@ -40,6 +41,7 @@
 
 pub mod accounts;
 pub mod airc;
+pub mod aprs;
 pub mod audit;
 pub mod ax25;
 pub mod callsign;

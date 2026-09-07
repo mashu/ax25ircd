@@ -15,6 +15,7 @@ use tracing::{debug, info, warn};
 use super::state::{User, UserId};
 use super::{Delivery, Server, TxClass};
 use crate::airc::{encode_fields, AircFrame, Kind};
+use crate::aprs::{self, AprsMessage};
 use crate::ax25::{frame::PID_NO_L3, Ax25Frame};
 use crate::callsign::Callsign;
 use crate::irc::message::is_channel_name;
@@ -50,6 +51,30 @@ impl Server {
             return;
         }
 
+        // APRS: messages put the addressee in the information field (AX.25
+        // dest is a TOCALL). Positions and status are broadcasts. Check
+        // both before the dest filter or a Kenwood on frequency is ignored.
+        if self.config.radio.aprs {
+            if let Some(msg) = AprsMessage::decode(&frame.info) {
+                if let Some(gateway) = self.config.gateway_callsign() {
+                    if msg.addressed_to(&gateway) {
+                        self.handle_aprs_message(&src, msg, now);
+                        return;
+                    }
+                }
+                debug!(
+                    target: "rf::monitor",
+                    "APRS message not for us: {}",
+                    frame.to_monitor_line()
+                );
+                return;
+            }
+            if let Some(beacon) = aprs::decode_beacon(&frame.destination.call, &frame.info) {
+                self.handle_aprs_beacon(&src, beacon.summary, now);
+                return;
+            }
+        }
+
         // PROTOCOL.md §3.1: a receiver must check the AX.25 destination before
         // processing a frame.
         //
@@ -71,8 +96,9 @@ impl Server {
         let airc = match AircFrame::decode(&frame.info) {
             Ok(f) => f,
             Err(_) => {
-                // Other traffic shares this channel: APRS, NET/ROM, other
-                // people's QSOs. Log it for the operator and leave it alone.
+                // Other traffic shares this channel: NET/ROM, other people's
+                // QSOs. Log it for the operator and leave it alone. APRS
+                // messages and beacons are handled above.
                 debug!(target: "rf::monitor", "{}", frame.to_monitor_line());
                 return;
             }
@@ -120,6 +146,215 @@ impl Server {
         !dest.looks_like_amateur_call() && dest.to_string() != "ID"
     }
 
+    /// An APRS message whose addressee is this gateway.
+    ///
+    /// The radio is a stock TNC: it will retry until it hears `ack<msgid>`.
+    /// Answering is therefore cheaper than silence. Acks and rejects of *our*
+    /// messages are ignored. Channel lines are `#chan text`, or the whole
+    /// body if `radio.aprs_channel` is set. AIRC stations in that channel
+    /// get a translated broadcast; they did not decode the APRS frame.
+    fn handle_aprs_message(&mut self, src: &Callsign, msg: AprsMessage, now: Instant) {
+        if src.require_amateur().is_err() {
+            warn!(%src, "ignoring APRS message from an implausible callsign");
+            return;
+        }
+        if !self.policy.station_allowed(src) {
+            debug!(%src, "station not permitted, ignoring APRS");
+            return;
+        }
+        if msg.is_ack_or_rej() {
+            return;
+        }
+        if !self.policy.rf_station_rate_ok(src, now) {
+            warn!(%src, "rate limit exceeded, dropping APRS message");
+            if let Some(peer) = self.radio.sessions.peer_mut(src) {
+                peer.dropped += 1;
+            }
+            return;
+        }
+        let _ = self.radio.sessions.force_touch(src, now);
+
+        let duplicate = msg
+            .msgid
+            .as_ref()
+            .is_some_and(|id| self.radio.aprs_msgid_seen(src, id, now));
+
+        if self.radio.sessions.is_banned(src) {
+            self.aprs_rej_or_ack(src, &msg);
+            return;
+        }
+        if duplicate {
+            self.aprs_ack(src, &msg);
+            return;
+        }
+        if let Some(id) = &msg.msgid {
+            self.radio.remember_aprs_msgid(src, id, now);
+        }
+
+        let text = sanitize(&msg.text);
+        if aprs::is_help(&text) {
+            self.aprs_ack(src, &msg);
+            let hint = if self.config.radio.aprs_channel.is_empty() {
+                "send #chan text"
+            } else {
+                "send #chan text, or text for the default channel"
+            };
+            self.aprs_reply(src, hint);
+            return;
+        }
+
+        let default = self.config.radio.aprs_channel.clone();
+        let Some((channel, body)) = aprs::split_channel_line(&text, &default) else {
+            self.aprs_ack(src, &msg);
+            self.aprs_reply(src, "send #chan text");
+            return;
+        };
+
+        let display = self.channel_display_name(channel);
+        let Some(chan) = self.state.channel(&display).cloned() else {
+            self.aprs_ack(src, &msg);
+            self.aprs_reply(src, "no such channel");
+            return;
+        };
+        if !chan.rf {
+            self.aprs_ack(src, &msg);
+            self.aprs_reply(src, "channel is not bridged");
+            return;
+        }
+
+        if self.ensure_rf_user(src) {
+            self.radio.flush_mailbox(src);
+        }
+        let uid = UserId::Rf(src.clone());
+        if !chan.members.contains_key(&uid) {
+            if self
+                .radio
+                .sessions
+                .peer(src)
+                .map(|p| p.was_kicked_from(&display))
+                .unwrap_or(false)
+            {
+                self.aprs_ack(src, &msg);
+                self.aprs_reply(src, "not on that channel");
+                return;
+            }
+            self.rf_join(src, &display, false);
+        }
+
+        let Some(user) = self.state.user(&uid).cloned() else {
+            self.aprs_ack(src, &msg);
+            return;
+        };
+        let uid = user.id.clone();
+        let other_rf = self
+            .state
+            .channel(&display)
+            .map(|c| c.members.keys().any(|m| m.is_rf() && *m != uid))
+            .unwrap_or(false);
+
+        let mut air_text = body.to_string();
+        let mut truncated = false;
+        let mut to_air = other_rf;
+        if to_air {
+            match self.policy.screen_outbound(&air_text) {
+                Verdict::Allow(t) => air_text = t,
+                Verdict::Truncated(t) => {
+                    air_text = t;
+                    truncated = true;
+                }
+                Verdict::Deny(_) => to_air = false,
+            }
+        }
+
+        let d = Delivery::Privmsg {
+            from_nick: user.nick.clone(),
+            from_prefix: user.prefix(),
+            target: display.clone(),
+            text: if to_air { air_text } else { body.to_string() },
+            notice: false,
+            truncated,
+        };
+        self.broadcast_channel_ex(&display, &d, Some(&uid), to_air);
+        self.aprs_ack(src, &msg);
+        info!(%src, "APRS message into channel");
+    }
+
+    /// A position or status beacon. IRC only: every station on frequency
+    /// already heard it, and repeating APRS as AIRC would be a new
+    /// transmission of someone else's beacon.
+    fn handle_aprs_beacon(&mut self, src: &Callsign, summary: String, now: Instant) {
+        if src.require_amateur().is_err() {
+            return;
+        }
+        if !self.policy.station_allowed(src) {
+            return;
+        }
+        if self.radio.sessions.is_banned(src) {
+            return;
+        }
+        if self.radio.aprs_beacon_seen(src, &summary, now) {
+            return;
+        }
+        let Some(channel) = self.config.aprs_listen_channel().map(str::to_string) else {
+            return;
+        };
+        let display = self.channel_display_name(&channel);
+        let Some(chan) = self.state.channel(&display) else {
+            return;
+        };
+        if !chan.rf {
+            return;
+        }
+        let text = sanitize(&summary);
+        if text.is_empty() {
+            return;
+        }
+        self.radio.remember_aprs_beacon(src, &summary, now);
+        let nick = src.to_nick();
+        let prefix = format!("{nick}!rf@{src}.ax25");
+        let line = crate::irc::message::Message::new("NOTICE", vec![display.clone(), text])
+            .with_prefix(prefix)
+            .to_string();
+        for uid in self.state.members(&display) {
+            if let UserId::Ip(id) = uid {
+                self.send_raw(id, line.clone());
+            }
+        }
+    }
+
+    fn aprs_ack(&mut self, src: &Callsign, msg: &AprsMessage) {
+        let Some(id) = msg.msgid.as_deref() else {
+            return;
+        };
+        self.radio.transmit_ui(
+            &aprs::ax25_destination(),
+            aprs::ack_info(src, id),
+            TxClass::Ack,
+            src,
+        );
+    }
+
+    fn aprs_rej_or_ack(&mut self, src: &Callsign, msg: &AprsMessage) {
+        let Some(id) = msg.msgid.as_deref() else {
+            return;
+        };
+        self.radio.transmit_ui(
+            &aprs::ax25_destination(),
+            aprs::rej_info(src, id),
+            TxClass::Ack,
+            src,
+        );
+    }
+
+    fn aprs_reply(&mut self, src: &Callsign, text: &str) {
+        self.radio.transmit_ui(
+            &aprs::ax25_destination(),
+            aprs::reply_info(src, text),
+            TxClass::Control,
+            src,
+        );
+    }
+
     fn handle_airc_message(&mut self, src: &Callsign, msg: AircFrame, now: Instant) {
         let fields = msg.fields();
         match msg.kind {
@@ -163,7 +398,7 @@ impl Server {
                 if self.ensure_rf_user(src) {
                     self.radio.flush_mailbox(src);
                 }
-                self.rf_join(src, &channel);
+                self.rf_join(src, &channel, true);
             }
             Kind::Part => {
                 let Some(channel) = fields.first().cloned() else {
@@ -306,7 +541,7 @@ impl Server {
         true
     }
 
-    fn rf_join(&mut self, call: &Callsign, channel: &str) {
+    fn rf_join(&mut self, call: &Callsign, channel: &str, airc_reply: bool) {
         let uid = UserId::Rf(call.clone());
         if !is_channel_name(channel) {
             self.rf_error(call, "403", "no such channel");
@@ -369,6 +604,10 @@ impl Server {
         // channel a roll call is seconds of airtime nobody requested. The
         // count is one field and answers the question people actually have.
         // `NAMES` gets the list, capped, when it is asked for.
+        // APRS radios cannot decode AIRC: skip the reply for them.
+        if !airc_reply {
+            return;
+        }
         let count = self
             .state
             .channel(&display)
@@ -524,7 +763,7 @@ impl Server {
                     self.rf_error(src, "442", "you're not on that channel");
                     return;
                 }
-                self.rf_join(src, &display);
+                self.rf_join(src, &display, true);
             }
             let mut text = text;
             let mut truncated = false;

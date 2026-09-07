@@ -21,6 +21,7 @@ src/
   main.rs            ax25ircd — argument parsing, wiring, shutdown
   config.rs          TOML config and validation
   callsign.rs        callsign/SSID type, nickname mapping
+  aprs.rs            APRS message parse/encode (stock-radio interop)
   policy.rs          rate limits, sanitation, plain-language screen
   bridge.rs          what happens when a frame arrives from the air
   ax25/              address, frame, kiss, tnc

@@ -1,8 +1,8 @@
 # ax25ircd
 
 An IRC server that is also an AX.25 packet-radio gateway. People with an
-ordinary IRC client and people with a radio and a TNC talk in the same
-channels.
+ordinary IRC client, people with a radio and a TNC, and people with a stock
+APRS radio talk in the same channels.
 
 ![QMX to Direwolf to ax25ircd to IRC](assets/chain.png)
 

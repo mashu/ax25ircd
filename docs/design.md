@@ -3,11 +3,13 @@
 ## 1. What this is
 
 An IRC server that is simultaneously an AX.25 packet radio gateway. Two
-populations share the same channels:
+populations share the same channels, and a third can write into them:
 
 * **IP users** with an ordinary IRC client (irssi) over TCP or TLS.
 * **RF stations** with a radio and a TNC, speaking a compact protocol (AIRC/1)
   carried in AX.25 UI frames.
+* **APRS radios** that message the gateway callsign. No AIRC client; a line
+  of the form `#rf hello` is injected into that channel.
 
 A message sent in a bridged channel reaches both. Nothing else does: the design
 is mostly about deciding what is *not* worth putting on the air.
@@ -86,6 +88,7 @@ respect. See [regulatory.md](regulatory.md) for the detail; the design consequen
                     │ ax25::frame    addresses, UI frames       │
                     │ airc::frame    AIRC/1 codec               │
                     │ airc::session  seq, ACK, fragments, dedup │
+                    │ aprs           stock APRS messages to us  │
                     └───────────────┬──────────────────────────┘
                                     │ AircFrame
                     ┌───────────────▼──────────────────────────┐
@@ -270,6 +273,33 @@ can be smuggled onto the air by waiting.
 
 `RADIO MAIL` shows the control operator what is waiting for whom.
 
+## 6.2 APRS interop
+
+A stock APRS radio (Kenwood, Yaesu, APRSdroid) does not speak AIRC. It can
+still put a line into a bridged channel by sending an APRS **message** whose
+addressee is the gateway callsign:
+
+```
+:SK0MT-1  :#rf hello from the trail{01
+```
+
+The AX.25 destination is a TOCALL (`APRS`, `APK004`, …); the addressee lives
+in the information field. The gateway ACKs (`ack01`) so the radio stops
+retrying — silence would cost more airtime than the ACK — and injects the
+text into `#rf`. AIRC stations already in that channel get a translated
+broadcast; they did not decode the APRS frame. Messages to anyone else are
+ignored.
+
+Position reports (`! = / @`, compressed, Mic-E) and status beacons (`>`)
+heard on frequency are shown on IRC as a channel NOTICE. That costs no
+airtime and is never retransmitted: every station already heard the beacon.
+They do not join the channel and they do not get an ACK. The listen
+channel is `radio.aprs_channel` if set, otherwise the first `+r` channel.
+
+`?` or `HELP` is answered with a one-line hint, not injected. A configured
+`radio.aprs_channel` accepts a bare line with no `#channel` prefix. Off
+with `radio.aprs = false`.
+
 ## 7. Failure modes
 
 | Failure | Behaviour |
@@ -282,7 +312,9 @@ can be smuggled onto the air by waiting.
 | Station stops answering | 3 retries, then the station is declared lost and its IRC presence quits with "Signal lost" |
 | Station goes quiet | removed after `peer_idle_timeout_secs` |
 | Corrupt frame from the air | logged in monitor format, ignored; never fatal |
-| Non-AIRC traffic on frequency (APRS, NET/ROM) | logged at debug, ignored |
+| Non-AIRC traffic on frequency (NET/ROM) | logged at debug, ignored |
+| APRS position or status beacon | shown on IRC as NOTICE; never retransmitted |
+| APRS message addressed to the gateway | ACKed so the radio stops retrying; `#chan text` is injected into that channel |
 | Frame from an implausible callsign | ignored |
 | Someone floods from RF | token bucket drops the traffic; no reply is transmitted, because answering a flood with transmissions is how you jam your own channel |
 | Client never registers | dropped after `registration_timeout_secs` |
@@ -355,8 +387,9 @@ integration tests in `tests/gateway.rs` drive a real `Server` with a real KISS
 codec on one side and a fake IRC client on the other, and assert on actual
 transmitted bytes: that a station's JOIN appears on IRC, that a message heard
 on the air is *not* re-transmitted, that an unidentified IP user's message
-never reaches the antenna, that ciphertext is refused, and that an ACKed
-private message is not retried.
+never reaches the antenna, that ciphertext is refused, that an ACKed
+private message is not retried, and that an APRS message to the gateway
+callsign is ACKed and injected while a beacon on the same frequency is not.
 
 ## 10. Deliberate non-goals
 
@@ -375,7 +408,5 @@ private message is not retried.
   AX.25 UI frames over KISS; FEC is the modem's job.
 * **Digest mode**: a station on a handheld subscribes to a channel and receives
   a periodic summary instead of every message.
-* **APRS interop**: answer APRS messages addressed to the gateway, so anyone
-  with a stock APRS radio can send a line into a channel.
 * **IRCv3 `server-time`, `echo-message`, `chghost`** on the IP side, where they
   cost nothing.

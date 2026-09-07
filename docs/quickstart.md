@@ -99,6 +99,9 @@ TXDELAY  30
 Then the same `[radio]` / `[radio.tnc]` block as in section 2. Start Direwolf
 first, then ax25ircd.
 
+A stock APRS radio can message the gateway callsign with `#rf hello` to put
+a line into a bridged channel. See [usage.md](usage.md).
+
 Serial hardware TNCs: `cargo build --release --features serial` and
 `radio.tnc.kind = "serial"`.
 

@@ -444,6 +444,7 @@ impl Server {
             }
         }
         self.policy.expire(now);
+        self.radio.expire_aprs_msgids(now);
         let dropped = self.radio.mailbox.expire(now);
         if dropped > 0 {
             debug!("{dropped} held messages expired");

@@ -203,6 +203,8 @@ They are not the same account.
   Appears as a reserved nick derived from the AX.25 source (`SM0ABC-7` →
   `SM0ABC|7`). No `REGISTER`, no `RADIO GRANT`. Restrict with
   `policy.allow_callsigns` / `deny_callsigns`.
+* **APRS radio** — a stock HT or app, no AIRC. Messages the gateway callsign
+  to put a line into a channel (below). Same RF nick as an AIRC station.
 
 Speaking on IRC and radiating are separate. Without RF-TX your messages stay
 on the internet even in `#rf`.
@@ -244,6 +246,29 @@ ax25irc-station --call SM0ABC-7 --gateway SK0MT-1 --channel '#rf'
 If `allow_callsigns` is empty, any plausible amateur callsign may use the RF
 side. A non-empty list is a closed system. `deny_callsigns` bans a station
 (SSID 0 bans every SSID of that call).
+
+## From a stock APRS radio
+
+AIRC is not required. Message the gateway callsign (`SK0MT-1` in the example
+config) from any APRS HT or app:
+
+```
+#rf hello from the trail
+```
+
+The gateway ACKs so the radio's retry cycle stops, the station appears in
+the channel as `SM0ABC|7`, and the line shows up on IRC. AIRC stations
+already in `#rf` hear a translated copy; they did not decode the APRS
+frame. Messages to anyone else are ignored.
+
+Position reports and status beacons heard on frequency are shown in the
+channel as a NOTICE (`-SM0ABC|7- 59°30.00N 018°03.00E - QTH`). They are
+never put back on the air. They do not join the channel.
+
+`?` or `HELP` is answered with `send #chan text`. With `radio.aprs_channel = "#rf"`, a line that has no `#channel` prefix goes there, and that is also where beacons are shown (otherwise the first `+r` channel). `radio.aprs = false` turns the whole path off.
+
+The same `allow_callsigns` / `deny_callsigns` lists apply. A kicked station
+is refused (`rej`), not injected.
 
 ## Control operator: accounts, bans, server password
 

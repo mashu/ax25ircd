@@ -117,9 +117,10 @@ impl Server {
         let body: &[&str] = match topic.as_str() {
             "air" | "radio" | "rf" => &[
                 "Allowlist: PRIVMSG chat and /me, plus TOPIC (same RF-TX gate).",
-                "JOIN/PART only if presence_notices is on. Everything else — NOTICE,",
-                "CTCP, MODE, KICK, numerics, RADIO replies — is not on the list,",
-                "so it stays on IRC. A new event type stays off the air until listed.",
+                "JOIN/PART only if presence_notices is on. APRS messages to the",
+                "gateway callsign are ACKed and may enter a +r channel. APRS",
+                "positions and status beacons are shown on IRC, never retransmitted.",
+                "NOTICE, CTCP, MODE, KICK, numerics stay on IRC until listed.",
             ],
             _ => &[
                 "NICK USER PASS QUIT PING PONG JOIN PART PRIVMSG NOTICE TOPIC",

@@ -119,6 +119,18 @@ mailbox_flush_batch = 1
 # are never sent unasked — joining a channel does not read out the roll.
 rf_names_max = 8
 
+# Answer APRS messages addressed to this gateway. A stock APRS radio
+# (Kenwood, Yaesu, APRSdroid, …) can then put a line into a bridged channel:
+# message the gateway callsign with `#rf hello`. The gateway ACKs so the
+# radio stops retrying; not answering is more airtime than the ACK.
+# Position reports and status beacons heard on frequency are shown on IRC
+# as NOTICE and are never retransmitted.
+aprs = true
+# Channel used when the message text has no `#channel` prefix, and for
+# positions/beacons. Empty: messages need the prefix; beacons go to the
+# first +r channel. Must be a configured +r channel if set.
+# aprs_channel = "#rf"
+
 # External transmit interlock: a command that decides whether it is safe to
 # key up at all. ax25ircd cannot see the radio — it speaks KISS to a modem,
 # and KISS carries frames, not SWR readings — so this check is yours to

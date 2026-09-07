@@ -18,6 +18,7 @@
 //! TNC task. This module decides *whether* to hand it something; the governor
 //! decides *when* that something is keyed.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -111,6 +112,11 @@ pub struct Radio {
     /// and must not identify when it has made none — that is just QRM.
     transmitted_since_id: bool,
     keyed_rx: Option<tokio::sync::mpsc::Receiver<Keyed>>,
+    /// APRS `{msgid}` values already injected, so a radio's retries do not
+    /// flood the channel. Keyed by (source callsign, msgid).
+    aprs_msgid: HashMap<(Callsign, String), Instant>,
+    /// Recent APRS beacon payloads, so a digipeated copy is not a second line.
+    aprs_beacon: HashMap<(Callsign, String), Instant>,
 }
 
 /// Result of an operator or automatic identification attempt.
@@ -122,6 +128,11 @@ pub enum IdentifyResult {
 }
 
 impl Radio {
+    const APRS_MSGID_TTL: Duration = Duration::from_secs(30 * 60);
+    const APRS_MSGID_MAX: usize = 256;
+    const APRS_BEACON_TTL: Duration = Duration::from_secs(90);
+    const APRS_BEACON_MAX: usize = 256;
+
     pub fn new(config: Arc<Config>, tnc: Option<TncHandle>) -> Self {
         let sessions = Sessions::new(SessionConfig {
             paclen: config.radio.paclen,
@@ -150,6 +161,8 @@ impl Radio {
             last_id: None,
             transmitted_since_id: false,
             keyed_rx,
+            aprs_msgid: HashMap::new(),
+            aprs_beacon: HashMap::new(),
         }
     }
 
@@ -278,6 +291,38 @@ impl Radio {
     }
 
     pub fn transmit_direct(&mut self, dest: &Callsign, frame: AircFrame, class: TxClass) {
+        let expects_reply = frame.wants_ack();
+        self.enqueue_ui(
+            dest,
+            frame.encode(),
+            class,
+            expects_reply,
+            &dest.to_string(),
+        );
+    }
+
+    /// A raw UI information field (APRS ACK/REJ/reply). `account` is the
+    /// station this transmission is *for*, so their APRS traffic shares a
+    /// fairness bucket with their AIRC traffic rather than collapsing onto
+    /// the `APRS` destination address.
+    pub fn transmit_ui(
+        &mut self,
+        dest: &Callsign,
+        info: Vec<u8>,
+        class: TxClass,
+        account: &Callsign,
+    ) {
+        self.enqueue_ui(dest, info, class, false, &account.to_string());
+    }
+
+    fn enqueue_ui(
+        &mut self,
+        dest: &Callsign,
+        info: Vec<u8>,
+        class: TxClass,
+        expects_reply: bool,
+        account: &str,
+    ) {
         let (Some(tnc), Some(source)) = (self.tnc.as_ref(), self.source.clone()) else {
             return;
         };
@@ -289,7 +334,6 @@ impl Radio {
             // Whatever is already in the TNC queue is being held there.
             return;
         }
-        let info = frame.encode();
         let ax = match Ax25Frame::ui(source, dest.clone(), &self.path, info) {
             Ok(f) => f,
             Err(e) => {
@@ -298,15 +342,67 @@ impl Radio {
             }
         };
         let len = ax.encode().len();
-        let expects_reply = frame.wants_ack();
-        let account = dest.to_string();
-        if tnc.enqueue(ax, class.scheduler_class(), &account, expects_reply) {
+        if tnc.enqueue(ax, class.scheduler_class(), account, expects_reply) {
             self.stats.rf_frames_tx += 1;
             self.stats.rf_bytes_tx += len as u64;
             self.transmitted_since_id = true;
         } else {
             self.stats.rf_frames_dropped += 1;
         }
+    }
+
+    /// True when we have already injected this (source, msgid) recently.
+    pub fn aprs_msgid_seen(&self, src: &Callsign, msgid: &str, now: Instant) -> bool {
+        self.aprs_msgid
+            .get(&(src.clone(), msgid.to_string()))
+            .is_some_and(|at| now.saturating_duration_since(*at) < Self::APRS_MSGID_TTL)
+    }
+
+    pub fn remember_aprs_msgid(&mut self, src: &Callsign, msgid: &str, now: Instant) {
+        self.expire_aprs_msgids(now);
+        if self.aprs_msgid.len() >= Self::APRS_MSGID_MAX {
+            if let Some(oldest) = self
+                .aprs_msgid
+                .iter()
+                .min_by_key(|(_, at)| *at)
+                .map(|(k, _)| k.clone())
+            {
+                self.aprs_msgid.remove(&oldest);
+            }
+        }
+        self.aprs_msgid
+            .insert((src.clone(), msgid.to_string()), now);
+    }
+
+    pub fn expire_aprs_msgids(&mut self, now: Instant) {
+        let ttl = Self::APRS_MSGID_TTL;
+        self.aprs_msgid
+            .retain(|_, at| now.saturating_duration_since(*at) < ttl);
+        let beacon_ttl = Self::APRS_BEACON_TTL;
+        self.aprs_beacon
+            .retain(|_, at| now.saturating_duration_since(*at) < beacon_ttl);
+    }
+
+    /// True when this exact beacon was already shown, typically a digipeat.
+    pub fn aprs_beacon_seen(&self, src: &Callsign, summary: &str, now: Instant) -> bool {
+        self.aprs_beacon
+            .get(&(src.clone(), summary.to_string()))
+            .is_some_and(|at| now.saturating_duration_since(*at) < Self::APRS_BEACON_TTL)
+    }
+
+    pub fn remember_aprs_beacon(&mut self, src: &Callsign, summary: &str, now: Instant) {
+        if self.aprs_beacon.len() >= Self::APRS_BEACON_MAX {
+            if let Some(oldest) = self
+                .aprs_beacon
+                .iter()
+                .min_by_key(|(_, at)| *at)
+                .map(|(k, _)| k.clone())
+            {
+                self.aprs_beacon.remove(&oldest);
+            }
+        }
+        self.aprs_beacon
+            .insert((src.clone(), summary.to_string()), now);
     }
 
     /// Deliver mail held for a station we have just heard from.

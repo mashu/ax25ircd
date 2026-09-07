@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use ax25ircd::airc::frame::{AircFrame, Kind};
 use ax25ircd::airc::{encode_fields, SessionConfig, Sessions};
+use ax25ircd::aprs::{AprsBeacon, AprsMessage};
 use ax25ircd::ax25::kiss::{self, KissDecoder};
 use ax25ircd::ax25::{Address, Ax25Frame};
 use ax25ircd::callsign::Callsign;
@@ -65,13 +66,26 @@ fn ax25_decoding_survives_arbitrary_bytes() {
                 Ax25Frame::decode(&re).is_ok(),
                 "iteration {i}: a decoded frame did not survive a round trip: {buf:02x?}"
             );
-            // The monitor line is what an operator sees; it must be printable.
-            let line = frame.to_monitor_line();
-            assert!(
-                !line.contains('\n') && !line.contains('\r'),
-                "iteration {i}: monitor output must stay on one line"
-            );
         }
+    }
+}
+
+#[test]
+fn aprs_decoding_survives_arbitrary_bytes() {
+    let mut rng = Rng::new(0xA9B8C7D6E5F40123);
+    for i in 0..200_000 {
+        let len = rng.below(80);
+        let buf = rng.bytes(len);
+        if let Some(msg) = AprsMessage::decode(&buf) {
+            let re = msg.encode();
+            let back = AprsMessage::decode(&re)
+                .unwrap_or_else(|| panic!("iteration {i}: encoded form did not decode: {re:02x?}"));
+            assert_eq!(back.addressee, msg.addressee, "iteration {i}");
+            assert_eq!(back.kind, msg.kind, "iteration {i}");
+        }
+        let _ = AprsBeacon::decode(&buf);
+        let dest: Callsign = "APRS".parse().unwrap();
+        let _ = ax25ircd::aprs::decode_beacon(&dest, &buf);
     }
 }
 

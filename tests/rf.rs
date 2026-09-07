@@ -171,7 +171,7 @@ impl Rf {
     }
 
     /// Everything the gateway has put on the air since the last call.
-    async fn transmitted(&mut self) -> Vec<AircFrame> {
+    async fn transmitted_raw(&mut self) -> Vec<Ax25Frame> {
         use tokio::io::AsyncReadExt;
         let mut out = Vec::new();
         let mut buf = [0u8; 4096];
@@ -183,9 +183,7 @@ impl Rf {
                             continue;
                         }
                         if let Ok(ax) = Ax25Frame::decode(&kf.payload) {
-                            if let Ok(airc) = AircFrame::decode(&ax.info) {
-                                out.push(airc);
-                            }
+                            out.push(ax);
                         }
                     }
                 }
@@ -193,6 +191,25 @@ impl Rf {
             }
         }
         out
+    }
+
+    async fn transmitted(&mut self) -> Vec<AircFrame> {
+        self.transmitted_raw()
+            .await
+            .into_iter()
+            .filter_map(|ax| AircFrame::decode(&ax.info).ok())
+            .collect()
+    }
+
+    fn heard_aprs(&mut self, from: &str, dest: &str, info: &[u8]) {
+        let ax = Ax25Frame::ui(
+            from.parse().unwrap(),
+            dest.parse().unwrap(),
+            &[],
+            info.to_vec(),
+        )
+        .unwrap();
+        self.heard_raw(ax);
     }
 
     fn station(&self, call: &str) -> Option<UserId> {
@@ -247,17 +264,6 @@ async fn frames_that_are_not_ours_are_ignored() {
 
     // Addressed to someone else.
     rf.heard_to("SM0ABC-7", "SK0AA-9", Kind::Join, &["#rf"]);
-    assert!(rf.station("SM0ABC-7").is_none());
-
-    // Not AIRC at all: an APRS beacon on the same frequency.
-    let aprs = Ax25Frame::ui(
-        "SM0ABC-7".parse().unwrap(),
-        "SK0MT-1".parse().unwrap(),
-        &[],
-        b"!5930.00N/01803.00E-".to_vec(),
-    )
-    .unwrap();
-    rf.heard_raw(aprs);
     assert!(rf.station("SM0ABC-7").is_none());
 
     assert!(rf.drain(a).is_empty(), "none of that should reach IRC");
@@ -1191,4 +1197,225 @@ async fn the_message_limit_follows_the_fragment_budget_not_just_the_character_co
          {effective}"
     );
     assert!(effective > 0, "and it must not collapse to nothing");
+}
+
+// ---------------------------------------------------------------- APRS interop
+
+#[tokio::test]
+async fn an_aprs_message_to_the_gateway_reaches_irc() {
+    let mut rf = Rf::new();
+    let a = rf.client(1, "alice");
+    rf.send(a, "JOIN #rf");
+    rf.drain(a);
+    let _ = rf.transmitted_raw().await;
+
+    // Stock radio: AX.25 dest is a TOCALL, addressee is in the payload.
+    rf.heard_aprs(
+        "SM0ABC-7",
+        "APK004",
+        b":SK0MT-1  :#rf hello from the trail{01",
+    );
+    let lines = rf.drain(a);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with(":SM0ABC|7!rf@")
+                && l.contains("PRIVMSG #rf :hello from the trail")),
+        "APRS uplink should show in the channel: {lines:?}"
+    );
+    assert!(rf.station("SM0ABC-7").is_some());
+
+    let frames = rf.transmitted_raw().await;
+    let airc: Vec<_> = frames
+        .iter()
+        .filter(|f| AircFrame::decode(&f.info).is_ok())
+        .map(|f| f.to_monitor_line())
+        .collect();
+    assert!(
+        frames
+            .iter()
+            .any(|f| { f.destination.call.to_string() == "APRS" && f.info == b":SM0ABC-7 :ack01" }),
+        "the radio must get an ACK or it will retry: {frames:?}"
+    );
+    assert!(
+        airc.is_empty(),
+        "no AIRC station is listening; do not CQ an AIRC copy: {airc:?}"
+    );
+}
+
+#[tokio::test]
+async fn aprs_retries_are_acked_but_not_re_injected() {
+    let mut rf = Rf::new();
+    let a = rf.client(1, "alice");
+    rf.send(a, "JOIN #rf");
+    rf.drain(a);
+
+    let info = b":SK0MT-1  :#rf once{7";
+    rf.heard_aprs("SM0ABC-7", "APRS", info);
+    rf.heard_aprs("SM0ABC-7", "APRS", info);
+    let lines = rf.drain(a);
+    let n: usize = lines
+        .iter()
+        .filter(|l| l.contains("PRIVMSG #rf") && l.contains("once"))
+        .count();
+    assert_eq!(n, 1, "a retry is an ACK lost, not a second line: {lines:?}");
+
+    let acks: usize = rf
+        .transmitted_raw()
+        .await
+        .iter()
+        .filter(|f| f.info.windows(8).any(|w| w == b":ack7") || f.info.ends_with(b"ack7"))
+        .count();
+    assert!(acks >= 2, "both copies must be ACKed so the radio stops");
+}
+
+#[tokio::test]
+async fn aprs_help_does_not_enter_the_channel() {
+    let mut rf = Rf::new();
+    let a = rf.client(1, "alice");
+    rf.send(a, "JOIN #rf");
+    rf.drain(a);
+
+    rf.heard_aprs("SM0ABC-7", "APRS", b":SK0MT-1  :HELP{2");
+    assert!(
+        !rf.drain(a).iter().any(|l| l.contains("PRIVMSG #rf")),
+        "HELP is how-to, not a line of chat"
+    );
+    let frames = rf.transmitted_raw().await;
+    assert!(frames.iter().any(|f| f.info == b":SM0ABC-7 :ack2"));
+    assert!(frames.iter().any(|f| {
+        let s = String::from_utf8_lossy(&f.info);
+        s.contains("send #chan text")
+    }));
+}
+
+#[tokio::test]
+async fn aprs_default_channel_accepts_bare_text() {
+    let text = CONFIG.replace(
+        "presence_notices = true",
+        "presence_notices = true\naprs_channel = \"#rf\"",
+    );
+    let mut rf = Rf::with(&text);
+    let a = rf.client(1, "alice");
+    rf.send(a, "JOIN #rf");
+    rf.drain(a);
+
+    rf.heard_aprs("SM0ABC-7", "APRS", b":SK0MT    :bare text{3");
+    assert!(
+        rf.drain(a)
+            .iter()
+            .any(|l| l.contains("PRIVMSG #rf :bare text")),
+        "SSID 0 addressee and no # prefix both have to work"
+    );
+}
+
+#[tokio::test]
+async fn aprs_to_someone_else_is_ignored() {
+    let mut rf = Rf::new();
+    let a = rf.client(1, "alice");
+    rf.send(a, "JOIN #rf");
+    rf.drain(a);
+    let _ = rf.transmitted_raw().await;
+
+    rf.heard_aprs("SM0ABC-7", "APRS", b":N0CALL-9 :#rf secret{1");
+    assert!(rf.drain(a).is_empty());
+    assert!(rf.station("SM0ABC-7").is_none());
+    let tx = rf.transmitted_raw().await;
+    assert!(
+        tx.is_empty(),
+        "must not answer someone else's message: {tx:?}"
+    );
+}
+
+#[tokio::test]
+async fn aprs_disabled_is_silent() {
+    let text = CONFIG.replace(
+        "presence_notices = true",
+        "presence_notices = true\naprs = false",
+    );
+    let mut rf = Rf::with(&text);
+    let a = rf.client(1, "alice");
+    rf.send(a, "JOIN #rf");
+    rf.drain(a);
+
+    rf.heard_aprs("SM0ABC-7", "APK004", b":SK0MT-1  :#rf hello{01");
+    rf.heard_aprs("SM0ABC-7", "APRS", b"!5930.00N/01803.00E-QTH");
+    assert!(rf.drain(a).is_empty());
+    assert!(rf.station("SM0ABC-7").is_none());
+}
+
+#[tokio::test]
+async fn aprs_is_translated_for_airc_stations_already_in_the_channel() {
+    let mut rf = Rf::new();
+    rf.heard("SM0XYZ-9", Kind::Join, &["#rf"]);
+    let _ = rf.transmitted().await;
+
+    rf.heard_aprs("SM0ABC-7", "APRS", b":SK0MT-1  :#rf from a handheld{4");
+    let airc = rf.transmitted().await;
+    assert!(
+        airc.iter().any(|f| {
+            f.kind == Kind::Msg && {
+                let fields = f.fields();
+                fields.first().map(|s| s.as_str()) == Some("#rf")
+                    && fields.last().map(|s| s.as_str()) == Some("from a handheld")
+            }
+        }),
+        "AIRC stations did not hear the APRS frame as chat: {airc:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_aprs_position_reaches_irc_and_stays_off_the_air() {
+    let mut rf = Rf::new();
+    let a = rf.client(1, "alice");
+    rf.send(a, "JOIN #rf");
+    rf.drain(a);
+    let _ = rf.transmitted_raw().await;
+
+    rf.heard_aprs("SM0ABC-7", "APRS", b"!5930.00N/01803.00E-QTH Kista");
+    let lines = rf.drain(a);
+    assert!(
+        lines.iter().any(|l| l.contains("NOTICE #rf")
+            && l.contains("SM0ABC|7")
+            && l.contains("59°30.00N")
+            && l.contains("QTH Kista")),
+        "position should be a channel NOTICE: {lines:?}"
+    );
+    assert!(rf.station("SM0ABC-7").is_none(), "a beacon is not a join");
+    let tx = rf.transmitted_raw().await;
+    assert!(tx.is_empty(), "beacons are never retransmitted: {tx:?}");
+}
+
+#[tokio::test]
+async fn an_aprs_status_beacon_reaches_irc() {
+    let mut rf = Rf::new();
+    let a = rf.client(1, "alice");
+    rf.send(a, "JOIN #rf");
+    rf.drain(a);
+
+    rf.heard_aprs("SM0ABC-7", "APRS", b">Hello from the hill");
+    assert!(
+        rf.drain(a)
+            .iter()
+            .any(|l| l.contains("NOTICE #rf") && l.contains("Hello from the hill")),
+        "status beacons are regular APRS beacons"
+    );
+}
+
+#[tokio::test]
+async fn a_digipeated_aprs_beacon_is_shown_once() {
+    let mut rf = Rf::new();
+    let a = rf.client(1, "alice");
+    rf.send(a, "JOIN #rf");
+    rf.drain(a);
+
+    let info = b"!5930.00N/01803.00E-once";
+    rf.heard_aprs("SM0ABC-7", "APRS", info);
+    rf.heard_aprs("SM0ABC-7", "WIDE1-1", info);
+    let n: usize = rf
+        .drain(a)
+        .iter()
+        .filter(|l| l.contains("NOTICE #rf") && l.contains("once"))
+        .count();
+    assert_eq!(n, 1, "the second copy is a digipeat, not a new beacon");
 }

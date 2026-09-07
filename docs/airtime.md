@@ -111,6 +111,8 @@ Anything not named there stays on IRC.
 | JOIN by a station | Confirmation with a member **count**, never the list |
 | `NAMES` (from a station) | Only when explicitly asked; capped at `radio.rf_names_max` and 160 octets |
 | Errors to a station | One frame, **not** acknowledged or retried |
+| APRS ACK/REJ to a radio that messaged us | One short frame, class `ack` (stops the radio retrying) |
+| APRS position / status heard | **Not on the list** — IRC NOTICE only |
 | Server notices to a station | One frame, capped at 80 characters, not retried |
 | NOTICE, other CTCP, QUIT, NICK, MODE, KICK, INVITE, numerics, RADIO | **Not on the list** |
 

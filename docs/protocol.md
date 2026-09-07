@@ -18,6 +18,11 @@ with `PID = 0xF0` ("no layer 3 protocol").
 The AX.25 source address is the sender's identity. AIRC never repeats it in the
 payload.
 
+APRS messages (information field starting with `:`) addressed to the gateway
+are a separate path; so are position and status beacons shown on IRC. See
+[design.md](design.md) §6.2. They are not AIRC. Messages to anyone else stay
+ignored.
+
 ## 2. Frame format
 
 ```
