@@ -163,6 +163,20 @@ impl Server {
                 return;
             }
         }
+        let holder = self.state.users.values().find_map(|u| {
+            if u.id != *uid && u.callsign.as_ref() == Some(&call) {
+                Some(u.nick.clone())
+            } else {
+                None
+            }
+        });
+        if let Some(holder) = holder {
+            self.notice_user(
+                uid,
+                &format!("Callsign {call} is already claimed by {holder}."),
+            );
+            return;
+        }
         if identified {
             if let Err(e) = self.accounts.set_callsign(&nick, &call.to_string()) {
                 self.notice_account_error(uid, e);
@@ -688,7 +702,7 @@ impl Server {
         }
         let reason = msg.param(1).unwrap_or("Banned").to_string();
         match self.accounts.ban_ip(&key) {
-            Ok(_) => {}
+            Ok(_) => self.admission.ban(&key),
             Err(e) => {
                 self.notice_account_error(uid, e);
                 return;
@@ -731,6 +745,7 @@ impl Server {
         match self.accounts.unban_ip(host) {
             Ok(true) => {
                 let key = host_ban_key(host);
+                self.admission.unban(&key);
                 self.notice_user(uid, &format!("Removed the ban on {key}."));
                 self.audit.event("unkline", &[("host", &key)]);
             }

@@ -14,6 +14,7 @@ use tracing::{error, info, warn};
 use crate::audit::Audit;
 use crate::ax25::tnc::{self, TncConfig, TncLink};
 use crate::config::{Config, TncSection};
+use crate::irc::admission::Admission;
 use crate::irc::client::{listen, ListenerOptions};
 use crate::server::{self, Event, Server};
 
@@ -198,11 +199,13 @@ pub fn build(config: Arc<Config>) -> anyhow::Result<Gateway> {
 pub async fn spawn_listeners(
     config: &Config,
     events: mpsc::Sender<Event>,
+    admission: Arc<Admission>,
 ) -> std::io::Result<Vec<String>> {
     let ids = Arc::new(AtomicU64::new(1));
     let opts_plain = ListenerOptions {
         ping_interval: Duration::from_secs(config.listen.ping_interval_secs),
         tls: None,
+        admission: Some(admission.clone()),
     };
     let mut bound = Vec::new();
     for addr in &config.listen.bind {
@@ -229,6 +232,7 @@ pub async fn spawn_listeners(
             let opts = ListenerOptions {
                 ping_interval: Duration::from_secs(config.listen.ping_interval_secs),
                 tls: Some(acceptor.clone()),
+                admission: Some(admission.clone()),
             };
             let name = addr.clone();
             tokio::spawn(async move {
@@ -407,7 +411,9 @@ rf = true
     async fn listeners_bind_and_report_their_addresses() {
         let config = Arc::new(Config::from_toml(GATEWAY).unwrap());
         let gw = build(config.clone()).unwrap();
-        let bound = spawn_listeners(&config, gw.events.clone()).await.unwrap();
+        let bound = spawn_listeners(&config, gw.events.clone(), gw.server.admission.clone())
+            .await
+            .unwrap();
         assert_eq!(bound.len(), 1);
         assert_ne!(
             bound[0], "127.0.0.1:0",
@@ -427,7 +433,9 @@ rf = true
         let config = Arc::new(Config::from_toml(&text).unwrap());
         let gw = build(config.clone()).unwrap();
         assert!(
-            spawn_listeners(&config, gw.events.clone()).await.is_err(),
+            spawn_listeners(&config, gw.events.clone(), gw.server.admission.clone())
+                .await
+                .is_err(),
             "a bind failure must surface at startup, not only in the log"
         );
     }
@@ -436,7 +444,9 @@ rf = true
     async fn a_started_gateway_serves_and_shuts_down() {
         let config = Arc::new(Config::from_toml(GATEWAY).unwrap());
         let gw = build(config.clone()).unwrap();
-        let bound = spawn_listeners(&config, gw.events.clone()).await.unwrap();
+        let bound = spawn_listeners(&config, gw.events.clone(), gw.server.admission.clone())
+            .await
+            .unwrap();
         let events = gw.events.clone();
         let handle = tokio::spawn(serve(gw));
 

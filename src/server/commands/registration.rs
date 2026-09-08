@@ -159,8 +159,19 @@ impl Server {
             );
             return;
         }
+        let Some(username) = username_from_user_param(&msg.params[0]) else {
+            self.numeric(
+                uid,
+                num::ERR_ERRONEUSNICKNAME,
+                &[
+                    &msg.params[0],
+                    "Username may not contain ! or @ or control characters",
+                ],
+            );
+            return;
+        };
         if let Some(u) = self.state.user_mut(uid) {
-            u.username = msg.params[0].chars().take(10).collect();
+            u.username = username;
             u.realname = msg.params[3].clone();
             u.got_user = true;
         }
@@ -303,4 +314,17 @@ impl Server {
         }
         self.numeric(uid, num::RPL_ENDOFMOTD, &["End of /MOTD command"]);
     }
+}
+
+/// USER ident as it appears in `nick!user@host`. `!` and `@` would make the
+/// prefix unparseable; control characters do not belong there either.
+fn username_from_user_param(raw: &str) -> Option<String> {
+    let s: String = raw.chars().take(10).collect();
+    if s.is_empty()
+        || s.chars()
+            .any(|c| c == '!' || c == '@' || c < ' ' || c == '\u{7f}')
+    {
+        return None;
+    }
+    Some(s)
 }

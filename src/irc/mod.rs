@@ -1,5 +1,6 @@
 //! The IRC side: wire format, numerics and the per-client connection task.
 
+pub mod admission;
 pub mod client;
 pub mod message;
 pub mod numerics;

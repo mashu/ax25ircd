@@ -20,6 +20,7 @@ use crate::audit::Audit;
 use crate::ax25::{Ax25Frame, TncHandle};
 use crate::callsign::Callsign;
 use crate::config::Config;
+use crate::irc::admission::Admission;
 use crate::irc::message::{is_channel_name, lower, parse_ctcp, Message};
 use crate::policy::Policy;
 
@@ -235,6 +236,9 @@ pub struct Server {
     connection_password: Option<String>,
     /// Last time we told this user why a `+r` message stayed on IRC.
     air_notices: HashMap<(UserId, String), Instant>,
+    /// Accept-time connection cap, shared with every IRC listener.
+    pub admission: Arc<Admission>,
+    persist_fail_seen: u64,
 }
 
 impl Server {
@@ -292,6 +296,8 @@ impl Server {
 
         let accounts = Accounts::load(&config.accounts.file)?;
         let connection_password = config.server.password.clone();
+        let admission = Admission::new(config.listen.max_clients, config.listen.max_conns_per_host);
+        admission.load_bans(accounts.ip_bans().iter().cloned());
 
         Ok(Self {
             config,
@@ -305,6 +311,8 @@ impl Server {
             started: SystemTime::now(),
             connection_password,
             air_notices: HashMap::new(),
+            admission,
+            persist_fail_seen: 0,
         })
     }
 
@@ -452,6 +460,33 @@ impl Server {
         self.radio.maybe_identify(now);
         self.expire_unregistered(now);
         self.expire_unidentified(now);
+        self.warn_nick_store_failures();
+    }
+
+    fn warn_nick_store_failures(&mut self) {
+        let fails = self.accounts.persist_failures();
+        if fails <= self.persist_fail_seen {
+            return;
+        }
+        self.persist_fail_seen = fails;
+        let n = fails.to_string();
+        self.audit.event("nicks_write_failed", &[("count", &n)]);
+        self.notice_opers(
+            "Nick database write failed; registrations and grants in this process may not survive a restart. Check disk and permissions.",
+        );
+    }
+
+    fn notice_opers(&mut self, text: &str) {
+        let ids: Vec<UserId> = self
+            .state
+            .users
+            .values()
+            .filter(|u| u.oper)
+            .map(|u| u.id.clone())
+            .collect();
+        for id in ids {
+            self.notice_user(&id, text);
+        }
     }
 
     /// Drop connections that never finished the NICK/USER handshake. Open

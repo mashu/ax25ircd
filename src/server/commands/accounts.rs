@@ -133,9 +133,7 @@ impl Server {
         };
         if let Some(tx) = self.events.clone() {
             tokio::spawn(async move {
-                let outcome = tokio::task::spawn_blocking(work)
-                    .await
-                    .unwrap_or(Err(AccountError::Hash));
+                let outcome = crate::accounts::run_password_work(work).await;
                 let (result, password_hash) = match outcome {
                     Ok(hash) => (Ok(()), hash),
                     Err(e) => (Err(e), None),

@@ -78,7 +78,12 @@ async fn main() -> anyhow::Result<()> {
     let config = Arc::new(config);
 
     let gateway = cli::build(config.clone())?;
-    cli::spawn_listeners(&config, gateway.events.clone()).await?;
+    cli::spawn_listeners(
+        &config,
+        gateway.events.clone(),
+        gateway.server.admission.clone(),
+    )
+    .await?;
     cli::spawn_shutdown(gateway.events.clone());
     cli::serve(gateway).await;
     Ok(())

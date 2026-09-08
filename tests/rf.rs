@@ -1125,6 +1125,41 @@ async fn a_topic_change_reaches_the_air_once_however_many_stations_are_listening
 }
 
 #[tokio::test]
+async fn irc_keeps_the_full_topic_when_rf_truncates() {
+    let mut rf = Rf::new();
+    let a = rf.client(1, "alice");
+    rf.send(a, "OPER root operpass1");
+    rf.send(a, "CALLSIGN SM0XYZ");
+    rf.send(a, "JOIN #rf");
+    rf.heard("SM0ABC-7", Kind::Join, &["#rf"]);
+    rf.drain(a);
+    let _ = rf.transmitted().await;
+
+    let long = "the net will meet on the hill at local sunset for traffic and then we all go quiet after the round table chat";
+    assert!(long.len() > 64);
+    rf.send(a, &format!("TOPIC #rf :{long}"));
+    let irc = rf.drain(a);
+    assert!(
+        irc.iter().any(|l| l.contains(&long)),
+        "the TOPIC event on IRC is the stored text, not the RF slice: {irc:?}"
+    );
+    assert_eq!(
+        rf.server.state.channel("#rf").unwrap().topic.as_deref(),
+        Some(long),
+        "channel state must match what members were told"
+    );
+    let sent = rf.transmitted().await;
+    let air: Vec<_> = sent.iter().filter(|f| f.kind == Kind::Notice).collect();
+    assert!(
+        air.iter().any(|f| {
+            let joined = f.fields().join(" ");
+            joined.contains("the net will meet") && !joined.contains(long)
+        }),
+        "RF still carries a shortened topic: {sent:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_server_notice_to_a_station_is_short_and_not_retried() {
     use ax25ircd::airc::frame::flags;
     let mut rf = Rf::new();

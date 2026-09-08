@@ -296,6 +296,11 @@ impl Sessions {
 
     /// Handle a frame received from `src`.
     ///
+    /// Inbound traffic uses [`Sessions::touch`], not [`Sessions::force_touch`]:
+    /// a flood of unique callsigns must not evict a quiet real station.
+    /// Outgoing messages still force a slot so a legitimate TX is never
+    /// dropped on the floor.
+    ///
     /// `addressed_to_us` is the AX.25 destination check. Broadcasts (to
     /// `AIRC` / `ID`) must never be ACKed: a single `ACK_REQ` bit on a
     /// broadcast would make every station in range key up at once.
@@ -307,7 +312,7 @@ impl Sessions {
         addressed_to_us: bool,
     ) -> RxOutcome {
         let cfg = self.config.clone();
-        let Some(peer) = self.force_touch(src, now) else {
+        let Some(peer) = self.touch(src, now) else {
             return RxOutcome::default();
         };
         let mut out = RxOutcome::default();
@@ -1055,6 +1060,33 @@ mod tests {
             s.take_evicted().len(),
             1,
             "the quietest station must be reported so IRC can drop the ghost"
+        );
+    }
+
+    #[test]
+    fn inbound_frames_do_not_evict_a_live_peer() {
+        let cfg = SessionConfig {
+            max_peers: 2,
+            ..Default::default()
+        };
+        let mut s = Sessions::new(cfg);
+        let now = Instant::now();
+        let a: Callsign = "SM0AAA-1".parse().unwrap();
+        let b: Callsign = "SM0BBB-1".parse().unwrap();
+        let c: Callsign = "SM0CCC-1".parse().unwrap();
+        let hello = AircFrame::new(Kind::Hello, 1, Vec::new());
+        s.on_receive(&a, hello.clone(), now, true);
+        s.on_receive(&b, hello.clone(), now, true);
+        let out = s.on_receive(&c, hello, now, true);
+        assert!(
+            out.deliver.is_none(),
+            "a new callsign against a full table is ignored, not a reason to drop someone"
+        );
+        assert_eq!(s.peers().count(), 2);
+        assert!(s.peer(&a).is_some() && s.peer(&b).is_some());
+        assert!(
+            s.take_evicted().is_empty(),
+            "inbound must not produce IRC QUITs for stations that are still on frequency"
         );
     }
 

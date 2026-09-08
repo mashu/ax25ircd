@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 
+use crate::irc::admission::{Admission, Deny, Slot};
 use crate::server::state::ClientId;
 use crate::server::Event;
 
@@ -29,6 +30,9 @@ pub struct ListenerOptions {
     /// When set, every accepted socket is wrapped in TLS before IRC framing.
     /// Those connections are never listen-only.
     pub tls: Option<TlsAcceptor>,
+    /// Reserved at accept, before the TLS handshake. Absent in tests that
+    /// inject `Event::Connected` directly; production always sets this.
+    pub admission: Option<Arc<Admission>>,
 }
 
 /// Accept IRC clients on an already-bound listener.
@@ -67,16 +71,26 @@ pub async fn listen(
         tokio::spawn(async move {
             let host = display_host(peer.ip());
             let listen_only = opts.tls.is_none() && !peer_is_loopback(peer.ip());
+            let slot = match opts.admission.as_ref() {
+                Some(gate) => match gate.try_acquire(&host) {
+                    Ok(slot) => Some(slot),
+                    Err(deny) => {
+                        refuse_socket(stream, &opts, deny, &host).await;
+                        return;
+                    }
+                },
+                None => None,
+            };
             let result = if let Some(acceptor) = opts.tls.clone() {
                 match acceptor.accept(stream).await {
-                    Ok(tls) => serve(tls, id, host, listen_only, events, opts).await,
+                    Ok(tls) => serve(tls, id, host, listen_only, events, opts, slot).await,
                     Err(e) => {
                         debug!(client = id, "TLS handshake failed: {e}");
                         Ok(())
                     }
                 }
             } else {
-                serve(stream, id, host, listen_only, events, opts).await
+                serve(stream, id, host, listen_only, events, opts, slot).await
             };
             if let Err(e) = result {
                 debug!(client = id, "connection ended: {e}");
@@ -99,6 +113,25 @@ fn peer_is_loopback(ip: std::net::IpAddr) -> bool {
     }
 }
 
+/// Refuse without starting IRC framing. TLS sockets are dropped before the
+/// handshake so the cap is not paid in CPU. Plaintext gets an ERROR line.
+async fn refuse_socket(
+    mut stream: tokio::net::TcpStream,
+    opts: &ListenerOptions,
+    deny: Deny,
+    host: &str,
+) {
+    if opts.tls.is_none() {
+        if let Some(gate) = opts.admission.as_ref() {
+            let line = deny.error_line(host, gate.max_clients(), gate.max_conns_per_host());
+            let mut buf = line.into_bytes();
+            buf.extend_from_slice(b"\r\n");
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, &buf).await;
+        }
+    }
+    let _ = stream.shutdown().await;
+}
+
 async fn serve<S>(
     stream: S,
     id: ClientId,
@@ -106,6 +139,7 @@ async fn serve<S>(
     listen_only: bool,
     events: mpsc::Sender<Event>,
     opts: ListenerOptions,
+    _slot: Option<Slot>,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,

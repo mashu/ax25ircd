@@ -56,6 +56,7 @@ name = "#lobby"
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let acceptor = tls::acceptor(&cert_path, &key_path).unwrap();
+    let admission = srv.admission.clone();
     tokio::spawn(async move {
         let _ = listen(
             listener,
@@ -64,6 +65,7 @@ name = "#lobby"
             ListenerOptions {
                 ping_interval: Duration::from_secs(60),
                 tls: Some(acceptor),
+                admission: Some(admission),
             },
         )
         .await;

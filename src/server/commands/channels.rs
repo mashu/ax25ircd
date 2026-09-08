@@ -318,23 +318,19 @@ impl Server {
         // privilege, callsign, per-sender rate limit, content screening and
         // the airtime backlog. A channel operator retyping the topic is not
         // a reason to key the transmitter.
+        //
+        // IRC members see the stored (sanitized) topic. RF gets a shorter
+        // rendering in `rf_emission`; mixing the two in one Delivery made
+        // JOIN 332 disagree with the TOPIC event.
         let mut allow_rf = changed && chan.rf && chan.has_rf_members() && self.radio.available();
-        let air_topic = if allow_rf {
-            match self.screen_for_air(uid, &topic) {
-                Some(t) => t.text,
-                None => {
-                    allow_rf = false;
-                    topic.clone()
-                }
-            }
-        } else {
-            topic.clone()
-        };
+        if allow_rf && self.screen_for_air(uid, &topic).is_none() {
+            allow_rf = false;
+        }
         let d = Delivery::Topic {
             nick,
             prefix,
             channel: chan.name.clone(),
-            topic: air_topic,
+            topic,
         };
         self.broadcast_channel_ex(&chan.name, &d, None, allow_rf);
     }

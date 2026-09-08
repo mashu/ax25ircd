@@ -12,8 +12,16 @@ use argon2::password_hash::{
 };
 use argon2::{Algorithm, Argon2, Params, Version};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 
 use crate::irc::message::lower;
+
+/// At most this many Argon2id jobs run at once. Each costs 19 MiB; without a
+/// process-wide cap, a burst of IDENTIFY from many addresses fills the
+/// blocking pool and stalls hashing for everyone, including the operator.
+const ARGON2_MAX_IN_FLIGHT: usize = 2;
+
+static ARGON2_SLOTS: Semaphore = Semaphore::const_new(ARGON2_MAX_IN_FLIGHT);
 
 /// Argon2id at the OWASP baseline: 19 MiB, two passes, one lane.
 ///
@@ -45,7 +53,7 @@ pub struct NickAccount {
     pub callsign: Option<String>,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 struct Store {
     nicks: HashMap<String, NickAccount>,
     /// Hosts refused at connect. Survives restart with the nick file.
@@ -59,6 +67,7 @@ pub struct Accounts {
     persist_lock: Arc<Mutex<()>>,
     persist_gen: Arc<AtomicU64>,
     async_persist: AtomicBool,
+    persist_fail: Arc<AtomicU64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -81,14 +90,21 @@ impl Accounts {
             persist_lock: Arc::new(Mutex::new(())),
             persist_gen: Arc::new(AtomicU64::new(0)),
             async_persist: AtomicBool::new(false),
+            persist_fail: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// Write the nick file from a background thread so fsync does not stall
-    /// the server actor. In-memory updates still happen first; tests leave
-    /// this off so they can read the file immediately.
+    /// the server actor. In-memory updates still happen first; a failed write
+    /// is counted so the operator can be told. Tests leave this off so they
+    /// can read the file immediately.
     pub fn enable_async_persist(&self) {
         self.async_persist.store(true, Ordering::Release);
+    }
+
+    /// How many background nick-file writes have failed since start.
+    pub fn persist_failures(&self) -> u64 {
+        self.persist_fail.load(Ordering::Relaxed)
     }
 
     pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Self> {
@@ -116,6 +132,7 @@ impl Accounts {
             persist_lock: Arc::new(Mutex::new(())),
             persist_gen: Arc::new(AtomicU64::new(0)),
             async_persist: AtomicBool::new(false),
+            persist_fail: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -130,24 +147,27 @@ impl Accounts {
     /// Insert a nick whose password was already hashed off the event loop.
     pub fn insert_hashed(&mut self, nick: &str, password_hash: String) -> Result<(), AccountError> {
         let key = lower(nick);
-        if self.store.nicks.contains_key(&key) {
-            return Err(AccountError::Taken);
-        }
         let created_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        self.store.nicks.insert(
-            key,
-            NickAccount {
-                nick: nick.to_string(),
-                password_hash,
-                created_unix,
-                rf_tx: false,
-                callsign: None,
-            },
-        );
-        self.save()
+        let nick = nick.to_string();
+        self.mutate(|store| {
+            if store.nicks.contains_key(&key) {
+                return Err(AccountError::Taken);
+            }
+            store.nicks.insert(
+                key.clone(),
+                NickAccount {
+                    nick,
+                    password_hash,
+                    created_unix,
+                    rf_tx: false,
+                    callsign: None,
+                },
+            );
+            Ok(())
+        })
     }
 
     pub fn set_password_hash(
@@ -155,43 +175,61 @@ impl Accounts {
         nick: &str,
         password_hash: String,
     ) -> Result<(), AccountError> {
-        let Some(acc) = self.store.nicks.get_mut(&lower(nick)) else {
-            return Err(AccountError::NotRegistered);
-        };
-        acc.password_hash = password_hash;
-        self.save()
+        let key = lower(nick);
+        self.mutate(|store| {
+            let Some(acc) = store.nicks.get_mut(&key) else {
+                return Err(AccountError::NotRegistered);
+            };
+            acc.password_hash = password_hash;
+            Ok(())
+        })
     }
 
     pub fn drop_nick(&mut self, nick: &str) -> Result<(), AccountError> {
-        if self.store.nicks.remove(&lower(nick)).is_none() {
-            return Err(AccountError::NotRegistered);
-        }
-        self.save()
+        let key = lower(nick);
+        self.mutate(|store| {
+            if store.nicks.remove(&key).is_none() {
+                return Err(AccountError::NotRegistered);
+            }
+            Ok(())
+        })
     }
 
     pub fn set_rf_tx(&mut self, nick: &str, rf_tx: bool) -> Result<(), AccountError> {
-        let Some(acc) = self.store.nicks.get_mut(&lower(nick)) else {
-            return Err(AccountError::NotRegistered);
-        };
-        acc.rf_tx = rf_tx;
-        self.save()
+        let key = lower(nick);
+        self.mutate(|store| {
+            let Some(acc) = store.nicks.get_mut(&key) else {
+                return Err(AccountError::NotRegistered);
+            };
+            acc.rf_tx = rf_tx;
+            Ok(())
+        })
     }
 
     pub fn set_callsign(&mut self, nick: &str, callsign: &str) -> Result<(), AccountError> {
         let key = lower(nick);
-        if !self.store.nicks.contains_key(&key) {
-            return Err(AccountError::NotRegistered);
-        }
-        if let Some(owner) = self.owner_of_callsign(callsign) {
-            if lower(&owner) != key {
-                return Err(AccountError::CallsignTaken);
+        let callsign = callsign.to_string();
+        self.mutate(|store| {
+            if !store.nicks.contains_key(&key) {
+                return Err(AccountError::NotRegistered);
             }
-        }
-        let Some(acc) = self.store.nicks.get_mut(&key) else {
-            return Err(AccountError::NotRegistered);
-        };
-        acc.callsign = Some(callsign.to_string());
-        self.save()
+            let want = lower(&callsign);
+            if let Some(owner) = store.nicks.values().find_map(|a| {
+                a.callsign
+                    .as_ref()
+                    .filter(|c| lower(c) == want)
+                    .map(|_| lower(&a.nick))
+            }) {
+                if owner != key {
+                    return Err(AccountError::CallsignTaken);
+                }
+            }
+            let Some(acc) = store.nicks.get_mut(&key) else {
+                return Err(AccountError::NotRegistered);
+            };
+            acc.callsign = Some(callsign);
+            Ok(())
+        })
     }
 
     /// Which registered nick owns this callsign, if any.
@@ -207,21 +245,24 @@ impl Accounts {
 
     pub fn clear_callsign(&mut self, callsign: &str) -> Result<String, AccountError> {
         let want = lower(callsign);
-        let key = self.store.nicks.iter().find_map(|(k, a)| {
-            a.callsign
-                .as_ref()
-                .filter(|c| lower(c) == want)
-                .map(|_| k.clone())
-        });
-        let Some(key) = key else {
-            return Err(AccountError::NotRegistered);
-        };
-        let nick = self.store.nicks[&key].nick.clone();
-        if let Some(acc) = self.store.nicks.get_mut(&key) {
-            acc.callsign = None;
-        }
-        self.save()?;
-        Ok(nick)
+        let mut released = String::new();
+        self.mutate(|store| {
+            let key = store.nicks.iter().find_map(|(k, a)| {
+                a.callsign
+                    .as_ref()
+                    .filter(|c| lower(c) == want)
+                    .map(|_| k.clone())
+            });
+            let Some(key) = key else {
+                return Err(AccountError::NotRegistered);
+            };
+            released = store.nicks[&key].nick.clone();
+            if let Some(acc) = store.nicks.get_mut(&key) {
+                acc.callsign = None;
+            }
+            Ok(())
+        })?;
+        Ok(released)
     }
 
     pub fn list(&self) -> Vec<&NickAccount> {
@@ -235,23 +276,24 @@ impl Accounts {
         if key.is_empty() {
             return Ok(false);
         }
-        if self.store.ip_bans.iter().any(|h| host_ban_key(h) == key) {
+        if self.is_ip_banned(host) {
             return Ok(false);
         }
-        self.store.ip_bans.push(key);
-        self.save()?;
-        Ok(true)
+        self.mutate(|store| {
+            store.ip_bans.push(key.clone());
+            Ok(true)
+        })
     }
 
     pub fn unban_ip(&mut self, host: &str) -> Result<bool, AccountError> {
-        let key = host_ban_key(host);
-        let before = self.store.ip_bans.len();
-        self.store.ip_bans.retain(|h| host_ban_key(h) != key);
-        if self.store.ip_bans.len() == before {
+        if !self.is_ip_banned(host) {
             return Ok(false);
         }
-        self.save()?;
-        Ok(true)
+        let key = host_ban_key(host);
+        self.mutate(|store| {
+            store.ip_bans.retain(|h| host_ban_key(h) != key);
+            Ok(true)
+        })
     }
 
     pub fn is_ip_banned(&self, host: &str) -> bool {
@@ -278,21 +320,29 @@ impl Accounts {
             .map(|a| a.password_hash.clone())
     }
 
-    /// Write the nick database, atomically.
-    ///
-    /// `fs::write` truncates first, so a crash, a full disk or a power cut in
-    /// the middle leaves a half-written file — and since the whole database is
-    /// one JSON document, a half-written file is a *lost* database, not a
-    /// damaged one: every registration and every RF-TX grant is gone. Writing
-    /// a sibling temp file and renaming makes the replacement atomic, so the
-    /// worst case is losing the last change rather than all of them.
-    fn save(&self) -> Result<(), AccountError> {
-        let text = serde_json::to_string_pretty(&self.store).map_err(|_| AccountError::Io)?;
+    /// Apply `f` to a copy of the store, persist that copy, then commit it.
+    /// A failed write leaves the in-memory store unchanged.
+    fn mutate<R>(
+        &mut self,
+        f: impl FnOnce(&mut Store) -> Result<R, AccountError>,
+    ) -> Result<R, AccountError> {
+        let mut next = self.store.clone();
+        let result = f(&mut next)?;
+        self.commit(next)?;
+        Ok(result)
+    }
+
+    fn commit(&mut self, next: Store) -> Result<(), AccountError> {
+        let text = serde_json::to_string_pretty(&next).map_err(|_| AccountError::Io)?;
         let path = self.path.clone();
         if self.async_persist.load(Ordering::Acquire) {
+            // The process must see the change immediately (IDENTIFY after
+            // REGISTER). Durability is best-effort; failures are counted.
+            self.store = next;
             let gen = self.persist_gen.fetch_add(1, Ordering::AcqRel) + 1;
             let persist_gen = self.persist_gen.clone();
             let persist_lock = self.persist_lock.clone();
+            let persist_fail = self.persist_fail.clone();
             std::thread::spawn(move || {
                 let _g = persist_lock.lock().unwrap_or_else(|e| e.into_inner());
                 if persist_gen.load(Ordering::Acquire) != gen {
@@ -300,13 +350,31 @@ impl Accounts {
                 }
                 if let Err(e) = write_atomic(&path, &text) {
                     tracing::error!(path = %path.display(), "nick database write failed: {e:?}");
+                    persist_fail.fetch_add(1, Ordering::Relaxed);
                 }
             });
             return Ok(());
         }
         let _g = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
-        write_atomic(&path, &text)
+        write_atomic(&path, &text)?;
+        self.store = next;
+        Ok(())
     }
+}
+
+/// Hold a global Argon2 slot, then run `work` on the blocking pool.
+pub async fn run_password_work<F, T>(work: F) -> Result<T, AccountError>
+where
+    F: FnOnce() -> Result<T, AccountError> + Send + 'static,
+    T: Send + 'static,
+{
+    let _permit = ARGON2_SLOTS
+        .acquire()
+        .await
+        .map_err(|_| AccountError::Hash)?;
+    tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or(Err(AccountError::Hash))
 }
 
 /// True if `s` is an Argon2 PHC string, not a plaintext OPER password.
@@ -550,6 +618,21 @@ mod tests {
         assert!(b.is_ip_banned("203.0.113.9"));
         assert_eq!(b.ip_bans(), &["203.0.113.9".to_string()]);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_failed_save_does_not_keep_the_in_memory_change() {
+        // Parent path is a file, so create_dir_all / rename cannot succeed.
+        let blocker = tmp();
+        std::fs::write(&blocker, "not a directory").unwrap();
+        let path = blocker.join("nicks.json");
+        let mut a = Accounts::empty(&path);
+        assert_eq!(add(&mut a, "alice", "password1"), Err(AccountError::Io));
+        assert!(
+            !a.is_registered("alice"),
+            "a failed write must not occupy the nick in memory"
+        );
+        let _ = std::fs::remove_file(blocker);
     }
 
     #[test]

@@ -45,10 +45,11 @@ impl Server {
                 }
             }
             let real = format!("0 {}", u.realname);
+            let host = self.visible_host(uid, &u);
             self.numeric(
                 uid,
                 num::RPL_WHOREPLY,
-                &[&mask, &u.username, &u.host, &server, &u.nick, &flags, &real],
+                &[&mask, &u.username, &host, &server, &u.nick, &flags, &real],
             );
         }
         self.numeric(uid, num::RPL_ENDOFWHO, &[&mask, "End of /WHO list"]);
@@ -63,17 +64,12 @@ impl Server {
             self.numeric(uid, num::ERR_NOSUCHNICK, &[&nick, "No such nick"]);
             return;
         };
+        let host = self.visible_host(uid, &target);
         let server = self.server_name().to_string();
         self.numeric(
             uid,
             num::RPL_WHOISUSER,
-            &[
-                &target.nick,
-                &target.username,
-                &target.host,
-                "*",
-                &target.realname,
-            ],
+            &[&target.nick, &target.username, &host, "*", &target.realname],
         );
         let desc = match &target.callsign {
             Some(c) if target.is_rf() => format!("Radio station {c}, heard via the gateway"),
@@ -160,6 +156,19 @@ impl Server {
         self.numeric(uid, num::RPL_ENDOFWHOWAS, &[nick, "End of WHOWAS"]);
     }
 
+    /// Listen-only (plaintext off-box) clients do not see IP addresses.
+    /// RF hosts are callsigns, not IPs, and a user always sees their own host.
+    fn visible_host(&self, viewer: &UserId, target: &super::super::state::User) -> String {
+        let viewer_u = self.state.user(viewer);
+        let listen_only = viewer_u.map(|u| u.listen_only).unwrap_or(false);
+        let oper = viewer_u.map(|u| u.oper).unwrap_or(false);
+        if !listen_only || oper || target.is_rf() || target.id == *viewer {
+            target.host.clone()
+        } else {
+            "hidden".into()
+        }
+    }
+
     pub(super) fn cmd_ison(&mut self, uid: &UserId, msg: &Message) {
         if msg.params.is_empty() {
             self.numeric(
@@ -190,12 +199,13 @@ impl Server {
         }
         let mut replies = Vec::new();
         for nick in msg.params.iter().take(5) {
-            if let Some(u) = self.state.by_nick(nick) {
+            if let Some(u) = self.state.by_nick(nick).cloned() {
                 let oper = if u.oper { "*" } else { "" };
                 let away = if u.away.is_some() { "-" } else { "+" };
+                let host = self.visible_host(uid, &u);
                 replies.push(format!(
                     "{}{}={}{}@{}",
-                    u.nick, oper, away, u.username, u.host
+                    u.nick, oper, away, u.username, host
                 ));
             }
         }

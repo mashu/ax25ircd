@@ -172,7 +172,10 @@ impl Server {
             }
             return;
         }
-        let _ = self.radio.sessions.force_touch(src, now);
+        if self.radio.sessions.touch(src, now).is_none() {
+            self.aprs_ack(src, &msg);
+            return;
+        }
 
         let duplicate = msg
             .msgid
@@ -535,7 +538,7 @@ impl Server {
                 return false;
             }
         }
-        if let Some(peer) = self.radio.sessions.force_touch(call, Instant::now()) {
+        if let Some(peer) = self.radio.sessions.touch(call, Instant::now()) {
             peer.registered = true;
         }
         true

@@ -55,6 +55,7 @@ async fn start(config_text: &str) -> String {
     let opts = ListenerOptions {
         ping_interval: Duration::from_secs(60),
         tls: None,
+        admission: Some(srv.admission.clone()),
     };
     tokio::spawn(async move {
         let _ = listen(listener, events_tx, Arc::new(AtomicU64::new(1)), opts).await;
@@ -198,6 +199,47 @@ async fn a_connection_flood_from_one_host_is_capped() {
         "the per-host cap did not bite: {} accepted, {refused} refused",
         held.len()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_sockets_count_toward_max_clients() {
+    let text = CONFIG.replace("max_clients = 0", "max_clients = 3");
+    let addr = start(&text).await;
+    let mut silent = Vec::new();
+    for _ in 0..3 {
+        silent.push(TcpStream::connect(&addr).await.unwrap());
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let extra = TcpStream::connect(&addr).await.unwrap();
+    let (r, mut w) = extra.into_split();
+    w.write_all(b"NICK late\r\nUSER late 0 * :late\r\n")
+        .await
+        .unwrap();
+    let mut lines = BufReader::new(r).lines();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut saw_full = false;
+    let mut welcomed = false;
+    loop {
+        match tokio::time::timeout_at(deadline, lines.next_line()).await {
+            Ok(Ok(Some(line))) => {
+                if line.contains("Server is full") {
+                    saw_full = true;
+                    break;
+                }
+                if line.contains(" 001 ") {
+                    welcomed = true;
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        saw_full && !welcomed,
+        "sockets that have not registered must still occupy max_clients"
+    );
+    drop(silent);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

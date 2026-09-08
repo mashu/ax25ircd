@@ -263,6 +263,59 @@ fn a_listen_only_connection_can_watch_but_not_speak() {
 }
 
 #[test]
+fn listen_only_who_does_not_reveal_client_ips() {
+    let mut n = Net::new();
+    let speaker = n.client(1, "alice");
+    n.send(speaker, "JOIN #lobby");
+    n.drain(speaker);
+    let watcher = n.listen_only_client(2, "eve");
+    n.send(watcher, "JOIN #lobby");
+    n.drain(watcher);
+
+    let who = n.ask(watcher, "WHO #lobby");
+    assert!(
+        !who.iter().any(|l| l.contains("10.9.")),
+        "listen-only WHO must not leak IP addresses: {who:?}"
+    );
+    assert!(
+        who.iter().any(|l| l.contains("hidden")),
+        "other users' hosts are cloaked: {who:?}"
+    );
+    let whois = n.ask(watcher, "WHOIS alice");
+    assert!(
+        !whois.iter().any(|l| l.contains("10.9.")),
+        "listen-only WHOIS must not leak IP addresses: {whois:?}"
+    );
+    let from_speaker = n.ask(speaker, "WHO #lobby");
+    assert!(
+        from_speaker.iter().any(|l| l.contains("10.9.")),
+        "a full-access client still sees hosts: {from_speaker:?}"
+    );
+}
+
+#[test]
+fn user_username_cannot_contain_prefix_delimiters() {
+    let mut n = Net::new();
+    let a = n.raw_client(1);
+    n.send(a, "NICK alice");
+    let lines = n.ask(a, "USER bob!op@x 0 * :Alice");
+    assert!(
+        has_numeric(&lines, "432"),
+        "USER with !/@ must be refused: {lines:?}"
+    );
+    assert!(
+        !n.server
+            .state
+            .user(&ax25ircd::server::state::UserId::Ip(a))
+            .unwrap()
+            .registered,
+        "a refused USER must not complete registration"
+    );
+    n.send(a, "USER bob 0 * :Alice");
+    assert!(has_numeric(&n.drain(a), "001"), "a valid USER still works");
+}
+
+#[test]
 fn a_nick_that_is_taken_or_malformed_is_refused() {
     let mut n = Net::new();
     let a = n.client(1, "alice");
@@ -1012,6 +1065,26 @@ fn a_registered_callsign_cannot_be_taken_by_another_nick() {
         "{lines:?}"
     );
     assert!(n.server.state.user(&user_id(b)).unwrap().callsign.is_none());
+}
+
+#[test]
+fn a_session_callsign_cannot_be_claimed_twice() {
+    let mut n = Net::new();
+    let a = n.client(1, "alice");
+    n.send(a, "CALLSIGN SM0XYZ");
+    n.drain(a);
+    let b = n.client(2, "bob");
+    let lines = n.ask(b, "CALLSIGN SM0XYZ");
+    assert!(
+        lines.iter().any(|l| l.contains("already claimed by alice")),
+        "{lines:?}"
+    );
+    assert!(n.server.state.user(&user_id(b)).unwrap().callsign.is_none());
+    // The holder can say it again.
+    assert!(n
+        .ask(a, "CALLSIGN SM0XYZ")
+        .iter()
+        .any(|l| l.contains("unverified claim")));
 }
 
 #[test]
