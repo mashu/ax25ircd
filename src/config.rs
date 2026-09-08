@@ -557,6 +557,12 @@ impl Config {
         if self.listen.registration_timeout_secs == 0 {
             anyhow::bail!("listen.registration_timeout_secs must be at least 1");
         }
+        if self.accounts.identify_timeout_secs == 0 {
+            anyhow::bail!(
+                "accounts.identify_timeout_secs must be at least 1 (0 releases the nick on the next tick)"
+            );
+        }
+        check_oper_names(&self.opers)?;
         // Each of these parses happily and then makes the server unusable in a
         // way that is hard to diagnose from a client: no nickname is ever
         // valid, no channel can be joined, every radiated message is an
@@ -827,6 +833,23 @@ impl Config {
         }
         addrs
     }
+}
+
+fn check_oper_names(opers: &[OperConfig]) -> anyhow::Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for o in opers {
+        if o.name.trim().is_empty() {
+            anyhow::bail!("[[opers]] name must not be empty");
+        }
+        let key = crate::irc::message::lower(&o.name);
+        if !seen.insert(key) {
+            anyhow::bail!(
+                "duplicate [[opers]] name `{}` (IRC casemapping; the last entry would silently win)",
+                o.name
+            );
+        }
+    }
+    Ok(())
 }
 
 fn check_oper_passwords(opers: &[OperConfig], bind: &[String]) -> anyhow::Result<()> {
@@ -1175,6 +1198,36 @@ ping_interval_secs = 0
 "##;
         let err = Config::from_toml(text).unwrap_err().to_string();
         assert!(err.contains("ping_interval_secs"), "{err}");
+    }
+
+    #[test]
+    fn rejects_zero_identify_timeout() {
+        let text = r##"
+[server]
+name = "test.example"
+[accounts]
+identify_timeout_secs = 0
+"##;
+        let err = Config::from_toml(text).unwrap_err().to_string();
+        assert!(err.contains("identify_timeout_secs"), "{err}");
+    }
+
+    #[test]
+    fn rejects_duplicate_oper_names() {
+        let text = r##"
+[server]
+name = "test.example"
+[listen]
+bind = ["127.0.0.1:6667"]
+[[opers]]
+name = "root"
+password = "operpass1"
+[[opers]]
+name = "ROOT"
+password = "otherpass1"
+"##;
+        let err = Config::from_toml(text).unwrap_err().to_string();
+        assert!(err.contains("duplicate"), "{err}");
     }
 
     #[test]

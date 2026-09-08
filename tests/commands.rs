@@ -794,6 +794,11 @@ fn channel_and_user_modes() {
     // Query.
     assert!(has_numeric(&n.ask(a, "MODE #room"), "324"));
     assert!(has_numeric(&n.ask(a, "MODE alice"), "221"), "user mode");
+    assert!(has_numeric(&n.ask(a, "MODE ALICE"), "221"), "casemapping");
+    assert!(
+        has_numeric(&n.ask(a, "MODE bob"), "502"),
+        "MODE othernick must not echo the caller's umodes"
+    );
 
     // Alice created #room so she is op; bob is not.
     assert!(has_numeric(&n.ask(b, "MODE #room +t"), "482"));
@@ -971,7 +976,7 @@ fn oper_accepts_only_the_configured_credentials() {
     assert!(has_numeric(&n.ask(a, "OPER root"), "461"));
     assert!(!n.server.state.user(&user_id(a)).unwrap().oper);
 
-    assert!(has_numeric(&n.ask(a, "OPER root operpass1"), "381"));
+    assert!(has_numeric(&n.ask(a, "OPER ROOT operpass1"), "381"));
     assert!(n.server.state.user(&user_id(a)).unwrap().oper);
     assert!(n.ask(a, "MODE alice").iter().any(|l| l.contains("+o")));
     let whois = n.ask(a, "WHOIS alice");
@@ -994,6 +999,21 @@ fn oper_accepts_only_the_configured_credentials() {
             .all(|l| !l.contains("RF-TX")),
         "313 must not be reused for RF-TX: {whois:?}"
     );
+}
+
+#[test]
+fn hashed_oper_accepts_the_password_and_a_name_miss_is_still_464() {
+    let hash = "$argon2id$v=19$m=19456,t=2,p=1$UbNQwhjjlChgI6nXhAEvtQ$cUKq82OE3JY3TWAimOT0BiIG1miEs6ean6LaZJKZji8";
+    let text = CONFIG.replace(
+        "password = \"operpass1\"",
+        &format!("password = \"{hash}\""),
+    );
+    let mut n = Net::with(&text);
+    let a = n.client(1, "alice");
+    assert!(has_numeric(&n.ask(a, "OPER nobody operpass1"), "464"));
+    assert!(!n.server.state.user(&user_id(a)).unwrap().oper);
+    assert!(has_numeric(&n.ask(a, "OPER root operpass1"), "381"));
+    assert!(n.server.state.user(&user_id(a)).unwrap().oper);
 }
 
 #[test]
@@ -1447,6 +1467,29 @@ fn the_command_flood_cap_bites_and_says_so() {
 }
 
 #[test]
+fn commands_before_registration_are_rate_limited() {
+    let text = CONFIG
+        .replace("ip_cmds_per_min = 6000", "ip_cmds_per_min = 60")
+        .replace("ip_cmd_burst = 500", "ip_cmd_burst = 5");
+    let mut n = Net::with(&text);
+    let a = n.raw_client(1);
+    n.drain(a);
+    let mut throttled = false;
+    for i in 0..40 {
+        let lines = n.ask(a, &format!("NICK n{i}"));
+        if lines.iter().any(|l| l.contains("Slow down")) {
+            throttled = true;
+            break;
+        }
+    }
+    assert!(throttled, "a pre-registration flood should be throttled");
+    assert!(n
+        .ask(a, "PING :still-here")
+        .iter()
+        .any(|l| l.contains("PONG")));
+}
+
+#[test]
 fn password_guessing_is_throttled_per_host() {
     let text = CONFIG
         .replace("identify_per_min = 600", "identify_per_min = 6")
@@ -1544,7 +1587,7 @@ fn user_id(id: ClientId) -> ax25ircd::server::state::UserId {
 
 #[test]
 fn an_unidentified_registered_nick_is_released_to_a_guest_name() {
-    let text = CONFIG.replace("identify_timeout_secs = 60", "identify_timeout_secs = 0");
+    let text = CONFIG.replace("identify_timeout_secs = 60", "identify_timeout_secs = 1");
     let mut n = Net::with(&text);
 
     // Register the nick, then leave.
@@ -1559,6 +1602,7 @@ fn an_unidentified_registered_nick_is_released_to_a_guest_name() {
     // Somebody else takes it and does not identify.
     let b = n.client(2, "alice");
     n.drain(b);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     n.server.handle(Event::Tick);
     let lines = n.drain(b);
     assert!(
@@ -1588,7 +1632,7 @@ fn an_unidentified_registered_nick_is_released_to_a_guest_name() {
 
 #[test]
 fn a_user_is_disconnected_if_even_the_guest_name_is_taken() {
-    let text = CONFIG.replace("identify_timeout_secs = 60", "identify_timeout_secs = 0");
+    let text = CONFIG.replace("identify_timeout_secs = 60", "identify_timeout_secs = 1");
     let mut n = Net::with(&text);
     let a = n.client(1, "alice");
     n.send(a, "REGISTER goodpassword");
@@ -1603,6 +1647,7 @@ fn a_user_is_disconnected_if_even_the_guest_name_is_taken() {
     let _ = squatter;
     let b = n.client(2, "alice");
     n.drain(b);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     n.server.handle(Event::Tick);
     let lines = n.drain(b);
     assert!(

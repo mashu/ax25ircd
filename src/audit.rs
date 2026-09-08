@@ -72,14 +72,7 @@ impl Audit {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        let mut line = format!("{ts} {kind}");
-        for (k, v) in fields {
-            if v.chars().any(|c| c.is_whitespace()) {
-                line.push_str(&format!(" {k}=\"{}\"", v.replace('"', "'")));
-            } else {
-                line.push_str(&format!(" {k}={v}"));
-            }
-        }
+        let line = format_event(ts, kind, fields);
         tracing::info!(target: "ax25ircd::audit", "{line}");
         let Some(tx) = self.tx.as_ref() else {
             return;
@@ -98,6 +91,31 @@ impl Audit {
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
+}
+
+/// One physical line. User-controlled values (KICK/KILL reasons) must not
+/// split the file, so line breaks and NULs become spaces before quoting.
+fn format_event(ts: u128, kind: &str, fields: &[(&str, &str)]) -> String {
+    let mut line = format!("{} {}", ts, one_line(kind));
+    for (k, v) in fields {
+        let k = one_line(k);
+        let v = one_line(v);
+        if v.chars().any(|c| c.is_whitespace()) {
+            line.push_str(&format!(" {k}=\"{}\"", v.replace('"', "'")));
+        } else {
+            line.push_str(&format!(" {k}={v}"));
+        }
+    }
+    line
+}
+
+fn one_line(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\n' | '\r' | '\0' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}' => ' ',
+            other => other,
+        })
+        .collect()
 }
 
 /// Drain the channel onto disk. Batches whatever has already arrived into one
@@ -138,6 +156,17 @@ mod tests {
         let a = Audit::open(None);
         a.event("kick", &[("reason", "flooding the channel"), ("n", "3")]);
         assert_eq!(a.dropped(), 0);
+
+        let line = format_event(
+            1,
+            "kick",
+            &[("reason", "foo\nbar\u{2028}baz\r"), ("nick", "alice")],
+        );
+        assert_eq!(line.lines().count(), 1, "{line:?}");
+        assert!(!line.contains('\n'), "{line:?}");
+        assert!(!line.contains('\r'), "{line:?}");
+        assert!(!line.contains('\u{2028}'), "{line:?}");
+        assert!(line.contains("foo bar baz"), "{line:?}");
     }
 
     #[tokio::test]

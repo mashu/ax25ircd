@@ -23,6 +23,12 @@ const ARGON2_MAX_IN_FLIGHT: usize = 2;
 
 static ARGON2_SLOTS: Semaphore = Semaphore::const_new(ARGON2_MAX_IN_FLIGHT);
 
+/// Dummy PHC used when `OPER` names a miss so a hashed `[[opers]]` name is
+/// not distinguishable from an unknown name by Argon2 latency. Verification
+/// of this string is discarded; the caller always reports a mismatch.
+pub(crate) const DUMMY_OPER_PHC: &str =
+    "$argon2id$v=19$m=19456,t=2,p=1$zSQjJ545QMpuik2TaPDolQ$n7PzFZZZGHNJDsPNr8OOSMJTE2gU5cOQvk31xduPH60";
+
 /// Argon2id at the OWASP baseline: 19 MiB, two passes, one lane.
 ///
 /// The old 4 MiB setting was well under that, and memory is the parameter
@@ -561,6 +567,11 @@ mod tests {
         );
         assert!(is_phc_hash(&weak));
         assert!(!is_phc_hash("operpass1"));
+        assert!(is_phc_hash(DUMMY_OPER_PHC));
+        assert_eq!(
+            verify_password("wrongpass", DUMMY_OPER_PHC),
+            Err(AccountError::BadPassword)
+        );
     }
 
     #[test]

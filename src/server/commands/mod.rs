@@ -68,8 +68,7 @@ impl Server {
         let registered = self.state.user(&uid).map(|u| u.registered).unwrap_or(false);
         let cmd = msg.command.as_str();
 
-        if registered
-            && !matches!(cmd, "PONG" | "PING" | "QUIT")
+        if !matches!(cmd, "PONG" | "PING" | "QUIT")
             && !self.policy.ip_cmd_rate_ok(&id.to_string(), Instant::now())
         {
             self.notice_user(&uid, "Slow down: command flood protection.");

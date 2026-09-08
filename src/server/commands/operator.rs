@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tracing::info;
 
-use crate::accounts::host_ban_key;
+use crate::accounts::{host_ban_key, AccountError, DUMMY_OPER_PHC};
 use crate::callsign::Callsign;
 use crate::irc::message::{lower, Message};
 use crate::irc::numerics as num;
@@ -32,12 +32,14 @@ impl Server {
         if !self.auth_rate_ok(uid) {
             return;
         }
-        // Compare every configured oper name in constant time. OPER hands
-        // out control of a transmitter, so `==` on the name is not enough
-        // by itself — but the password check is the expensive one.
+        // Compare every configured oper name in constant time, using IRC
+        // casemapping so `Root` and `root` are the same name. A miss with
+        // any hashed [[opers]] still runs Argon2 against a dummy PHC so the
+        // valid names are not distinguishable by latency.
+        let want = lower(name);
         let mut matched: Option<(bool, String)> = None;
         for o in &self.config.opers {
-            if constant_time_eq(&o.name, name) {
+            if constant_time_eq(&lower(&o.name), &want) {
                 matched = Some((
                     crate::accounts::is_phc_hash(&o.password),
                     o.password.clone(),
@@ -45,6 +47,24 @@ impl Server {
             }
         }
         let Some((hashed, secret)) = matched else {
+            if self
+                .config
+                .opers
+                .iter()
+                .any(|o| crate::accounts::is_phc_hash(&o.password))
+            {
+                let password = pass.to_string();
+                let nick = self
+                    .state
+                    .user(uid)
+                    .map(|u| u.nick.clone())
+                    .unwrap_or_default();
+                self.run_argon2(uid, AuthKind::Oper, nick, move || {
+                    let _ = crate::accounts::verify_password(&password, DUMMY_OPER_PHC);
+                    Err(AccountError::BadPassword)
+                });
+                return;
+            }
             self.numeric(uid, num::ERR_PASSWDMISMATCH, &["Password incorrect"]);
             if let Some(u) = self.state.user(uid) {
                 self.audit

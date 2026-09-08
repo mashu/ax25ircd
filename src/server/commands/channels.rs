@@ -84,7 +84,7 @@ impl Server {
         }
         if let Some(chan) = self.state.channel(name) {
             if let Some(k) = &chan.key {
-                if k != key {
+                if !super::constant_time_eq(k, key) {
                     self.numeric(
                         uid,
                         num::ERR_BADCHANNELKEY,
@@ -367,6 +367,19 @@ impl Server {
             return;
         };
         if !is_channel_name(&target) {
+            let own = self
+                .state
+                .user(uid)
+                .map(|u| crate::irc::message::lower(&u.nick))
+                .unwrap_or_default();
+            if crate::irc::message::lower(&target) != own {
+                self.numeric(
+                    uid,
+                    num::ERR_USERSDONTMATCH,
+                    &["Can't change mode for other users"],
+                );
+                return;
+            }
             let modes = if self.state.user(uid).map(|u| u.oper).unwrap_or(false) {
                 if self.state.user(uid).map(|u| u.rf_tx).unwrap_or(false) {
                     "+oR"

@@ -92,11 +92,13 @@ impl KissDecoder {
                         match other {
                             TFEND => FEND,
                             TFESC => FESC,
-                            // Invalid escape: drop the frame, resync on FEND.
+                            // Invalid or dangling FESC: drop the broken frame
+                            // but keep this byte as the start of the next, so
+                            // a following well-formed frame is not eaten while
+                            // hunting for FEND.
                             _ => {
-                                self.in_frame = false;
                                 self.buf.clear();
-                                continue;
+                                other
                             }
                         }
                     } else {
@@ -181,5 +183,29 @@ mod tests {
         // Decoder resynchronises on the next good frame.
         let good = encode(0, CMD_DATA, b"ok");
         assert_eq!(dec.push(&good)[0].payload, b"ok");
+    }
+
+    #[test]
+    fn a_dangling_fesc_does_not_drop_the_next_frame() {
+        let mut dec = KissDecoder::new(1024);
+        // Incomplete frame ending in FESC, then a well-formed frame whose
+        // opening FEND was the previous frame's closer — so the next bytes
+        // are type+payload+FEND, not a fresh FEND.
+        dec.push(&[FEND, CMD_DATA, b'x', FESC]);
+        let mut rest = vec![CMD_DATA];
+        rest.extend_from_slice(b"ok");
+        rest.push(FEND);
+        let frames = dec.push(&rest);
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(frames[0].payload, b"ok");
+
+        // FESC at the end of a read still unescapes across the next read.
+        let mut dec = KissDecoder::new(1024);
+        let wire = encode(0, CMD_DATA, &[FEND, 0x02]);
+        let fesc_at = wire.iter().position(|&b| b == FESC).expect("stuffed FEND");
+        assert!(dec.push(&wire[..=fesc_at]).is_empty());
+        let frames = dec.push(&wire[fesc_at + 1..]);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].payload, vec![FEND, 0x02]);
     }
 }
