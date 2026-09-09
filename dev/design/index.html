@@ -782,6 +782,34 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="4. Identity and trust">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#41-what-an-unauthenticated-callsign-costs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 What an unauthenticated callsign costs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#42-text-from-the-air-is-not-text-you-can-print" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.2 Text from the air is not text you can print
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1145,6 +1173,34 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="4. Identity and trust">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#41-what-an-unauthenticated-callsign-costs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 What an unauthenticated callsign costs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#42-text-from-the-air-is-not-text-you-can-print" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.2 Text from the air is not text you can print
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1483,6 +1539,50 @@ the machine is listen-only.</li>
 <li>RF stations are not IRC accounts. Their identity is the AX.25 source
   address; <code>allow_callsigns</code> / <code>deny_callsigns</code> are the gate.</li>
 </ul>
+<h3 id="41-what-an-unauthenticated-callsign-costs">4.1 What an unauthenticated callsign costs<a class="headerlink" href="#41-what-an-unauthenticated-callsign-costs" title="Permanent link">&para;</a></h3>
+<p>"Identity is a claim" has a consequence worth stating outright, because it is
+easy to build a limit that does not limit anything: <strong>every per-station rate
+limit on the RF side is keyed on a name the sender chooses.</strong> A flood that
+invents a new plausible callsign for each frame gets a brand-new token bucket
+every time, so <code>rf_msgs_per_min</code> bounds one polite station and nothing else.</p>
+<p>Three things used to follow from that, and each is now bounded:</p>
+<ul>
+<li>Each new callsign took a slot in the session table, which is capped at
+  <code>radio.max_peers</code>. A few hundred forged names filled it, and because a full
+  table refuses <em>new</em> peers — deliberately, so a flood cannot evict a station
+  in the middle of a QSO — every real station was locked out until the entries
+  aged out at <code>peer_idle_timeout_secs</code>.</li>
+<li>On the APRS path an unknown station that sends a message with a <code>{msgid}</code> is
+  <em>answered</em>, because a stock radio retries until it hears an ack. A received
+  frame therefore bought a transmission, made under the gateway licensee's
+  callsign, addressed to a station that does not exist.</li>
+<li><code>QUIT</code> and <code>PART</code> from the air went through no rate limit at all, and a
+  forged <code>QUIT</code> removes a station's IRC presence for the cost of one
+  unacknowledged broadcast.</li>
+</ul>
+<p>The fix is a single unkeyed budget: the <em>first</em> frame from a callsign the
+gateway has not heard before is rationed against one bucket shared by every
+unknown station, so an unbounded supply of names no longer buys an unbounded
+supply of resources. An established contact never touches it.</p>
+<p>It authenticates nothing — nothing on this side can. A station that transmits
+continuously can still crowd out new arrivals for as long as it transmits;
+that is jamming, and no software limit answers it. What the budget changes is
+that the damage is proportional to the flood and ends when the flood does,
+instead of leaving a full table behind for half an hour.</p>
+<p>The airtime governor is the backstop under all of this: whatever provokes a
+transmission, the duty cycle, the continuous-run limit and the hourly budget
+still decide whether it is keyed. See <a href="../airtime/">airtime.md</a>.</p>
+<h3 id="42-text-from-the-air-is-not-text-you-can-print">4.2 Text from the air is not text you can print<a class="headerlink" href="#42-text-from-the-air-is-not-text-you-can-print" title="Permanent link">&para;</a></h3>
+<p>An AIRC field is <code>String::from_utf8_lossy</code> of whatever arrived. The encoder
+strips the field separator and CR/LF/NUL, but that is the <em>sender's</em>
+courtesy — a hostile sender writes the payload itself. Anything that renders
+RF-sourced text on a terminal must filter it first
+(<code>policy::strip_terminal_controls</code>), or a station within earshot can set the
+window title, clear the screen, or on a terminal that answers back, put its
+own text on the operator's shell prompt. The gateway sanitises before text
+reaches IRC; <code>ax25irc-station</code> filters everything it prints, including the
+lines it composed itself, because filtering at the one exit is what keeps it
+true of paths added later.</p>
 <p>Commands, flags, and what survives a restart: <a href="../usage/">usage.md</a>.</p>
 <p>A typical club setup: internet users join <code>#rf</code> to follow the QSO; only the
 control operator and nicks they have granted can key the transmitter.
