@@ -250,8 +250,19 @@ impl Station {
         }
     }
 
+    /// Everything the station prints goes through here, and everything it
+    /// prints is filtered — including the lines it composed itself.
+    ///
+    /// An AIRC field is `String::from_utf8_lossy` of whatever was on the air.
+    /// `encode_fields` strips the separator and CR/LF/NUL, but that is the
+    /// *sender's* courtesy and a hostile sender simply does not call it, so
+    /// `ESC ] 0 ; … BEL` from an unidentified station used to reach the
+    /// operator's terminal verbatim. Filtering at the one place output leaves
+    /// the station — rather than at each of the twenty `say` call sites —
+    /// is what makes that true of paths added later as well.
     fn say(&mut self, line: String) {
-        self.output.push(line);
+        self.output
+            .push(crate::policy::strip_terminal_controls(&line));
     }
 
     /// Take everything the station has to say since the last call.
@@ -1022,6 +1033,60 @@ mod tests {
             tx.iter()
                 .map(|ax| ax.destination.call.to_string())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// `encode_fields` is what a well-behaved sender uses. A hostile one
+    /// writes the payload itself, and `fields()` is `from_utf8_lossy`, so
+    /// anything at all can arrive — including the sequences that make a
+    /// terminal act rather than draw.
+    #[tokio::test]
+    async fn escape_sequences_from_the_air_never_reach_the_terminal() {
+        let (mut s, _far) = station();
+        // [target, text] uplink shape, built by hand: OSC 0 (set window
+        // title, which some terminals will report back onto the shell's input
+        // line), CSI 2J (clear screen), and a right-to-left override.
+        let mut payload = b"#rf".to_vec();
+        payload.push(0x1F);
+        payload.extend_from_slice("hi\u{1b}]0;pwned\u{7}\u{1b}[2J\u{202e}bye".as_bytes());
+        let ax = Ax25Frame::ui(
+            "SM0XYZ-9".parse().unwrap(),
+            "AIRC".parse().unwrap(),
+            &[],
+            AircFrame::new(Kind::Msg, 42, payload).encode(),
+        )
+        .unwrap();
+        s.handle_rf(ax);
+
+        let out = s.drain_output();
+        assert!(!out.is_empty(), "the message should still be shown");
+        for line in &out {
+            assert!(
+                !line.chars().any(|c| c.is_control()),
+                "a control character from the air reached the terminal: {line:?}"
+            );
+            assert!(
+                !line.contains('\u{202e}'),
+                "a bidi override from the air reached the terminal: {line:?}"
+            );
+        }
+        // Filtered, not swallowed: the readable part still gets through.
+        assert!(
+            out.iter().any(|l| l.contains("hi") && l.contains("bye")),
+            "{out:?}"
+        );
+    }
+
+    /// The filter is on output, so it must not eat the client's own
+    /// formatting — the help line is column-aligned with double spaces.
+    #[tokio::test]
+    async fn local_output_keeps_its_spacing() {
+        let (mut s, _far) = station();
+        s.handle_input("/help");
+        let out = s.drain_output();
+        assert!(
+            out.iter().any(|l| l.contains("/join #chan  /part")),
+            "the help line lost its alignment: {out:?}"
         );
     }
 

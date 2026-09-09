@@ -1454,3 +1454,97 @@ async fn a_digipeated_aprs_beacon_is_shown_once() {
         .count();
     assert_eq!(n, 1, "the second copy is a digipeat, not a new beacon");
 }
+
+/// A callsign on the air is a claim, not an identity, so every limiter keyed
+/// on one hands a fresh bucket to a sender that invents a new name per frame.
+/// That bought a session-table slot each time — and the table is capped, so a
+/// few hundred forged names locked every real station out for the idle
+/// timeout. The global first-contact bucket is what bounds it.
+///
+/// It does not stop a station that transmits continuously from crowding out
+/// new arrivals while it is transmitting: nothing at this layer can, that is
+/// jamming. What it does is keep the damage proportional to the flood and end
+/// it when the flood ends, instead of leaving a full table behind for half an
+/// hour.
+#[tokio::test]
+async fn a_flood_of_forged_callsigns_cannot_fill_the_session_table() {
+    let mut rf = Rf::new();
+    // An established station, on the air before the flood starts.
+    rf.heard("SM0ABC-7", Kind::Hello, &["SM0ABC-7"]);
+    rf.heard("SM0ABC-7", Kind::Join, &["#rf"]);
+    assert!(rf.station("SM0ABC-7").is_some());
+
+    // Plausible, distinct, and none of them real.
+    for i in 0..400 {
+        let call = format!("SM{}A{:02}", i % 10, i / 10);
+        rf.heard(&call, Kind::Hello, &[&call]);
+    }
+
+    let stations = rf.server.radio.sessions.peers().count();
+    let capacity = rf.server.radio.sessions.config.max_peers;
+    assert!(
+        stations * 4 < capacity,
+        "a forged-callsign flood took {stations} of {capacity} session slots; \
+         the first-contact budget exists so it cannot"
+    );
+
+    // The station that was already here is untouched — the budget rations
+    // first contact, not conversation — and can still be talked to.
+    assert!(
+        rf.station("SM0ABC-7").is_some(),
+        "the flood displaced an established station"
+    );
+    rf.heard("SM0ABC-7", Kind::Msg, &["#rf", "still here"]);
+    assert!(
+        rf.server
+            .radio
+            .sessions
+            .peer(&"SM0ABC-7".parse::<Callsign>().unwrap())
+            .is_some(),
+        "an established station lost its session to the flood"
+    );
+}
+
+/// The APRS path answers an unknown station, so a received frame buys a
+/// transmission. Rationing first contact is what stops that converting a
+/// forged-callsign flood into the licensee's airtime.
+#[tokio::test]
+async fn forged_callsigns_do_not_each_earn_an_aprs_ack() {
+    let mut rf = Rf::new();
+    for i in 0..200 {
+        let call = format!("SM{}B{:02}", i % 10, i / 10);
+        rf.heard_aprs(&call, "APRS", b":SK0MT-1  :#rf hello{01");
+    }
+    let acks = rf
+        .transmitted_raw()
+        .await
+        .into_iter()
+        .filter(|ax| ax.info.starts_with(b":"))
+        .count();
+    assert!(
+        acks <= 16,
+        "{acks} APRS acks were transmitted for 200 forged callsigns"
+    );
+}
+
+/// Every other control frame goes through the per-station rate limit; QUIT
+/// did not, and it is the cheapest frame to forge — one unacknowledged
+/// broadcast removed a station from IRC.
+#[tokio::test]
+async fn a_forged_quit_is_rate_limited_like_every_other_control_frame() {
+    let mut rf = Rf::with(&CONFIG.replace("rf_msgs_per_min = 600", "rf_msgs_per_min = 60"));
+    rf.heard("SM0ABC-7", Kind::Hello, &["SM0ABC-7"]);
+    rf.heard("SM0ABC-7", Kind::Join, &["#rf"]);
+    assert!(rf.station("SM0ABC-7").is_some(), "the station should be on");
+
+    // Spend the station's control budget, then check the QUIT after it is
+    // refused rather than acted on.
+    for _ in 0..200 {
+        rf.heard("SM0ABC-7", Kind::Names, &["#rf"]);
+    }
+    rf.heard("SM0ABC-7", Kind::Quit, &["bye"]);
+    assert!(
+        rf.station("SM0ABC-7").is_some(),
+        "a QUIT past the rate limit still removed the station"
+    );
+}

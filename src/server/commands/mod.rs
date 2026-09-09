@@ -252,9 +252,15 @@ impl Server {
 /// Lengths are still distinguishable (they always are, over a network), but
 /// the content comparison is uniform, so an attacker cannot walk a password
 /// out one byte at a time.
+///
+/// The length difference is folded in as a boolean rather than as its own low
+/// byte: `(a.len() ^ b.len()) as u8` truncates, so lengths differing by a
+/// multiple of 256 XOR to zero in the octet that survives, and the bytes that
+/// only one side has then compare against the `unwrap_or(0)` below. That made
+/// `eq("hunter2x", "hunter2x" + 256 NULs)` true.
 fn constant_time_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
-    let mut diff = (a.len() ^ b.len()) as u8;
+    let mut diff = u8::from(a.len() != b.len());
     let n = a.len().max(b.len());
     for i in 0..n {
         let x = a.get(i).copied().unwrap_or(0);
@@ -275,5 +281,28 @@ mod tests {
         assert!(!constant_time_eq("hunter2x", "hunter2xx"));
         assert!(!constant_time_eq("", "x"));
         assert!(constant_time_eq("", ""));
+    }
+
+    /// A length difference of a whole multiple of 256 used to vanish when the
+    /// XOR of the two lengths was truncated to a `u8`, and the trailing bytes
+    /// the shorter side does not have compare as NUL — so a secret followed by
+    /// 256 NULs was accepted as the secret. An IRC line has room for that.
+    #[test]
+    fn a_length_difference_of_256_is_still_a_difference() {
+        for pad in [256, 512] {
+            let padded = format!("hunter2x{}", "\0".repeat(pad));
+            assert!(
+                !constant_time_eq("hunter2x", &padded),
+                "{pad} trailing NULs were treated as equal"
+            );
+            assert!(
+                !constant_time_eq(&padded, "hunter2x"),
+                "{pad} trailing NULs were treated as equal (reversed)"
+            );
+            assert!(
+                !constant_time_eq("", &"\0".repeat(pad)),
+                "an empty secret matched {pad} NULs"
+            );
+        }
     }
 }

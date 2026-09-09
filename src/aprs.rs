@@ -340,6 +340,16 @@ fn decode_uncompressed(rest: &[u8]) -> Option<String> {
 }
 
 fn format_uncomp_coord(raw: &str, deg_len: usize) -> Option<String> {
+    // `deg_len` and the slices below are byte offsets, so a multi-byte
+    // character straddling one of them is a panic rather than a rejected
+    // frame. Only the latitude is checked by `uncompressed_lat`; the
+    // longitude arrives as nine arbitrary octets that merely happened to be
+    // valid UTF-8, and a pair such as 0xC3 0xA9 puts a continuation byte
+    // exactly where the degrees end. A coordinate is digits and a
+    // hemisphere letter, so anything outside ASCII is not one.
+    if !raw.is_ascii() {
+        return None;
+    }
     let hemi = raw.chars().last()?;
     let body = &raw[..raw.len() - 1];
     if body.len() < deg_len + 3 {
@@ -581,6 +591,38 @@ mod tests {
         assert_eq!(b.summary, "59°30.00N 018°03.00E");
         let b = AprsBeacon::decode(b"/092345z5930.00N/01803.00E-hello").unwrap();
         assert_eq!(b.summary, "59°30.00N 018°03.00E - hello");
+    }
+
+    /// A longitude field is nine raw octets: `decode_uncompressed` checks
+    /// only that they are valid UTF-8 and end in a hemisphere letter, and
+    /// then slices the result at byte offsets. A multi-byte character
+    /// straddling one of those offsets used to abort the process — and this
+    /// runs before the frame is checked for being ours, so any station on
+    /// frequency could send it.
+    #[test]
+    fn a_position_with_a_multibyte_coordinate_is_refused_not_fatal() {
+        for lon in [
+            "AB\u{e9}1234E",
+            "x\u{10348}xA.E",
+            "\u{e9}\u{e9}\u{e9}\u{e9}E",
+        ] {
+            assert_eq!(lon.len(), 9, "test vector must fill the field: {lon:?}");
+            let mut info = vec![b'!'];
+            info.extend_from_slice(b"5930.00N");
+            info.push(b'/');
+            info.extend_from_slice(lon.as_bytes());
+            info.push(b'X');
+            // Returning at all is half the point. The other half is that a
+            // field that is not a coordinate is not rendered as one: the
+            // fallback shows the printable remainder, without a degree sign.
+            let got = AprsBeacon::decode(&info);
+            assert!(
+                !got.iter().any(|b| b.summary.contains('\u{b0}')),
+                "a non-ASCII coordinate was rendered as a position: {got:?}"
+            );
+        }
+        // The ASCII form still decodes.
+        assert!(AprsBeacon::decode(b"!5930.00N/01803.00E-").is_some());
     }
 
     #[test]
