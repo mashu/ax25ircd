@@ -16,6 +16,7 @@ async fn main() -> anyhow::Result<()> {
     let (path, check_only) = match cli::parse_args(std::env::args().skip(1)) {
         cli::Invocation::Run { path } => (path, false),
         cli::Invocation::Check { path } => (path, true),
+        cli::Invocation::Init { path } => return ax25ircd::wizard::run(&path),
         cli::Invocation::HashPassword => {
             use std::io::Read;
             let mut password = String::new();

@@ -35,6 +35,16 @@ tokio-serial = { version = "5", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustls-pemfile = "2"
+# Self-signed certificates for `--init`. Pure Rust, and it shares `ring` with
+# rustls, so the marginal cost over what TLS already pulls in is small — which
+# matters because the release artifacts are static musl builds with no OpenSSL.
+# Not optional: the release workflow builds with no `--features`, so anything
+# gated would be missing from exactly the binaries the installer ships.
+rcgen = "0.13"
+# SHA-256 for the certificate fingerprint `--init` prints, so a self-signed
+# cert can be pinned in an IRC client. Already in the tree under rustls;
+# naming it directly costs no extra compilation.
+ring = "0.17"
 
 [features]
 default = []
@@ -48,4 +58,4 @@ lto = "thin"
 panic = "abort"
 
 [dev-dependencies]
-rcgen = "0.13"
+# rcgen moved to [dependencies] for `--init`; tests use it from there.

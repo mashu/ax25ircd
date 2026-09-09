@@ -31,12 +31,13 @@ dependencies = [
 
 [[package]]
 name = "ax25ircd"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "argon2",
  "password-hash",
  "rcgen",
+ "ring",
  "rustls",
  "rustls-pemfile",
  "serde",
