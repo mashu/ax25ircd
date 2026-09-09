@@ -127,6 +127,15 @@ fn default_server_name() -> String {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
+    tidy_server_name(&raw)
+}
+
+/// Turn whatever `hostname` said into something usable as an IRC server name.
+///
+/// Split out from the command so the three cases are testable without
+/// arranging for `hostname` to be absent, misbehaving, or to return a name
+/// with a `_` in it.
+fn tidy_server_name(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
@@ -952,6 +961,324 @@ mod tests {
         // Hashed, so it is accepted on a non-loopback listener too — the
         // check the wizard exists to make unnecessary to think about.
         assert!(crate::accounts::is_phc_hash(&config.opers[0].password));
+    }
+
+    /// A `Write` that fails once it has taken `budget` bytes, so the `?` on
+    /// every prompt has something to propagate.
+    struct FailingWriter {
+        budget: usize,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.budget == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "output closed",
+                ));
+            }
+            let n = buf.len().min(self.budget);
+            self.budget -= n;
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A terminal that goes away mid-interview is an error, not a panic and
+    /// not a half-answered `Answers`. Every prompt writes before it reads, so
+    /// this walks the `?` on all of them.
+    #[test]
+    fn output_that_fails_partway_is_reported() {
+        const SCRIPT: &[u8] = b"\n\n\nn\n3\nn\n";
+        let defaults = Defaults {
+            server_name: "test.local".into(),
+            conf_dir: PathBuf::from("/nonexistent"),
+            terminal: false,
+        };
+
+        // How much this interview writes when nothing goes wrong. Anything
+        // less than that must fail; anything more would not be a failing
+        // writer at all, which is why the sweep stops here rather than at an
+        // arbitrary number.
+        let total = {
+            let mut inp = std::io::Cursor::new(SCRIPT.to_vec());
+            let mut out: Vec<u8> = Vec::new();
+            interview(&mut inp, &mut out, &defaults).expect("baseline run");
+            out.len()
+        };
+        assert!(total > 0);
+
+        // Every prompt writes before it reads, so cutting the output at each
+        // of these points walks the `?` on every write in the flow.
+        for budget in (0..total).step_by(7) {
+            let mut inp = std::io::Cursor::new(SCRIPT.to_vec());
+            let mut out = FailingWriter { budget };
+            assert!(
+                interview(&mut inp, &mut out, &defaults).is_err(),
+                "a writer that failed after {budget} of {total} bytes was not reported"
+            );
+        }
+    }
+
+    /// Every prompt that can be answered wrongly asks again rather than
+    /// taking the bad value or giving up.
+    #[test]
+    fn invalid_answers_are_asked_again() {
+        // radio yes; a yes/no typo, a non-numeric menu choice, an
+        // out-of-range one, a bad TCP port, and a channel name with a space.
+        let script = concat!(
+            "\n\n\n",         // server, network, bind
+            "maybe\ny\n",     // yes/no typo, then yes
+            "SK0MT-1\n",      // callsign
+            "banana\n9\n1\n", // TNC menu: not a number, out of range, then 1
+            "127.0.0.1\n",
+            "notaport\n70000\n8001\n", // port: text, out of u16 range, then good
+            "\n",                      // baud default
+            "no spaces here\nrf\n#rf\n", // channel: spaces, no sigil, then good
+            "\n",                      // transmitter stays off
+            "3\n",                     // no TLS
+            "n\n",                     // no oper
+        );
+        let a = answers_from(script).expect("interview");
+        let radio = a.radio.as_ref().expect("radio");
+        assert_eq!(radio.channel, "#rf");
+        assert_eq!(
+            radio.tnc,
+            TncAnswer::Tcp {
+                host: "127.0.0.1".into(),
+                port: 8001
+            }
+        );
+        Config::from_toml(&render(&a)).expect("must validate");
+    }
+
+    /// `ask` has two edges that are easy to get wrong: input ending on a
+    /// question that has a default, and an empty answer to one that does not.
+    #[test]
+    fn ask_handles_eof_and_required_answers() {
+        // EOF on a question with a default takes the default.
+        let mut inp = std::io::Cursor::new(Vec::new());
+        let mut out: Vec<u8> = Vec::new();
+        assert_eq!(
+            ask(&mut inp, &mut out, "Server name", "fallback.local").unwrap(),
+            "fallback.local"
+        );
+
+        // EOF on a required question is an error, not an empty string.
+        let mut inp = std::io::Cursor::new(Vec::new());
+        let mut out: Vec<u8> = Vec::new();
+        assert!(ask(&mut inp, &mut out, "Callsign", "").is_err());
+
+        // A bare Enter on a required question asks again.
+        let mut inp = std::io::Cursor::new(b"\n\n  \nSK0MT-1\n".to_vec());
+        let mut out: Vec<u8> = Vec::new();
+        assert_eq!(ask(&mut inp, &mut out, "Callsign", "").unwrap(), "SK0MT-1");
+        assert!(
+            String::from_utf8_lossy(&out).contains("(needed)"),
+            "the operator was not told the answer was required"
+        );
+    }
+
+    /// Choosing existing certificate files rather than generating a pair.
+    /// Nothing is generated, and the paths given are what the config names.
+    #[test]
+    fn certificate_files_can_be_supplied_instead_of_generated() {
+        let dir = scratch("byo");
+        // A real pair, so the written config validates — `Config::validate`
+        // loads whatever the paths point at.
+        let cert = dir.join("mine-cert.pem");
+        let key = dir.join("mine-key.pem");
+        write_self_signed(vec!["gw.example".into()], &cert, &key).expect("pair");
+
+        let path = dir.join("ax25ircd.toml");
+        let defaults = Defaults {
+            server_name: "gw.example".into(),
+            conf_dir: dir.clone(),
+            terminal: false,
+        };
+        let script = format!(
+            "\n\n\nn\n2\n127.0.0.1:6697\n{}\n{}\nn\n",
+            cert.display(),
+            key.display()
+        );
+        let mut inp = std::io::Cursor::new(script.into_bytes());
+        let mut out: Vec<u8> = Vec::new();
+        run_with(&mut inp, &mut out, &path.to_string_lossy(), &defaults).expect("run");
+
+        assert!(
+            !dir.join("tls-cert.pem").exists(),
+            "a certificate was generated when the operator supplied one"
+        );
+        let shown = String::from_utf8_lossy(&out);
+        assert!(
+            !shown.contains("SHA-256"),
+            "a fingerprint was printed for a certificate we did not make"
+        );
+        let config = Config::from_toml(&std::fs::read_to_string(&path).unwrap()).expect("validate");
+        assert_eq!(
+            config.listen.tls.as_ref().unwrap().cert,
+            cert.to_string_lossy()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A radio station with no TLS: the closing advice has to say the
+    /// transmitter is off and how to turn it on, because that is the one
+    /// thing the wizard deliberately did not do.
+    #[test]
+    fn the_closing_advice_says_the_transmitter_is_off() {
+        let dir = scratch("advice");
+        let path = dir.join("ax25ircd.toml");
+        let defaults = Defaults {
+            server_name: "gw.example".into(),
+            conf_dir: dir.clone(),
+            terminal: false,
+        };
+        // Non-loopback plaintext bind and no TLS, so the OPER note fires too.
+        let script =
+            "\n\n0.0.0.0:6667\ny\nSK0MT-1\n\n\n\n\n\n\n3\ny\nsysop\nlongenough1\nlongenough1\n";
+        let mut inp = std::io::Cursor::new(script.as_bytes().to_vec());
+        let mut out: Vec<u8> = Vec::new();
+        run_with(&mut inp, &mut out, &path.to_string_lossy(), &defaults).expect("run");
+
+        let shown = String::from_utf8_lossy(&out);
+        assert!(shown.contains("transmitter is off"), "{shown}");
+        assert!(shown.contains("radio.enabled = true"), "{shown}");
+        assert!(
+            shown.contains("only reachable"),
+            "no TLS and a public bind should warn about OPER: {shown}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The serial arm of the renderer. Asking for it needs a build with
+    /// `--features serial`; writing it out does not, and a config that names
+    /// a serial TNC has to come out right either way.
+    #[test]
+    fn a_serial_tnc_renders() {
+        let a = Answers {
+            server_name: "gw.example".into(),
+            network: "AX25IRC".into(),
+            plain_bind: "127.0.0.1:6667".into(),
+            radio: Some(RadioAnswers {
+                callsign: "SK0MT-1".parse().unwrap(),
+                enabled: false,
+                tnc: TncAnswer::Serial {
+                    path: "/dev/ttyUSB0".into(),
+                    baud: 9600,
+                },
+                baud: 1200,
+                channel: "#rf".into(),
+            }),
+            tls: None,
+            oper: None,
+        };
+        let text = render(&a);
+        assert!(text.contains("kind = \"serial\""), "{text}");
+        assert!(text.contains("device = \"/dev/ttyUSB0\""), "{text}");
+        // Two different rates, and they must not be confused: the line speed
+        // to the TNC is not the symbol rate on the air.
+        assert!(text.contains("baud = 9600"), "{text}");
+        assert!(text.contains("baud = 1200"), "{text}");
+        Config::from_toml(&text).expect("must validate");
+    }
+
+    /// The serial menu entry only exists in a build that can open a serial
+    /// port, so the question is only reachable — and only worth asking —
+    /// under that feature.
+    #[cfg(feature = "serial")]
+    #[test]
+    fn a_serial_tnc_can_be_chosen() {
+        let script = concat!(
+            "\n\n\ny\n",                   // server, network, bind, radio yes
+            "SK0MT-1\n",                   // callsign
+            "2\n",                         // TNC menu: serial
+            "/dev/ttyUSB1\nnope\n19200\n", // device, bad line speed, good one
+            "\n\n\n",                      // baud, channel, transmitter off
+            "3\nn\n",                      // no TLS, no oper
+        );
+        let a = answers_from(script).expect("interview");
+        assert_eq!(
+            a.radio.as_ref().unwrap().tnc,
+            TncAnswer::Serial {
+                path: "/dev/ttyUSB1".into(),
+                baud: 19200
+            }
+        );
+        Config::from_toml(&render(&a)).expect("must validate");
+    }
+
+    #[test]
+    fn control_characters_in_an_answer_cannot_break_the_file() {
+        assert_eq!(toml_str("a\tb"), "\"a\\tb\"");
+        assert_eq!(toml_str("a\nb"), "\"a\\nb\"");
+        assert_eq!(toml_str("a\rb"), "\"a\\rb\"");
+        assert_eq!(toml_str("a\u{1b}b"), "\"a\\u001Bb\"");
+        let a = Answers {
+            server_name: "we\u{1b}[2Jird\tname".into(),
+            network: "net\nwork".into(),
+            plain_bind: "127.0.0.1:6667".into(),
+            radio: None,
+            tls: None,
+            oper: None,
+        };
+        Config::from_toml(&render(&a)).expect("must still parse");
+    }
+
+    #[test]
+    fn a_hostname_becomes_a_plausible_server_name() {
+        assert_eq!(tidy_server_name("gw.example.org"), "gw.example.org");
+        assert_eq!(tidy_server_name("shack"), "shack.local");
+        // `_` is not legal in a hostname and is filtered rather than kept.
+        assert_eq!(tidy_server_name("my_box"), "mybox.local");
+        // `hostname` missing or silent.
+        assert_eq!(tidy_server_name(""), "ax25irc.local");
+        assert_eq!(tidy_server_name("   "), "ax25irc.local");
+    }
+
+    /// Paths with no directory component. `write_self_signed` and the config
+    /// writer both guard `path.parent()` before creating anything, and the
+    /// "there is no parent" side of that guard is what a bare filename takes.
+    #[test]
+    fn a_bare_filename_needs_no_directory_created() {
+        let dir = scratch("bare");
+        let cwd = std::env::current_dir().expect("cwd");
+        // `write_self_signed` takes the paths as given, so chdir is how a
+        // bare relative name is exercised without writing into the repo.
+        std::env::set_current_dir(&dir).expect("chdir");
+        let result = write_self_signed(
+            vec!["localhost".into()],
+            Path::new("bare-cert.pem"),
+            Path::new("bare-key.pem"),
+        );
+        std::env::set_current_dir(&cwd).expect("chdir back");
+
+        let fp = result.expect("a bare filename must work");
+        assert_eq!(fp.split(':').count(), 32, "{fp}");
+        assert!(dir.join("bare-cert.pem").exists());
+        assert!(dir.join("bare-key.pem").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn certificates_go_beside_the_config_file() {
+        let d = Defaults::for_config_path(Path::new("/etc/ax25ircd/ax25ircd.toml"));
+        assert_eq!(d.conf_dir, PathBuf::from("/etc/ax25ircd"));
+        // A bare filename means the working directory, not the filesystem root.
+        let d = Defaults::for_config_path(Path::new("ax25ircd.toml"));
+        assert_eq!(d.conf_dir, PathBuf::from("."));
+    }
+
+    /// Echo is only ever taken when the caller says the reader is the
+    /// terminal. This is the guard that keeps `cargo test` from turning off
+    /// echo in the shell that started it.
+    #[test]
+    fn echo_is_left_alone_unless_the_caller_owns_the_terminal() {
+        let guard = EchoOff::new(false);
+        assert!(!guard.active, "echo must not be touched on a scripted run");
+        drop(guard);
     }
 
     /// An interview that never finishes must not leave a certificate, a key
