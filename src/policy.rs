@@ -104,6 +104,7 @@ pub struct Policy {
     identify: RateLimiter,
     topic: RateLimiter,
     presence: RateLimiter,
+    first_contact: RateLimiter,
 }
 
 impl Policy {
@@ -119,6 +120,13 @@ impl Policy {
         // backlog.
         let topic = RateLimiter::new(6, 2);
         let presence = RateLimiter::new(12, 4);
+        // Deliberately not keyed, and deliberately small. See
+        // `first_contact_ok`: this is the one bucket a forged callsign
+        // cannot get a fresh copy of. Real stations arrive a handful at a
+        // time — after a gateway restart the regulars trickle back over a
+        // couple of minutes, and HELLO is retransmitted, so the cost of
+        // being early is a repeat rather than a lockout.
+        let first_contact = RateLimiter::new(10, 5);
         Self {
             config,
             rf_out,
@@ -128,6 +136,7 @@ impl Policy {
             identify,
             topic,
             presence,
+            first_contact,
         }
     }
 
@@ -154,6 +163,25 @@ impl Policy {
 
     pub fn rf_station_rate_ok(&mut self, call: &Callsign, now: Instant) -> bool {
         self.rf_out.check(&call.to_string(), now)
+    }
+
+    /// May we spend work on a station we have never heard before?
+    ///
+    /// Every other RF limiter is keyed on the AX.25 source callsign, which is
+    /// a claim anybody within earshot can make (see `docs/design.md`, "Trust
+    /// model"). A flood that invents a new callsign per frame therefore gets a
+    /// brand-new token bucket every time and is not rate-limited at all — and
+    /// each fresh callsign takes a slot in the session table, which is capped,
+    /// and on the APRS path earns an ACK, which is a transmission the licensee
+    /// makes on behalf of a station that does not exist.
+    ///
+    /// One unkeyed bucket shared by every unknown station fixes the shape of
+    /// that: the *first* frame from a new callsign is the rationed one, and an
+    /// established contact is untouched because it is no longer new. It does
+    /// not authenticate anything — nothing on this side can — it just stops an
+    /// unbounded supply of names buying an unbounded supply of resources.
+    pub fn first_contact_ok(&mut self, now: Instant) -> bool {
+        self.first_contact.check("rf", now)
     }
 
     pub fn ip_rate_ok(&mut self, key: &str, now: Instant) -> bool {
@@ -208,6 +236,13 @@ impl Policy {
         self.rf_channel.expire(now, Duration::from_secs(3600));
         self.ip_cmds.expire(now, Duration::from_secs(3600));
         self.identify.expire(now, Duration::from_secs(3600));
+        // Keyed on channel names, which are chosen by whoever is connected,
+        // so these grow too — and once a limiter is full every new key costs
+        // a linear scan to evict the oldest. They were the two that were
+        // never swept.
+        self.topic.expire(now, Duration::from_secs(3600));
+        self.presence.expire(now, Duration::from_secs(3600));
+        self.first_contact.expire(now, Duration::from_secs(3600));
     }
 }
 
@@ -241,7 +276,11 @@ pub fn sanitize(text: &str) -> String {
                     out.push(' ');
                 }
             }
+            // C0 that is not whitespace, DEL, and the C1 block — U+009B is
+            // an eight-bit CSI, and none of the rest mean anything to a
+            // human with a TNC and a terminal, which is the audience.
             c if (c as u32) < 0x20 => {}
+            '\u{7f}'..='\u{9f}' => {}
             ' ' => {
                 if !out.ends_with(' ') {
                     out.push(' ');
@@ -251,6 +290,36 @@ pub fn sanitize(text: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+/// Remove everything a terminal would act on rather than draw.
+///
+/// [`sanitize`] prepares text for *the air*, so it also collapses runs of
+/// whitespace and strips IRC colour codes — both wrong for something being
+/// rendered locally, where a double space is just a double space. This is the
+/// transform for text on its way to a console: take out the escape sequences
+/// and leave the rest exactly as it was sent.
+///
+/// What goes:
+///
+/// * C0 controls and DEL. `ESC` is the one that matters — `ESC ] 0 ; … BEL`
+///   sets the window title and `ESC [ 2 J` clears the screen, and on a
+///   terminal that answers back, a title query can put the attacker's text on
+///   the shell's input line.
+/// * C1 controls (U+0080–U+009F), which include an 8-bit `CSI` that some
+///   terminals still honour in UTF-8 mode.
+/// * Bidirectional overrides and isolates. They do not run commands, but they
+///   reorder what is drawn, so a callsign can be made to render as another
+///   one — and on this side of the gateway a callsign is the only identity
+///   there is.
+pub fn strip_terminal_controls(text: &str) -> String {
+    text.chars()
+        .filter(|&c| {
+            !(c.is_control()
+                || ('\u{80}'..='\u{9f}').contains(&c)
+                || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        })
+        .collect()
 }
 
 /// Heuristic detector for "this is not plain language".

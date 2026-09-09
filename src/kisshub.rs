@@ -32,6 +32,15 @@ const CLIENT_QUEUE: usize = 256;
 /// channel, not the air — but not unbounded.
 const MAX_FRAME: usize = 2048;
 
+/// Stations allowed on the channel at once.
+///
+/// A real frequency has a practical limit and so should this: each client
+/// costs a task and a `CLIENT_QUEUE`-deep buffer of frames, so an unbounded
+/// number of them is an unbounded amount of memory. The default bind is
+/// loopback, but `--bind` takes any address and somebody will eventually
+/// point it at one.
+const MAX_STATIONS: usize = 64;
+
 type Clients = Arc<Mutex<HashMap<u64, mpsc::Sender<Vec<u8>>>>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,6 +112,14 @@ pub async fn serve(listener: TcpListener, opts: Options) -> std::io::Result<()> 
                 continue;
             }
         };
+        if clients.lock().await.len() >= MAX_STATIONS {
+            // Refused rather than queued: there is nothing useful to say to a
+            // KISS client, and holding the socket open would cost the memory
+            // the cap exists to bound.
+            eprintln!("channel full ({MAX_STATIONS} stations); refusing {peer}");
+            drop(stream);
+            continue;
+        }
         let id = ids.fetch_add(1, Ordering::Relaxed);
         println!("station {id} on channel ({peer})");
         let clients = clients.clone();

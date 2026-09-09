@@ -555,7 +555,15 @@ async fn pump(
         let wake = match poll {
             Poll::Idle => now_tx + Duration::from_secs(3600),
             Poll::Wait(d) => now_tx + d,
-            Poll::Ready if interlock => now_tx + Duration::from_millis(200),
+            // A held frame and a failing interlock re-polls while the
+            // interlock stays down. `interlock::spawn` notifies `wake` on
+            // recovery so this is normally not what notices, but it must
+            // stay short enough to be a real backstop: anything else that
+            // clears `interlock_ok` without notifying would otherwise leave
+            // the transmitter held for the length of this sleep. Half a
+            // second halves the idle wakeups the 200 ms poll cost without
+            // making recovery depend on the notify arriving.
+            Poll::Ready if interlock => now_tx + Duration::from_millis(500),
             Poll::Ready => now_tx,
         };
 
@@ -618,6 +626,21 @@ async fn pump(
                 }
                 match governor.check(bytes.len(), now) {
                     TxDecision::Send => {
+                        // Re-read the interlock immediately before keying.
+                        // It was checked once before the item was popped,
+                        // which leaves the governor decision and the encode
+                        // between the check and the write; `inhibit` is
+                        // already re-read above, and the interlock is the one
+                        // that says the antenna may be disconnected or
+                        // somebody may be up the tower. Requeued, not
+                        // dropped: the frame is still wanted when it clears.
+                        if shared.interlock_failed() {
+                            scheduler
+                                .lock()
+                                .unwrap_or_else(|g| g.into_inner())
+                                .requeue(item, now, Duration::from_millis(200));
+                            continue;
+                        }
                         if let Err(e) = write_kiss_bytes(&mut link, config, &item.payload, &bytes).await {
                             scheduler
                                 .lock()

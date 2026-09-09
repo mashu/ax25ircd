@@ -112,7 +112,14 @@ fn format_event(ts: u128, kind: &str, fields: &[(&str, &str)]) -> String {
 fn one_line(s: &str) -> String {
     s.chars()
         .map(|c| match c {
-            '\n' | '\r' | '\0' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}' => ' ',
+            // Every control character, not the seven that split a line.
+            // KICK and KILL reasons are user text and reach this file *and*
+            // `tracing`, which is usually a terminal — so an ESC here writes
+            // the operator's screen rather than the record of what happened.
+            c if c.is_control() => ' ',
+            '\u{85}' | '\u{2028}' | '\u{2029}' => ' ',
+            // C1: U+009B is an eight-bit CSI.
+            c if ('\u{80}'..='\u{9f}').contains(&c) => ' ',
             other => other,
         })
         .collect()
@@ -143,7 +150,34 @@ fn open_append(path: &str) -> std::io::Result<File> {
             std::fs::create_dir_all(parent)?;
         }
     }
-    OpenOptions::new().create(true).append(true).open(path)
+    let mut opts = OpenOptions::new();
+    opts.create(true).append(true);
+    // 0600, like the nick database. This file records who connected from
+    // where, which callsigns they claimed and every OPER attempt; it is the
+    // licensee's record of what their station did, and it was being created
+    // at whatever the umask happened to be.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let file = opts.open(path)?;
+    // `mode` only applies when the file is created, so an existing log keeps
+    // whatever it has: tighten it, but do not fail the open over it — losing
+    // the audit trail is worse than a permissive one, and the operator may
+    // have set the mode deliberately.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = file.metadata() {
+            let mut perms = meta.permissions();
+            if perms.mode() & 0o077 != 0 {
+                perms.set_mode(0o600);
+                let _ = file.set_permissions(perms);
+            }
+        }
+    }
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -167,6 +201,47 @@ mod tests {
         assert!(!line.contains('\r'), "{line:?}");
         assert!(!line.contains('\u{2028}'), "{line:?}");
         assert!(line.contains("foo bar baz"), "{line:?}");
+    }
+
+    /// KICK and KILL reasons are user text and go to this file *and* to
+    /// `tracing`, which is usually the operator's terminal.
+    #[test]
+    fn control_characters_never_reach_the_record() {
+        let line = format_event(
+            1,
+            "kill",
+            &[
+                ("reason", "spam\u{1b}]0;pwned\u{7}\u{1b}[2J"),
+                ("nick", "alice"),
+            ],
+        );
+        assert!(
+            !line.chars().any(|c| c.is_control()),
+            "a control character survived into the audit line: {line:?}"
+        );
+        assert!(line.contains("spam"), "{line:?}");
+        assert!(line.contains("nick=alice"), "{line:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_audit_log_is_mode_600() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "ax25ircd-audit-mode-{}.log",
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let name = path.to_string_lossy().to_string();
+        {
+            let a = Audit::open(Some(&name));
+            a.event("oper", &[("nick", "alice")]);
+        }
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "audit log was {mode:o}");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]

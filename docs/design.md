@@ -196,6 +196,57 @@ the machine is listen-only.
 * RF stations are not IRC accounts. Their identity is the AX.25 source
   address; `allow_callsigns` / `deny_callsigns` are the gate.
 
+### 4.1 What an unauthenticated callsign costs
+
+"Identity is a claim" has a consequence worth stating outright, because it is
+easy to build a limit that does not limit anything: **every per-station rate
+limit on the RF side is keyed on a name the sender chooses.** A flood that
+invents a new plausible callsign for each frame gets a brand-new token bucket
+every time, so `rf_msgs_per_min` bounds one polite station and nothing else.
+
+Three things used to follow from that, and each is now bounded:
+
+* Each new callsign took a slot in the session table, which is capped at
+  `radio.max_peers`. A few hundred forged names filled it, and because a full
+  table refuses *new* peers — deliberately, so a flood cannot evict a station
+  in the middle of a QSO — every real station was locked out until the entries
+  aged out at `peer_idle_timeout_secs`.
+* On the APRS path an unknown station that sends a message with a `{msgid}` is
+  *answered*, because a stock radio retries until it hears an ack. A received
+  frame therefore bought a transmission, made under the gateway licensee's
+  callsign, addressed to a station that does not exist.
+* `QUIT` and `PART` from the air went through no rate limit at all, and a
+  forged `QUIT` removes a station's IRC presence for the cost of one
+  unacknowledged broadcast.
+
+The fix is a single unkeyed budget: the *first* frame from a callsign the
+gateway has not heard before is rationed against one bucket shared by every
+unknown station, so an unbounded supply of names no longer buys an unbounded
+supply of resources. An established contact never touches it.
+
+It authenticates nothing — nothing on this side can. A station that transmits
+continuously can still crowd out new arrivals for as long as it transmits;
+that is jamming, and no software limit answers it. What the budget changes is
+that the damage is proportional to the flood and ends when the flood does,
+instead of leaving a full table behind for half an hour.
+
+The airtime governor is the backstop under all of this: whatever provokes a
+transmission, the duty cycle, the continuous-run limit and the hourly budget
+still decide whether it is keyed. See [airtime.md](airtime.md).
+
+### 4.2 Text from the air is not text you can print
+
+An AIRC field is `String::from_utf8_lossy` of whatever arrived. The encoder
+strips the field separator and CR/LF/NUL, but that is the *sender's*
+courtesy — a hostile sender writes the payload itself. Anything that renders
+RF-sourced text on a terminal must filter it first
+(`policy::strip_terminal_controls`), or a station within earshot can set the
+window title, clear the screen, or on a terminal that answers back, put its
+own text on the operator's shell prompt. The gateway sanitises before text
+reaches IRC; `ax25irc-station` filters everything it prints, including the
+lines it composed itself, because filtering at the one exit is what keeps it
+true of paths added later.
+
 Commands, flags, and what survives a restart: [usage.md](usage.md).
 
 A typical club setup: internet users join `#rf` to follow the QSO; only the

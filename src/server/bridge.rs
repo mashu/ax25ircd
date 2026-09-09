@@ -36,11 +36,16 @@ impl Server {
         if frame.destination.call.to_string() == "ID" {
             if let Ok(airc) = AircFrame::decode(&frame.info) {
                 if airc.kind == Kind::Id {
+                    // Sanitised, not raw: this runs before the source is
+                    // checked for being a plausible callsign or a permitted
+                    // one, so the text is from anybody within earshot, and
+                    // `rf::monitor` is exactly the target an operator turns
+                    // on to watch the frequency from a terminal.
                     info!(
                         target: "rf::monitor",
                         %src,
                         "identification: {}",
-                        airc.fields().join(" ")
+                        sanitize(&airc.fields().join(" "))
                     );
                 }
             }
@@ -112,6 +117,13 @@ impl Server {
             debug!(%src, "station not permitted, ignoring");
             return;
         }
+        // A callsign we have never heard is the one an attacker invents. Its
+        // per-station bucket is empty of history and its session slot is not
+        // yet taken, so both are free to it; this bucket is not.
+        if self.radio.sessions.peer(&src).is_none() && !self.policy.first_contact_ok(now) {
+            debug!(%src, "first-contact budget spent, ignoring an unknown station");
+            return;
+        }
 
         let outcome = self.radio.sessions.on_receive(&src, airc, now, for_us);
         for f in outcome.transmit {
@@ -170,6 +182,14 @@ impl Server {
             if let Some(peer) = self.radio.sessions.peer_mut(src) {
                 peer.dropped += 1;
             }
+            return;
+        }
+        // Answering an unknown station is a transmission bought with a
+        // received frame, so the first frame from a new callsign is rationed
+        // globally — otherwise a flood of forged callsigns converts directly
+        // into the licensee's airtime, one ACK at a time.
+        if self.radio.sessions.peer(src).is_none() && !self.policy.first_contact_ok(now) {
+            debug!(%src, "first-contact budget spent, ignoring an unknown APRS station");
             return;
         }
         if self.radio.sessions.touch(src, now).is_none() {
@@ -404,6 +424,9 @@ impl Server {
                 self.rf_join(src, &channel, true);
             }
             Kind::Part => {
+                if !self.rf_ctrl_ok(src, now) {
+                    return;
+                }
                 let Some(channel) = fields.first().cloned() else {
                     return;
                 };
@@ -418,6 +441,12 @@ impl Server {
                 }
             }
             Kind::Quit => {
+                // Rate-limited like every other control frame. It was not,
+                // and a QUIT is the cheapest frame there is to forge: one
+                // unacknowledged broadcast removes a station from IRC.
+                if !self.rf_ctrl_ok(src, now) {
+                    return;
+                }
                 let uid = UserId::Rf(src.clone());
                 let reason = crate::policy::sanitize(
                     &fields

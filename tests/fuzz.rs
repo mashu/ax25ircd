@@ -89,6 +89,103 @@ fn aprs_decoding_survives_arbitrary_bytes() {
     }
 }
 
+/// A field of exactly `len` bytes drawn from `alphabet`, padded with ASCII
+/// when the next character would overshoot the width.
+fn field_of(rng: &mut Rng, alphabet: &[char], len: usize) -> String {
+    let mut s = String::new();
+    while s.len() < len {
+        let c = alphabet[rng.below(alphabet.len())];
+        if s.len() + c.len_utf8() <= len {
+            s.push(c);
+        } else {
+            s.push('x');
+        }
+    }
+    s
+}
+
+/// Uniform random bytes never reach the interesting arms.
+///
+/// `decode_uncompressed` is only entered by an information field shaped
+/// `!ddmm.ddN/`, which random generation produces with probability around
+/// 1e-12 — so a panic living behind that prefix survived 200k iterations of
+/// the sweep above indefinitely. This builds the skeleton and randomises only
+/// the fields inside it, which is where parsers actually go wrong.
+#[test]
+fn aprs_decoding_survives_well_formed_skeletons() {
+    // Characters chosen to straddle the byte offsets the coordinate
+    // formatter slices at: a coordinate field is nine octets, and only the
+    // latitude is validated, so multi-byte characters land mid-slice.
+    // `E`/`W` and `N`/`S` matter: the coordinate formatter is only reached by
+    // a field that ends in a hemisphere letter, so an alphabet without them
+    // reproduces the blind spot this test exists to close.
+    const FILL: &[char] = &[
+        'E',
+        'W',
+        'N',
+        'S',
+        'A',
+        '0',
+        '9',
+        '.',
+        ' ',
+        '-',
+        '\u{e9}',
+        '\u{4e2d}',
+        '\u{10348}',
+        '\u{7f}',
+    ];
+    let mut rng = Rng::new(0x5DEECE66D);
+    let dest: Callsign = "APRS".parse().unwrap();
+    for _ in 0..100_000 {
+        // Drawn before the match so the generator never borrows `rng`
+        // twice in one call.
+        let tail = rng.below(24);
+        let idlen = rng.below(6);
+        let mut info: Vec<u8> = Vec::new();
+        match rng.below(6) {
+            // Uncompressed position: `!` lat(8) sym lon(9) comment.
+            0 | 1 => {
+                info.push(*[b'!', b'=', b'/', b'@'].get(rng.below(4)).unwrap());
+                info.extend_from_slice(field_of(&mut rng, FILL, 8).as_bytes());
+                info.push(if rng.below(2) == 0 { b'/' } else { b'\\' });
+                info.extend_from_slice(field_of(&mut rng, FILL, 9).as_bytes());
+                info.extend_from_slice(field_of(&mut rng, FILL, tail).as_bytes());
+            }
+            // The same, but with the latitude that passes `uncompressed_lat`,
+            // so the longitude path is always reached.
+            2 | 3 => {
+                info.push(b'!');
+                info.extend_from_slice(b"5930.00N");
+                info.push(b'/');
+                info.extend_from_slice(field_of(&mut rng, FILL, 9).as_bytes());
+                info.extend_from_slice(field_of(&mut rng, FILL, tail).as_bytes());
+            }
+            // Status, compressed position, Mic-E.
+            4 => {
+                info.push(*[b'>', b'_', b'`', b'\''].get(rng.below(4)).unwrap());
+                info.extend_from_slice(field_of(&mut rng, FILL, tail).as_bytes());
+            }
+            // Addressed message: `:ADDRESSEE:text{id`.
+            _ => {
+                info.push(b':');
+                info.extend_from_slice(field_of(&mut rng, FILL, 9).as_bytes());
+                info.push(b':');
+                info.extend_from_slice(field_of(&mut rng, FILL, tail).as_bytes());
+                if rng.below(2) == 0 {
+                    info.push(b'{');
+                    info.extend_from_slice(field_of(&mut rng, FILL, idlen).as_bytes());
+                }
+            }
+        }
+        // The contract is the same as the random sweep: return, never panic.
+        let _ = AprsBeacon::decode(&info);
+        let _ = AprsMessage::decode(&info);
+        let _ = ax25ircd::aprs::decode_beacon(&dest, &info);
+        let _ = ax25ircd::aprs::decode_mice_frame("593P00", &info);
+    }
+}
+
 #[test]
 fn ax25_round_trips_for_every_well_formed_frame() {
     let mut rng = Rng::new(12345);
