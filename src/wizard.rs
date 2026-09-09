@@ -26,7 +26,7 @@
 //! the same reason [`crate::station`] collects its output instead of printing
 //! it.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use crate::callsign::Callsign;
@@ -92,6 +92,15 @@ pub struct Defaults {
     pub server_name: String,
     /// Where generated certificates go, normally beside the config file.
     pub conf_dir: PathBuf,
+    /// The reader really is this process's terminal, so turning echo off for
+    /// the password is both possible and ours to do.
+    ///
+    /// It has to be told rather than detected: `stty` acts on the process's
+    /// stdin whatever the interview is actually reading from, so a caller
+    /// reading a scripted `Cursor` would otherwise disable echo on whatever
+    /// terminal happened to be attached — under `cargo test`, the developer's
+    /// shell.
+    pub terminal: bool,
 }
 
 impl Defaults {
@@ -104,6 +113,7 @@ impl Defaults {
         Self {
             server_name: default_server_name(),
             conf_dir,
+            terminal: std::io::stdin().is_terminal(),
         }
     }
 }
@@ -222,8 +232,9 @@ fn read_password<R: BufRead, W: Write>(
     inp: &mut R,
     out: &mut W,
     prompt: &str,
+    terminal: bool,
 ) -> anyhow::Result<String> {
-    let guard = EchoOff::new();
+    let guard = EchoOff::new(terminal);
     if !guard.active {
         writeln!(out, "  (cannot turn off echo here — this will be visible)")?;
     }
@@ -248,9 +259,9 @@ struct EchoOff {
 }
 
 impl EchoOff {
-    fn new() -> Self {
+    fn new(terminal: bool) -> Self {
         Self {
-            active: set_echo(false),
+            active: terminal && set_echo(false),
         }
     }
 }
@@ -324,7 +335,7 @@ pub fn interview<R: BufRead, W: Write>(
     // ------------------------------------------------------------- oper
     writeln!(out)?;
     let oper = if ask_yes_no(inp, out, "Create a control-operator account (OPER)?", true)? {
-        Some(ask_oper(inp, out, &tls, &plain_bind)?)
+        Some(ask_oper(inp, out, &tls, &plain_bind, defaults.terminal)?)
     } else {
         None
     };
@@ -467,18 +478,19 @@ fn ask_oper<R: BufRead, W: Write>(
     out: &mut W,
     tls: &Option<TlsAnswers>,
     plain_bind: &str,
+    terminal: bool,
 ) -> anyhow::Result<OperAnswers> {
     let name = ask(inp, out, "  Operator name", "root")?;
     // A plaintext OPER password is only accepted by `Config::validate` when
     // the listener is loopback-only, and hashing is better anyway — so the
     // wizard always hashes and never offers the alternative.
     let hash = loop {
-        let password = read_password(inp, out, "  Operator password")?;
+        let password = read_password(inp, out, "  Operator password", terminal)?;
         if password.chars().count() < 8 {
             writeln!(out, "  at least 8 characters")?;
             continue;
         }
-        let again = read_password(inp, out, "  Again")?;
+        let again = read_password(inp, out, "  Again", terminal)?;
         if password != again {
             writeln!(out, "  they did not match")?;
             continue;
@@ -788,6 +800,8 @@ mod tests {
         let defaults = Defaults {
             server_name: "test.local".into(),
             conf_dir: PathBuf::from("/etc/ax25ircd"),
+            // Never true in a test: `stty` would act on the real terminal.
+            terminal: false,
         };
         interview(&mut inp, &mut out, &defaults)
     }
@@ -876,6 +890,7 @@ mod tests {
         let defaults = Defaults {
             server_name: "gw.example".into(),
             conf_dir: dir.clone(),
+            terminal: false,
         };
         // server, network, bind, radio? n, tls -> 1 (generate), tls bind, oper? n
         let script = "\n\n\nn\n1\n0.0.0.0:6697\nn\n";
@@ -907,6 +922,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The operator password is retried until it is long enough and typed
+    /// twice the same, never lands in `Answers` as plaintext, and reaches the
+    /// file only as a PHC string that `is_phc_hash` recognises — which is
+    /// what `Config::validate` uses to decide a password is not plaintext.
+    #[test]
+    fn the_operator_password_is_hashed_and_confirmed() {
+        // radio n, tls none, oper y, name, short password (rejected),
+        // mismatched pair (rejected), then a matching pair.
+        let script = "\n\n\nn\n3\ny\nsysop\nshort\nshort\nlongenough1\ndifferent2\nlongenough1\nlongenough1\n";
+        let a = answers_from(script).expect("interview");
+        let oper = a.oper.as_ref().expect("oper created");
+        assert_eq!(oper.name, "sysop");
+        assert!(
+            crate::accounts::is_phc_hash(&oper.password_hash),
+            "not a PHC string: {}",
+            oper.password_hash
+        );
+        assert!(
+            !oper.password_hash.contains("longenough1"),
+            "the plaintext survived into the hash field"
+        );
+
+        let text = render(&a);
+        assert!(!text.contains("longenough1"), "plaintext reached the file");
+        let config = Config::from_toml(&text).expect("must validate");
+        assert_eq!(config.opers.len(), 1);
+        assert_eq!(config.opers[0].name, "sysop");
+        // Hashed, so it is accepted on a non-loopback listener too — the
+        // check the wizard exists to make unnecessary to think about.
+        assert!(crate::accounts::is_phc_hash(&config.opers[0].password));
+    }
+
     /// An interview that never finishes must not leave a certificate, a key
     /// or a half-written config behind.
     #[test]
@@ -916,6 +963,7 @@ mod tests {
         let defaults = Defaults {
             server_name: "gw.example".into(),
             conf_dir: dir.clone(),
+            terminal: false,
         };
         // Input ends at the callsign, which has no default.
         let mut inp = std::io::Cursor::new(b"\n\n\ny\n".to_vec());
