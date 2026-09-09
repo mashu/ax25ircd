@@ -23,6 +23,25 @@ const ARGON2_MAX_IN_FLIGHT: usize = 2;
 
 static ARGON2_SLOTS: Semaphore = Semaphore::const_new(ARGON2_MAX_IN_FLIGHT);
 
+/// A slot `OPER` may use that ordinary account work may not.
+///
+/// The cap above is process-wide and was shared by IDENTIFY, REGISTER and
+/// OPER alike, so enough sources each staying under `identify_per_min` could
+/// keep both slots busy indefinitely — and the one person who needs to get in
+/// when that is happening is the control operator, to KLINE the source or
+/// stop the transmitter. Reserving a slot for them costs 19 MiB and makes
+/// `OPER` independent of how much unauthenticated hashing is queued.
+static ARGON2_OPER_SLOT: Semaphore = Semaphore::const_new(1);
+
+/// Which queue a password job waits in.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum WorkClass {
+    /// REGISTER, IDENTIFY, UNREGISTER: anyone with a socket can ask.
+    Account,
+    /// OPER: transmitter control, and the way out of a flood.
+    Oper,
+}
+
 /// Dummy PHC used when `OPER` names a miss so a hashed `[[opers]]` name is
 /// not distinguishable from an unknown name by Argon2 latency. Verification
 /// of this string is discarded; the caller always reports a mismatch.
@@ -369,15 +388,30 @@ impl Accounts {
 }
 
 /// Hold a global Argon2 slot, then run `work` on the blocking pool.
-pub async fn run_password_work<F, T>(work: F) -> Result<T, AccountError>
+///
+/// `Oper` waits on its own reserved slot first and only falls back to the
+/// shared pool if another OPER is already using it, so an operator is never
+/// queued behind unauthenticated IDENTIFY traffic.
+pub async fn run_password_work<F, T>(class: WorkClass, work: F) -> Result<T, AccountError>
 where
     F: FnOnce() -> Result<T, AccountError> + Send + 'static,
     T: Send + 'static,
 {
-    let _permit = ARGON2_SLOTS
-        .acquire()
-        .await
-        .map_err(|_| AccountError::Hash)?;
+    // Both semaphores are statics, so a permit from either has the same
+    // type and the same job: stay alive until the hash is done.
+    let _permit = match class {
+        WorkClass::Oper => match ARGON2_OPER_SLOT.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => ARGON2_SLOTS
+                .acquire()
+                .await
+                .map_err(|_| AccountError::Hash)?,
+        },
+        WorkClass::Account => ARGON2_SLOTS
+            .acquire()
+            .await
+            .map_err(|_| AccountError::Hash)?,
+    };
     tokio::task::spawn_blocking(work)
         .await
         .unwrap_or(Err(AccountError::Hash))
@@ -429,6 +463,18 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), AccountError> {
         let _ = e;
         AccountError::Io
     })?;
+    // The contents were synced before the rename, but the rename itself lives
+    // in the directory, and that entry is not durable until the directory is
+    // synced too — so a crash here could leave the old file with the new one
+    // never having replaced it. Best-effort: some filesystems refuse to sync
+    // a directory handle, and failing the write over that would be worse than
+    // the window it closes.
+    #[cfg(unix)]
+    {
+        if let Ok(dir) = std::fs::File::open(&parent) {
+            let _ = dir.sync_all();
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

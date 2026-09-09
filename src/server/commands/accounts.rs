@@ -131,9 +131,16 @@ impl Server {
         let UserId::Ip(id) = *uid else {
             return;
         };
+        // OPER waits in its own queue: it is the way a control operator gets
+        // in *while* the shared one is full of unauthenticated IDENTIFY.
+        let class = if kind == AuthKind::Oper {
+            crate::accounts::WorkClass::Oper
+        } else {
+            crate::accounts::WorkClass::Account
+        };
         if let Some(tx) = self.events.clone() {
             tokio::spawn(async move {
-                let outcome = crate::accounts::run_password_work(work).await;
+                let outcome = crate::accounts::run_password_work(class, work).await;
                 let (result, password_hash) = match outcome {
                     Ok(hash) => (Ok(()), hash),
                     Err(e) => (Err(e), None),

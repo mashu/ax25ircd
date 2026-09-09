@@ -276,7 +276,11 @@ pub fn sanitize(text: &str) -> String {
                     out.push(' ');
                 }
             }
+            // C0 that is not whitespace, DEL, and the C1 block — U+009B is
+            // an eight-bit CSI, and none of the rest mean anything to a
+            // human with a TNC and a terminal, which is the audience.
             c if (c as u32) < 0x20 => {}
+            '\u{7f}'..='\u{9f}' => {}
             ' ' => {
                 if !out.ends_with(' ') {
                     out.push(' ');

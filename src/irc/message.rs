@@ -216,10 +216,13 @@ pub fn is_channel_name(s: &str) -> bool {
         && s.len() <= 50
         && !s.contains(' ')
         && !s.contains(',')
-        && !s.contains('\x07')
-        && !s.contains('\r')
-        && !s.contains('\n')
-        && !s.contains('\0')
+        // No control characters at all, rather than the four that RFC 2812
+        // happens to name. A channel name is echoed to every client in JOIN,
+        // NAMES, LIST and every numeric that mentions it, and the middle
+        // parameter scrub only removes what could end the line — so `#\x1b[2J`
+        // was a legal name and reached each of them intact. C1 goes with C0:
+        // U+009B is an eight-bit CSI that some terminals still honour.
+        && !s.chars().any(|c| c.is_control() || ('\u{80}'..='\u{9f}').contains(&c))
 }
 
 /// Nick rules, extended to allow the `|` we use for SSIDs (already legal in
@@ -362,6 +365,28 @@ mod tests {
             !line.contains('\r') && !line.contains('\n'),
             "serialising must not carry it back out: {line:?}"
         );
+    }
+
+    /// A channel name is echoed to every client in JOIN, NAMES, LIST and
+    /// every numeric that mentions it, and the middle-parameter scrub only
+    /// removes what could end the line — so a name carrying an escape
+    /// sequence reached all of them intact.
+    #[test]
+    fn a_channel_name_may_not_carry_control_characters() {
+        for bad in [
+            "#\u{1b}[2J",
+            "#bell\u{7}",
+            "#del\u{7f}",
+            "#csi\u{9b}",
+            "#tab\there",
+            "#\u{0}",
+        ] {
+            assert!(!is_channel_name(bad), "{bad:?} was accepted");
+        }
+        // Ordinary names, including non-ASCII ones, are untouched.
+        for good in ["#rf", "&local", "#hams-se", "#\u{e5}\u{e4}\u{f6}"] {
+            assert!(is_channel_name(good), "{good:?} was refused");
+        }
     }
 
     #[test]
