@@ -84,12 +84,33 @@ if [ -d "$HERE/share/doc" ]; then
 fi
 
 CONFFILE="$CONFDIR/ax25ircd.toml"
+if [ -f "$CONFFILE" ]; then
+    echo "kept existing config: $CONFFILE"
+elif [ -t 0 ] && [ -t 1 ]; then
+    # Interactive and nothing to lose: offer the wizard. It asks the handful
+    # of things that cannot be guessed and can generate a TLS certificate.
+    # Declining falls through to the example, which is what happened before
+    # the wizard existed and is still a fine place to start.
+    echo
+    printf 'No configuration yet. Answer a few questions to create one? [Y/n] '
+    read -r reply || reply=n
+    case "$reply" in
+        [Nn]*) ;;
+        *)
+            if "$BINDIR/ax25ircd" --init -c "$CONFFILE"; then
+                CONFIGURED=1
+            else
+                echo "setup did not finish; falling back to the example config" >&2
+            fi
+            ;;
+    esac
+fi
+
 if [ ! -f "$CONFFILE" ]; then
     install -m 0644 "$HERE/share/ax25ircd.example.toml" "$CONFFILE"
     echo "wrote starter config: $CONFFILE"
     echo "edit radio.callsign (your callsign) before enabling radio.enabled"
-else
-    echo "kept existing config: $CONFFILE"
+    echo "or run: $BINDIR/ax25ircd --init -c $CONFFILE   (after moving it aside)"
 fi
 
 if [ "$SYSTEM" -eq 1 ]; then
@@ -125,5 +146,7 @@ echo "  $BINDIR/ax25ircd"
 echo "  $BINDIR/ax25irc-station"
 echo "  $BINDIR/ax25irc-kisshub"
 echo
-echo "next:  ax25ircd --check -c $CONFFILE"
+if [ "${CONFIGURED:-0}" -eq 0 ]; then
+    echo "next:  ax25ircd --check -c $CONFFILE"
+fi
 echo "guide: https://mashu.github.io/ax25ircd/"

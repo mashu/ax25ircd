@@ -53,6 +53,7 @@ pub mod kisshub;
 pub mod policy;
 pub mod server;
 pub mod station;
+pub mod wizard;
 
 pub use callsign::Callsign;
 pub use config::Config;

@@ -29,6 +29,10 @@ pub enum Invocation {
     Check {
         path: String,
     },
+    /// Ask the questions that cannot be guessed and write a configuration.
+    Init {
+        path: String,
+    },
     HashPassword,
     Version(String),
     Help(String),
@@ -47,10 +51,13 @@ pub fn help() -> String {
         "\
 ax25ircd {} — IRC server with an AX.25 packet-radio gateway
 
-Usage: ax25ircd [--config path] [--check] [--hash-password]
+Usage: ax25ircd [--config path] [--check] [--init] [--hash-password]
 
   -c, --config <path>   configuration file (default: {DEFAULT_CONFIG})
       --check           validate the configuration and exit
+      --init            ask a few questions and write a starter configuration,
+                        generating a TLS certificate if you want one. Refuses
+                        to replace a file that already exists.
       --hash-password   read a password from stdin and print an Argon2id hash
                         (for [[opers]] when the listener is not loopback)
   -V, --version         print version
@@ -65,6 +72,7 @@ QMX on Debian: https://mashu.github.io/ax25ircd/
 pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Invocation {
     let mut path = DEFAULT_CONFIG.to_string();
     let mut check_only = false;
+    let mut init = false;
     let mut args = argv.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -73,16 +81,19 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Invocation {
                 None => return Invocation::Usage("--config needs a path".into()),
             },
             "--check" => check_only = true,
+            "--init" => init = true,
             "--hash-password" => return Invocation::HashPassword,
             "--version" | "-V" => return Invocation::Version(version()),
             "--help" | "-h" => return Invocation::Help(help()),
             other => return Invocation::Usage(format!("unknown argument: {other}")),
         }
     }
-    if check_only {
-        Invocation::Check { path }
-    } else {
-        Invocation::Run { path }
+    match (init, check_only) {
+        // `--init --check` is a contradiction: there is nothing to check yet.
+        // Treat it as the setup the operator clearly meant to run.
+        (true, _) => Invocation::Init { path },
+        (false, true) => Invocation::Check { path },
+        (false, false) => Invocation::Run { path },
     }
 }
 
@@ -305,6 +316,30 @@ mod tests {
         assert!(
             matches!(parse_args(args(&["--config"])), Invocation::Usage(_)),
             "a missing path must be an error, not a silent fall back to the default"
+        );
+    }
+
+    #[test]
+    fn init_takes_the_config_path_and_outranks_check() {
+        assert_eq!(
+            parse_args(args(&["--init"])),
+            Invocation::Init {
+                path: DEFAULT_CONFIG.into()
+            }
+        );
+        assert_eq!(
+            parse_args(args(&["--init", "-c", "/etc/ax25ircd/ax25ircd.toml"])),
+            Invocation::Init {
+                path: "/etc/ax25ircd/ax25ircd.toml".into()
+            }
+        );
+        // There is nothing to check before the file exists, so the pair is
+        // the setup run rather than an error or a silent no-op.
+        assert_eq!(
+            parse_args(args(&["--check", "--init", "-c", "a.toml"])),
+            Invocation::Init {
+                path: "a.toml".into()
+            }
         );
     }
 
